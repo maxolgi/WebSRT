@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gateway",
+    "crates/srt-wasm",
+    "crates/mpeg2ts-wasm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[workspace.dependencies]
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+sha2 = "0.10"
+hex = "0.4"
+srt-protocol = "0.4.4"
+srt-tokio = "0.4.4"
+mpeg2ts = "0.6.0"
+wtransport = { version = "0.7", features = ["self-signed"] }
+rcgen = "0.14"
+rand = "0.8"
+anyhow = "1"
+futures = "0.3"
+url = "2"
+time = "0.3"
+async-trait = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+[patch.crates-io]
+srt-protocol = { path = "vendor/srt-protocol" }
+mpeg2ts = { path = "vendor/mpeg2ts" }

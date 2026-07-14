@@ -1,0 +1,22 @@
+/target
+**/target
+**/*.rs.bk
+Cargo.lock
+
+# wasm-pack output
+**/pkg/
+
+# node
+web/node_modules/
+web/dist/
+
+# certs (mkcert mode)
+certs/*.pem
+certs/*.crt
+certs/*.key
+
+# runtime-generated cert hash (written by gateway on boot)
+web/public/cert-hash.js
+
+# fixtures can be large; keep make-fixture.sh, gitignore the .ts
+# (test.ts committed per plan, so don't ignore it)

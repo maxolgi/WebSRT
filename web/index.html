@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>srtsocket</title>
+    <style>
+      body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #111; color: #ddd; margin: 1.5rem; }
+      h1 { font-size: 1.1rem; }
+      #log { white-space: pre-wrap; font-size: 12px; max-height: 30vh; overflow: auto; }
+      video, canvas { background: #000; display: block; margin-top: 8px; }
+      #video-canvas { width: 100%; height: auto; }
+      .ok { color: #6f6; }
+      .err { color: #f66; }
+      .info { color: #6cf; }
+      input, button { font: inherit; padding: 4px; }
+      .video-row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+    </style>
+  </head>
+  <body>
+    <div class="video-row">
+      <canvas id="video-canvas" width="640" height="360"></canvas>
+      <div>
+        <button id="connect">connect</button>
+        <label>latency: <input type="number" id="latency-num" min="20" max="8000" step="10" value="300" />ms <input type="range" id="latency" min="20" max="8000" step="10" value="300" /></label>
+        <button id="mute" disabled>muted</button>
+        <p id="status">idle</p>
+        <pre id="stats"></pre>
+      </div>
+    </div>
+    <pre id="log"></pre>
+    <script src="/cert-hash.js"></script>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

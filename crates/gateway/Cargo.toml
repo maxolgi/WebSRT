@@ -1,0 +1,40 @@
+[package]
+name = "gateway"
+version.workspace = true
+edition.workspace = true
+default-run = "gateway"
+
+[[bin]]
+name = "gateway"
+path = "src/main.rs"
+
+[[bin]]
+name = "wt_echo_client"
+path = "src/bin/wt_echo_client.rs"
+
+[[bin]]
+name = "wt_hs_probe"
+path = "src/bin/wt_hs_probe.rs"
+
+[[bin]]
+name = "mock_obs"
+path = "src/bin/mock_obs.rs"
+
+[dependencies]
+bytes.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
+clap.workspace = true
+sha2.workspace = true
+hex.workspace = true
+srt-protocol.workspace = true
+srt-tokio.workspace = true
+wtransport = { workspace = true }
+rcgen.workspace = true
+rand.workspace = true
+anyhow.workspace = true
+futures.workspace = true
+url.workspace = true
+time.workspace = true
+async-trait.workspace = true

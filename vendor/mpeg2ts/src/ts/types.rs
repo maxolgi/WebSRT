@@ -1,0 +1,433 @@
+use crate::Result;
+use crate::time::Timestamp;
+use crate::ts::TsPacket;
+use crate::util::{ReadBytesExt, WriteBytesExt};
+use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::io::{Read, Write};
+use std::ops::Deref;
+
+/// Packet Identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Pid(u16);
+impl Pid {
+    /// Maximum PID value.
+    pub const MAX: u16 = (1 << 13) - 1;
+
+    /// PID of the Program Association Table (PAT) packet.
+    pub const PAT: u16 = 0;
+
+    /// PID of the null packet.
+    pub const NULL: u16 = 0x1FFF;
+
+    /// Makes a new `Pid` instance.
+    ///
+    /// # Errors
+    ///
+    /// If `pid` exceeds `Pid::MAX`, it will return an `ErrorKind::InvalidInput` error.
+    pub fn new(pid: u16) -> Result<Self> {
+        if pid > Self::MAX {
+            return Err(crate::Error::invalid_input(format!(
+                "Too large PID: {}",
+                pid
+            )));
+        }
+        Ok(Pid(pid))
+    }
+
+    /// Returns the value of the `Pid`.
+    pub fn as_u16(&self) -> u16 {
+        self.0
+    }
+
+    pub(super) fn read_from<R: Read>(mut reader: R) -> Result<Self> {
+        let n = reader.read_u16()?;
+        if (n & 0b1110_0000_0000_0000) != 0b1110_0000_0000_0000 {
+            return Err(crate::Error::invalid_input("Unexpected reserved bits"));
+        }
+        Ok(Pid(n & 0b0001_1111_1111_1111))
+    }
+
+    pub(super) fn write_to<W: Write>(&self, mut writer: W) -> Result<()> {
+        let n = 0b1110_0000_0000_0000 | self.0;
+        writer.write_u16(n)?;
+        Ok(())
+    }
+}
+impl From<u8> for Pid {
+    fn from(f: u8) -> Self {
+        Pid(u16::from(f))
+    }
+}
+
+/// Continuity counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ContinuityCounter(u8);
+impl ContinuityCounter {
+    /// Maximum counter value.
+    pub const MAX: u8 = (1 << 4) - 1;
+
+    /// Makes a new `ContinuityCounter` instance that has the value `0`.
+    pub fn new() -> Self {
+        ContinuityCounter(0)
+    }
+
+    /// Makes a new `ContinuityCounter` instance with the given value.
+    ///
+    /// # Errors
+    ///
+    /// If `n` exceeds `ContinuityCounter::MAX`, it will return an `ErrorKind::InvalidInput` error.
+    pub fn from_u8(n: u8) -> Result<Self> {
+        if n > Self::MAX {
+            return Err(crate::Error::invalid_input(format!(
+                "Too large counter: {}",
+                n
+            )));
+        }
+        Ok(ContinuityCounter(n))
+    }
+
+    /// Returns the value of the counter.
+    pub fn as_u8(&self) -> u8 {
+        self.0
+    }
+
+    /// Increments the counter.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpeg2ts::ts::ContinuityCounter;
+    ///
+    /// let mut c = ContinuityCounter::new();
+    /// assert_eq!(c.as_u8(), 0);
+    ///
+    /// for _ in 0..5 { c.increment(); }
+    /// assert_eq!(c.as_u8(), 5);
+    ///
+    /// for _ in 0..11 { c.increment(); }
+    /// assert_eq!(c.as_u8(), 0);
+    /// ```
+    pub fn increment(&mut self) {
+        self.0 = (self.0 + 1) & Self::MAX;
+    }
+}
+impl Default for ContinuityCounter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Version number for PSI table syntax section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct VersionNumber(u8);
+impl VersionNumber {
+    /// Maximum version number.
+    pub const MAX: u8 = (1 << 5) - 1;
+
+    /// Makes a new `VersionNumber` instance that has the value `0`.
+    pub fn new() -> Self {
+        VersionNumber(0)
+    }
+
+    /// Makes a new `VersionNumber` instance with the given value.
+    ///
+    /// # Errors
+    ///
+    /// If `n` exceeds `VersionNumber::MAX`, it will return an `ErrorKind::InvalidInput` error.
+    pub fn from_u8(n: u8) -> Result<Self> {
+        if n > Self::MAX {
+            return Err(crate::Error::invalid_input(format!(
+                "Too large version number: {}",
+                n
+            )));
+        }
+        Ok(VersionNumber(n))
+    }
+
+    /// Returns the value of the version number.
+    pub fn as_u8(&self) -> u8 {
+        self.0
+    }
+
+    /// Increments the version number.
+    ///
+    /// It will be wrapped around if overflow.
+    pub fn increment(&mut self) {
+        self.0 = (self.0 + 1) & Self::MAX;
+    }
+}
+impl Default for VersionNumber {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Byte sequence used to represent packet payload data.
+#[derive(Clone)]
+pub struct Bytes {
+    buf: [u8; Bytes::MAX_SIZE],
+    len: usize,
+}
+impl Bytes {
+    /// Maximum size of a byte sequence.
+    pub const MAX_SIZE: usize = TsPacket::SIZE - 4 /* the size of the sync byte and a header */;
+
+    /// Makes a new `Bytes` instance.
+    ///
+    /// # Errors
+    ///
+    /// If the length of `bytes` exceeds `Bytes::MAX_SIZE`,
+    /// it will return an `ErrorKind::InvalidInput` error.
+    pub fn new(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > Self::MAX_SIZE {
+            return Err(crate::Error::invalid_input(format!(
+                "Too large: actual={} bytes, max={} bytes",
+                bytes.len(),
+                Self::MAX_SIZE
+            )));
+        }
+
+        let len = bytes.len();
+        let mut buf = [0; Self::MAX_SIZE];
+        buf[..len].copy_from_slice(bytes);
+        Ok(Bytes { buf, len })
+    }
+
+    pub(super) fn read_from<R: Read>(mut reader: R) -> Result<Self> {
+        let mut offset = 0;
+        let mut buf = [0; Self::MAX_SIZE];
+        loop {
+            let read_size = reader.read(&mut buf[offset..])?;
+            if read_size == 0 {
+                break;
+            }
+            offset += read_size;
+        }
+        Ok(Bytes { buf, len: offset })
+    }
+
+    pub(super) fn write_to<W: Write>(&self, mut writer: W) -> Result<()> {
+        writer.write_all(self.as_ref())?;
+        Ok(())
+    }
+}
+impl Deref for Bytes {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        &self.buf[..self.len]
+    }
+}
+impl AsRef<[u8]> for Bytes {
+    fn as_ref(&self) -> &[u8] {
+        self.deref()
+    }
+}
+impl fmt::Debug for Bytes {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Bytes({:?})", self.deref())
+    }
+}
+impl PartialEq for Bytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+impl Eq for Bytes {}
+impl Hash for Bytes {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        self.as_ref().hash(hasher);
+    }
+}
+
+/// Transport scrambling control.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransportScramblingControl {
+    NotScrambled = 0b00,
+    ScrambledWithEvenKey = 0b10,
+    ScrambledWithOddKey = 0b11,
+}
+impl TransportScramblingControl {
+    pub(super) fn from_u8(n: u8) -> Result<Self> {
+        Ok(match n {
+            0b00 => TransportScramblingControl::NotScrambled,
+            0b10 => TransportScramblingControl::ScrambledWithEvenKey,
+            0b11 => TransportScramblingControl::ScrambledWithOddKey,
+            0b01 => return Err(crate::Error::invalid_input("Reserved for future use")),
+            _ => {
+                return Err(crate::Error::invalid_input(format!(
+                    "Unexpected value: {}",
+                    n
+                )));
+            }
+        })
+    }
+}
+
+/// Legal time window.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LegalTimeWindow {
+    is_valid: bool,
+    offset: u16,
+}
+impl LegalTimeWindow {
+    /// Maximum offset value.
+    pub const MAX_OFFSET: u16 = (1 << 15) - 1;
+
+    /// Makes a new `LegalTimeWindow` instance.
+    ///
+    /// # Errors
+    ///
+    /// If `offset` exceeds `LegalTimeWindow::MAX_OFFSET`, it will return an `ErrorKind::InvalidInput` error.
+    pub fn new(is_valid: bool, offset: u16) -> Result<Self> {
+        if offset > Self::MAX_OFFSET {
+            return Err(crate::Error::invalid_input(format!(
+                "Too large offset: {}",
+                offset
+            )));
+        }
+        Ok(LegalTimeWindow { is_valid, offset })
+    }
+
+    /// Returns `true` if the window is valid, otherwise `false`.
+    pub fn is_valid(&self) -> bool {
+        self.is_valid
+    }
+
+    /// Returns the offset of the window.
+    pub fn offset(&self) -> u16 {
+        self.offset
+    }
+
+    pub(super) fn read_from<R: Read>(mut reader: R) -> Result<Self> {
+        let n = reader.read_u16()?;
+        Ok(LegalTimeWindow {
+            is_valid: (n & 0b1000_0000_0000_0000) != 0,
+            offset: n & 0b0111_1111_1111_1111,
+        })
+    }
+
+    pub(super) fn write_to<W: Write>(&self, mut writer: W) -> Result<()> {
+        let n = ((self.is_valid as u16) << 15) | self.offset;
+        writer.write_u16(n)?;
+        Ok(())
+    }
+}
+
+/// Piecewise rate.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PiecewiseRate(u32);
+impl PiecewiseRate {
+    /// Maximum rate.
+    pub const MAX: u32 = (1 << 22) - 1;
+
+    /// Makes a new `PiecewiseRate` instance.
+    ///
+    /// # Errors
+    ///
+    /// If `rate` exceeds `PiecewiseRate::MAX`, it will return an `ErrorKind::InvalidInput` error.
+    pub fn new(rate: u32) -> Result<Self> {
+        if rate > Self::MAX {
+            return Err(crate::Error::invalid_input(format!(
+                "Too large rate: {}",
+                rate
+            )));
+        }
+        Ok(PiecewiseRate(rate))
+    }
+
+    /// Returns the value of the `PiecewiseRate` instance.
+    pub fn as_u32(&self) -> u32 {
+        self.0
+    }
+
+    pub(super) fn read_from<R: Read>(mut reader: R) -> Result<Self> {
+        let n = reader.read_uint::<3>()? as u32;
+        Ok(PiecewiseRate(n & 0x3FFF_FFFF))
+    }
+
+    pub(super) fn write_to<W: Write>(&self, mut writer: W) -> Result<()> {
+        writer.write_uint::<3>(u64::from(self.0))?;
+        Ok(())
+    }
+}
+
+/// Seamless splice.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SeamlessSplice {
+    splice_type: u8,
+    dts_next_access_unit: Timestamp,
+}
+impl SeamlessSplice {
+    /// Maximum splice type value.
+    pub const MAX_SPLICE_TYPE: u8 = (1 << 4) - 1;
+
+    /// Makes a new `SeamlessSplice` instance.
+    ///
+    /// # Errors
+    ///
+    /// If `splice_type` exceeds `SeamlessSplice::MAX_SPLICE_TYPE`,
+    /// it will return an `ErrorKind::InvalidInput` error.
+    pub fn new(splice_type: u8, dts_next_access_unit: Timestamp) -> Result<Self> {
+        if splice_type > Self::MAX_SPLICE_TYPE {
+            return Err(crate::Error::invalid_input(format!(
+                "Too large splice type: {}",
+                splice_type
+            )));
+        }
+        Ok(SeamlessSplice {
+            splice_type,
+            dts_next_access_unit,
+        })
+    }
+
+    /// Returns the splice type (i.e., parameters of the H.262 splice).
+    pub fn splice_type(&self) -> u8 {
+        self.splice_type
+    }
+
+    /// Returns the PES DTS of the splice point.
+    pub fn dts_next_access_unit(&self) -> Timestamp {
+        self.dts_next_access_unit
+    }
+
+    pub(super) fn read_from<R: Read>(mut reader: R) -> Result<Self> {
+        let n = reader.read_uint::<5>()?;
+        Ok(SeamlessSplice {
+            splice_type: (n >> 36) as u8,
+            dts_next_access_unit: Timestamp::from_u64(n & 0x0F_FFFF_FFFF)?,
+        })
+    }
+
+    pub(super) fn write_to<W: Write>(&self, mut writer: W) -> Result<()> {
+        self.dts_next_access_unit
+            .write_to(&mut writer, self.splice_type)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn bytes_read_from() {
+        let bytes = Bytes::read_from(&[1, 2, 3][..]).unwrap();
+        assert_eq!(bytes.as_ref(), [1, 2, 3]);
+
+        let bytes = Bytes::read_from(&[0; 200][..]).unwrap();
+        assert_eq!(bytes.as_ref(), &[0; Bytes::MAX_SIZE][..]);
+    }
+
+    // #[test]
+    // fn bytes_write_to() {
+    //     let bytes = Bytes::new(&[1, 2, 3]).unwrap();
+    //     let mut buf = Vec::new();
+    //     bytes.write_to(&mut buf).unwrap();
+    //     assert_eq!(bytes.as_ref(), &buf[..]);
+    // }
+}

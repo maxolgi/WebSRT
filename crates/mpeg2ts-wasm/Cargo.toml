@@ -1,0 +1,11 @@
+[package]
+name = "mpeg2ts-wasm"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+mpeg2ts.workspace = true
+wasm-bindgen = "0.2"
