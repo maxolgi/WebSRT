@@ -6,7 +6,6 @@ const logEl = document.getElementById('log') as HTMLPreElement;
 const statusEl = document.getElementById('status') as HTMLParagraphElement;
 const connectBtn = document.getElementById('connect') as HTMLButtonElement;
 const canvas = document.getElementById('video-canvas') as HTMLCanvasElement;
-const videoEl = document.getElementById('video') as HTMLVideoElement;
 const latencyNum = document.getElementById('latency-num') as HTMLInputElement;
 const statsEl = document.getElementById('stats') as HTMLPreElement;
 const muteBtn = document.getElementById('mute') as HTMLButtonElement;
@@ -110,11 +109,10 @@ muteBtn.addEventListener('click', () => {
 
 const fullscreenBtn = document.getElementById('fullscreen') as HTMLButtonElement;
 fullscreenBtn.addEventListener('click', () => {
-  const target = videoEl.hidden ? canvas : videoEl;
   if (document.fullscreenElement) {
     document.exitFullscreen();
   } else {
-    target.requestFullscreen();
+    canvas.requestFullscreen();
   }
 });
 
@@ -152,9 +150,6 @@ function teardown() {
   audio = null;
   renderer?.destroy();
   renderer = null;
-  videoEl.srcObject = null;
-  videoEl.hidden = true;
-  canvas.hidden = false;
   if (audioEl) { try { audioEl.pause(); } catch {} audioEl.srcObject = null; }
   audioEl = null;
   audioReady = false;
@@ -216,39 +211,13 @@ async function doConnect() {
   renderer = new CanvasRenderer(canvas, Math.min(150, Math.floor(+latencyNum.value / 2)));
   let firstFrame = true;
 
-  // Try MediaStreamTrackGenerator (Chrome) for native <video> element.
-  // Falls back to CanvasRenderer (Firefox).
-  const MTG = (window as unknown as {
-    MediaStreamTrackGenerator?: new (init: { kind: string }) => MediaStreamTrackGenerator;
-  }).MediaStreamTrackGenerator;
-
-  let videoWriter: WritableStreamDefaultWriter<VideoFrame> | null = null;
-
-  if (MTG) {
-    const track = new MTG({ kind: 'video' });
-    videoWriter = track.writable!.getWriter();
-    videoEl.srcObject = new MediaStream([track]);
-    videoEl.hidden = false;
-    canvas.hidden = true;
-  } else {
-    videoEl.hidden = true;
-    canvas.hidden = false;
-  }
-
   video = new VideoPipeline({
     onFrame: (frame) => {
-      if (videoWriter) {
-        videoWriter.write(frame).catch(() => frame.close());
-      } else {
-        renderer?.draw(frame);
-      }
+      renderer?.draw(frame);
       if (firstFrame) {
         firstFrame = false;
-        if (videoWriter) videoEl.play().catch(() => {});
-        const w = videoWriter ? videoEl.videoWidth : frame.displayWidth;
-        const h = videoWriter ? videoEl.videoHeight : frame.displayHeight;
-        log(`first frame decoded ✓ (${w || frame.displayWidth}x${h || frame.displayHeight})`, 'ok');
-        setStatus(`decoding ${w || frame.displayWidth}x${h || frame.displayHeight}`);
+        log(`first frame decoded ✓ (${frame.displayWidth}x${frame.displayHeight})`, 'ok');
+        setStatus(`decoding ${frame.displayWidth}x${frame.displayHeight}`);
       }
     },
     onError: (e) => log(`video err: ${e}`, 'err'),
