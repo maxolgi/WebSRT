@@ -2,8 +2,11 @@
 
 ## Build commands
 
-# Rust gateway (release)
-cargo build --release -p gateway
+# Demo gateway binary (release, with sim-loss feature)
+cargo build --release -p websrt-gateway --features sim-loss
+
+# Library only (release)
+cargo build --release -p websrt
 
 # WASM crates — must rebuild + copy to web/ after changes
 (cd crates/srt-wasm && wasm-pack build --target web --release)
@@ -25,6 +28,14 @@ cd web && npx tsc --noEmit
 1. Forked `srt-protocol` (`maxolgi/srt-rs`) changes → rebuild BOTH the gateway binary AND the srt-wasm crate + copy pkg to web/wasm/
 2. Changing only `web/src/*.ts` → Vite hot-reloads, no rebuild needed
 3. Changing `crates/srt-wasm/src/lib.rs` → wasm-pack build + copy pkg + browser reload
+4. Changing `crates/websrt/` (library) → rebuild `websrt-gateway` binary + restart supervisord
+
+## Workspace structure
+
+- `crates/websrt/` — **library crate**: SRT-over-WebTransport gateway core. Exposes `Gateway` builder, `BrowserSession`, `Broadcaster`, `SrtInitiator`, `Cert`, `Ingester`. Sim-loss behind `sim-loss` feature.
+- `crates/websrt-gateway/` — **demo binary**: CLI wrapper around the library. This is what runs in production.
+- `crates/srt-wasm/` — browser-side SRT receiver (WASM).
+- `crates/mpeg2ts-wasm/` — browser-side TS demuxer (WASM).
 
 ## Forked crates (patched, not upstream)
 
@@ -49,8 +60,10 @@ Browser runs the **same** `srt-protocol` + `mpeg2ts` Rust crates compiled to WAS
 
 ## Key files
 
-- `crates/gateway/src/session.rs` — per-browser session: dual-task split (recv_pump + sender_pump) sharing `SrtInitiator` via `Arc<Mutex<_>>`. Sim-loss injector lives here.
-- `crates/gateway/src/srt_sender.rs` — wraps `srt_protocol::Connect` → `DuplexConnection`. `drain()` captures `Action::UpdateStatistics` into `last_stats`.
+- `crates/websrt/src/gateway.rs` — high-level `Gateway` builder: WT accept loop, session spawn, viewer cap, graceful drain.
+- `crates/websrt/src/session.rs` — per-browser session: dual-task split (recv_pump + sender_pump) sharing `SrtInitiator` via `Arc<Mutex<_>>`. LossInjector (sim-loss feature) lives here.
+- `crates/websrt/src/srt_sender.rs` — wraps `srt_protocol::Connect` → `DuplexConnection`. `drain()` captures `Action::UpdateStatistics` into `last_stats`.
+- `crates/websrt-gateway/src/main.rs` — demo binary: CLI parse, cert-hash.js writing, ingester setup, `Gateway::run()`.
 - `crates/srt-wasm/src/lib.rs` — `SrtReceiver` wraps `Listen` → `DuplexConnection`. State in `RefCell`. `handle_datagram(bytes, now_us)` + `poll(now_us)` return `Vec<SrtAction>`.
 - `web/src/decode.ts` — H.264 SPS parser (exp-Golomb, High profile), avcC builder, `VideoPipeline`, `OpusAudioPipeline`, `AacAudioPipeline`. AudioWorklet fallback when `MediaStreamTrackGenerator` unavailable.
 - `web/src/worker.ts` — Web Worker: runs SrtReceiver + Demuxer off main thread. Datagrams batched (up to 16) before processing. Polls SRT state machine every 10ms.
@@ -83,9 +96,9 @@ Gateway runs under supervisord:
 ## Testing
 
 - `web/smoke.mjs` — Node smoke test for both WASM modules (no browser needed)
-- `cargo run --bin wt_hs_probe` — SRT handshake + TS continuity-counter probe (tests NAK/retransmit under sim-loss)
-- `cargo run --bin mock_obs` — Sends fixture over SRT to test ingester without real OBS
-- `cargo run --bin wt_echo_client` — WT datagram round-trip test
+- `cargo run -p websrt-gateway --bin wt_hs_probe` — SRT handshake + TS continuity-counter probe (tests NAK/retransmit under sim-loss)
+- `cargo run -p websrt-gateway --bin mock_obs` — Sends fixture over SRT to test ingester without real OBS
+- `cargo run -p websrt-gateway --bin wt_echo_client` — WT datagram round-trip test
 
 ## Behavioral guidelines
 

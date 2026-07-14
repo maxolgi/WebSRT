@@ -1,0 +1,25 @@
+[package]
+name = "websrt"
+version.workspace = true
+edition.workspace = true
+description = "SRT-over-WebTransport gateway library"
+license = "MPL-2.0"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = []
+sim-loss = ["dep:rand"]
+
+[dependencies]
+bytes.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+srt-protocol.workspace = true
+srt-tokio.workspace = true
+wtransport.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+rand = { workspace = true, optional = true }

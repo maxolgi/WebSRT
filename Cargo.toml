@@ -1,7 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/gateway",
+    "crates/websrt",
+    "crates/websrt-gateway",
     "crates/srt-wasm",
     "crates/mpeg2ts-wasm",
 ]

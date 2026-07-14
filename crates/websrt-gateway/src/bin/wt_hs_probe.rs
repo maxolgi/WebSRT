@@ -4,7 +4,7 @@
 //!
 //! Usage:
 //!   1. Start gateway with --sim-loss N
-//!   2. cargo run -p gateway --bin wt_hs_probe -- --hash <hash> --seconds 10
+//!   2. cargo run -p websrt-gateway --bin wt_hs_probe -- --hash <hash> --seconds 10
 
 use clap::Parser;
 use srt_protocol::connection::{Action, DuplexConnection, Input};

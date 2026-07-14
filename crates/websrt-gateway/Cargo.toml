@@ -1,0 +1,39 @@
+[package]
+name = "websrt-gateway"
+version.workspace = true
+edition.workspace = true
+default-run = "websrt-gateway"
+license = "MPL-2.0"
+
+[features]
+sim-loss = ["websrt/sim-loss"]
+
+[dependencies]
+websrt = { path = "../websrt" }
+clap.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+hex.workspace = true
+bytes.workspace = true
+srt-protocol.workspace = true
+srt-tokio.workspace = true
+wtransport.workspace = true
+futures.workspace = true
+
+[[bin]]
+name = "websrt-gateway"
+path = "src/main.rs"
+
+[[bin]]
+name = "mock_obs"
+path = "src/bin/mock_obs.rs"
+
+[[bin]]
+name = "wt_echo_client"
+path = "src/bin/wt_echo_client.rs"
+
+[[bin]]
+name = "wt_hs_probe"
+path = "src/bin/wt_hs_probe.rs"

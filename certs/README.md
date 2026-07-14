@@ -9,7 +9,7 @@ boot with ≤14-day validity (per W3C WebTransport spec). The SHA-256 of the
 cert's DER is printed to stdout:
 
 ```
-INFO gateway: WebTransport cert DER SHA-256: <64 hex chars>
+INFO websrt_gateway: WebTransport cert DER SHA-256: <64 hex chars>
 ```
 
 Paste that hash into the browser UI's "Cert hash" field. The browser then
@@ -32,7 +32,7 @@ mkcert localhost 127.0.0.1 ::1    # produces ./localhost+2.pem and ./localhost+2
 Run the gateway pointing at those files:
 
 ```bash
-cargo run -p gateway -- --cert-mode mkcert \
+cargo run -p websrt-gateway -- --cert-mode mkcert \
     --cert-pem ./localhost+2.pem \
     --key-pem  ./localhost+2-key.pem
 ```

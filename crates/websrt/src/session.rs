@@ -12,9 +12,11 @@
 //! pump fell behind, and the peer idle timeout (30s) fired. Splitting the
 //! two into separate tasks lets the runtime interleave them fairly.
 
+#[cfg(feature = "sim-loss")]
+use rand::{rngs::StdRng, Rng, SeedableRng};
+
 use crate::broadcaster::ViewerRx;
 use crate::srt_sender::{SenderAction, SrtInitiator};
-use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,6 +27,7 @@ use wtransport::Connection;
 /// Probabilistic outgoing-datagram dropper. Only data packets are dropped;
 /// control packets (handshake, ACK, NAK, KeepAlive, Shutdown) always pass so
 /// the SRT reliability machinery stays functional.
+#[cfg(feature = "sim-loss")]
 struct LossInjector {
     enabled: bool,
     pct: u8, // 0..=100
@@ -34,12 +37,13 @@ struct LossInjector {
     first_drop_logged: bool,
 }
 
+#[cfg(feature = "sim-loss")]
 impl LossInjector {
     fn new(pct: u8, seed: u64) -> Self {
         Self {
             enabled: pct > 0,
             pct,
-            rng: StdRng::seed_from_u64(seed),
+            rng: rand::rngs::StdRng::seed_from_u64(seed),
             dropped: 0,
             sent: 0,
             first_drop_logged: false,
@@ -73,6 +77,21 @@ impl LossInjector {
         }
         false
     }
+
+    fn sent(&self) -> u64 { self.sent }
+    fn dropped(&self) -> u64 { self.dropped }
+}
+
+/// No-op stub when sim-loss feature is disabled.
+#[cfg(not(feature = "sim-loss"))]
+struct LossInjector;
+
+#[cfg(not(feature = "sim-loss"))]
+impl LossInjector {
+    fn new(_pct: u8, _seed: u64) -> Self { Self }
+    fn should_drop(&mut self, _bytes: &[u8]) -> bool { false }
+    fn sent(&self) -> u64 { 0 }
+    fn dropped(&self) -> u64 { 0 }
 }
 
 /// A single browser session.
@@ -277,7 +296,7 @@ impl BrowserSession {
             if do_stats {
                 let (sent, dropped) = {
                     let l = loss.lock().await;
-                    (l.sent, l.dropped)
+                    (l.sent(), l.dropped())
                 };
                 let lag = viewer.lag_count();
                 let wt_rtt = conn.rtt();

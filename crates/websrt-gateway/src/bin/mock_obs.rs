@@ -2,8 +2,8 @@
 //! fixture .ts over SRT/UDP. Used to verify Phase 8 ingester.
 //!
 //! Usage:
-//!   1. cargo run -p gateway -- --input srt --srt-port 9000
-//!   2. cargo run -p gateway --bin mock_obs -- --dst 127.0.0.1:9000
+//!   1. cargo run -p websrt-gateway -- --input srt --srt-port 9000
+//!   2. cargo run -p websrt-gateway --bin mock_obs -- --dst 127.0.0.1:9000
 
 use bytes::Bytes;
 use clap::Parser;

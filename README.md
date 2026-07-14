@@ -78,7 +78,7 @@ cp crates/mpeg2ts-wasm/pkg/* web/wasm/mpeg2ts-wasm/
 Terminal A:
 
 ```bash
-cargo run -p gateway
+cargo run -p websrt-gateway
 ```
 
 The gateway writes `web/public/cert-hash.js` on startup (the self-signed cert
@@ -98,7 +98,7 @@ entry needed. Click **connect**.
 ### Run with OBS
 
 ```bash
-cargo run -p gateway -- --input srt --srt-port 9000
+cargo run -p websrt-gateway -- --input srt --srt-port 9000
 ```
 
 In OBS, add a Media Source (or your camera), then add an SRT output:
@@ -115,14 +115,14 @@ auto-reconnect via the exponential-backoff logic.
 ### Caller mode (OBS is the listener)
 
 ```bash
-cargo run -p gateway -- --input srt --srt-mode caller --srt-call 192.168.1.50:9000
+cargo run -p websrt-gateway -- --input srt --srt-mode caller --srt-call 192.168.1.50:9000
 ```
 
 ### Simulated packet loss
 
 ```bash
-cargo run -p gateway -- --sim-loss 5    # 5% random drop of data datagrams
-cargo run -p gateway -- --sim-loss 20   # 20% — NAK/retransmit recovers
+cargo run -p websrt-gateway --features sim-loss -- --sim-loss 5    # 5% random drop of data datagrams
+cargo run -p websrt-gateway --features sim-loss -- --sim-loss 20   # 20% — NAK/retransmit recovers
 ```
 
 Only data packets are dropped; control packets (handshake, ACK, NAK, KeepAlive)
@@ -133,10 +133,56 @@ always pass through so the SRT reliability machinery stays functional.
 Open more browser tabs — each gets its own independent SRT sender. Viewer cap
 defaults to 16 (enforced in `Broadcaster::subscribe`).
 
+## Library usage
+
+The `websrt` crate is the reusable core. The demo binary (`websrt-gateway`) is
+a thin CLI wrapper around it. To embed in your own application:
+
+```rust
+use websrt::Gateway;
+use websrt::cert::{Cert, CertSource};
+use websrt::ingest::SrtIngester;
+
+# async fn run() -> anyhow::Result<()> {
+let cert = Cert::build(CertSource::SelfSigned {
+    sans: vec!["localhost".into()],
+}).await?;
+
+let gateway = Gateway::builder()
+    .bind_addr("127.0.0.1:4433")
+    .identity(cert.identity.clone_identity())
+    .latency_ms(1000)
+    .max_viewers(16)
+    .build();
+
+// Deferred ingester: connect OBS in background
+let source = gateway.source_handle();
+tokio::spawn(async move {
+    let ingester = SrtIngester::bind(9000).await.unwrap();
+    source.set_ingester(ingester).await;
+});
+
+gateway.run(async {
+    let _ = tokio::signal::ctrl_c().await;
+}).await?;
+# Ok(())
+# }
+```
+
+### Simulated packet loss (feature-gated)
+
+The `sim-loss` feature enables a probabilistic datagram dropper for testing
+NAK/retransmit. Without the feature, the `rand` dependency is excluded.
+
+```toml
+[dependencies]
+websrt = { path = "...", features = ["sim-loss"] }
+```
+
 ## CLI reference
 
 ```
-gateway [OPTIONS]
+websrt-gateway [OPTIONS]
 
 Options:
       --input <INPUT>            Input source [default: file] [possible values: file, srt]
@@ -177,7 +223,7 @@ Firefox. `cert-hash.js` is set to `null`.
 ```bash
 mkcert -install
 mkcert -cert-file certs/cert.pem -key-file certs/key.pem localhost 127.0.0.1 ::1
-cargo run -p gateway -- --cert-mode mkcert --cert-pem certs/cert.pem --key-pem certs/key.pem
+cargo run -p websrt-gateway -- --cert-mode mkcert --cert-pem certs/cert.pem --key-pem certs/key.pem
 ```
 
 See `certs/README.md` for details.
@@ -284,8 +330,11 @@ root `Cargo.toml`. Cargo fetches them automatically at build time — they are
 ## Build commands
 
 ```bash
-# Rust gateway (release)
-cargo build --release -p gateway
+# Demo gateway binary (release, with sim-loss feature)
+cargo build --release -p websrt-gateway --features sim-loss
+
+# Library only (for use as a dependency)
+cargo build --release -p websrt
 
 # WASM crates — must rebuild + copy to web/ after changes
 (cd crates/srt-wasm && wasm-pack build --target web --release)
@@ -321,7 +370,7 @@ Config file `websrt.conf` is deployed to `/etc/supervisor/conf.d/`:
 
 ```ini
 [program:websrt]
-command=/opt/WebSRT/target/release/gateway --input srt --srt-mode listener --srt-port 9000 --bind 0.0.0.0 --latency 1000
+command=/opt/WebSRT/target/release/websrt-gateway --input srt --srt-mode listener --srt-port 9000 --bind 0.0.0.0 --latency 1000
 directory=/opt/WebSRT
 autostart=true
 autorestart=true
@@ -354,13 +403,13 @@ script automatically.
 
 ```bash
 # SRT handshake + TS continuity-counter probe (tests NAK/retransmit under sim-loss)
-cargo run --bin wt_hs_probe
+cargo run -p websrt-gateway --bin wt_hs_probe
 
 # Sends fixture over SRT to test ingester without real OBS
-cargo run --bin mock_obs
+cargo run -p websrt-gateway --bin mock_obs
 
 # WT datagram round-trip test
-cargo run --bin wt_echo_client
+cargo run -p websrt-gateway --bin wt_echo_client
 ```
 
 ### Node smoke test
@@ -372,7 +421,7 @@ node web/smoke.mjs
 
 ### Manual OBS test
 
-1. Start gateway: `cargo run -p gateway -- --input srt --srt-port 9000`
+1. Start gateway: `cargo run -p websrt-gateway -- --input srt --srt-port 9000`
 2. Start Vite: `cd web && npm run dev`
 3. Open browser, click connect
 4. In OBS: SRT output to `127.0.0.1:9000`, mode `caller`
@@ -383,16 +432,16 @@ node web/smoke.mjs
 
 ```
 WebSRT/
-  Cargo.toml                  # workspace (3 crates, 2 forked deps via [patch.crates-io])
-  Cargo.lock                  # gitignored — regenerated on build
+  Cargo.toml                  # workspace (4 crates, 2 forked deps via [patch.crates-io])
+  Cargo.lock
   AGENTS.md                   # build commands, architecture, gotchas
   websrt.conf                 # supervisord config (production)
   LICENSE                     # MPL-2.0
   crates/
-    gateway/                  # the gateway binary + dev/test binaries
+    websrt/                   # library crate: SRT-over-WebTransport gateway core
       src/
-        main.rs               # CLI parsing, cert bootstrap
-        server.rs             # WT accept loop, viewer cap, graceful shutdown
+        lib.rs                # pub re-exports
+        gateway.rs            # Gateway builder: WT accept loop, session spawn, fanout
         session.rs            # per-browser session: recv_pump + sender_pump
         srt_sender.rs         # SrtInitiator: wraps srt-protocol Connect → DuplexConnection
         broadcaster.rs        # broadcast fanout with alive-flag + subscriber cap
@@ -401,6 +450,9 @@ WebSRT/
           mod.rs              # Ingester trait + TsMessage type
           srt.rs              # SrtIngester: srt-tokio listener/caller with reconnect
           file.rs             # FileIngester: fixture loop with real-time pacing
+    websrt-gateway/           # demo binary: CLI wrapper around the websrt library
+      src/
+        main.rs               # CLI parsing, cert-hash.js writing, Gateway::run()
         bin/
           wt_hs_probe.rs      # SRT handshake + TS continuity probe
           mock_obs.rs         # Streams fixture over SRT

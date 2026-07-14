@@ -1,19 +1,16 @@
-//! gateway entrypoint: arg parse, cert bootstrap, server dispatch.
+//! Demo gateway binary: CLI parse → cert setup → Gateway::run().
 //!
-//! Phase 0: just generate the cert and print the hash.
-//! Phase 1+: dispatch into server::run().
-
-mod broadcaster;
-mod cert;
-mod ingest;
-mod server;
-mod session;
-mod srt_sender;
+//! This is the reference application built on the `websrt` library.
+//! For embedding, use the library crate directly.
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
+use websrt::cert::{Cert, CertSource};
+use websrt::ingest::file::FileIngester;
+use websrt::ingest::srt::SrtIngester;
+use websrt::Gateway;
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
 pub enum CertMode {
@@ -40,7 +37,7 @@ pub enum SrtMode {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "gateway", version, about = "SRT → WebTransport gateway")]
+#[command(name = "websrt-gateway", version, about = "SRT → WebTransport gateway (demo)")]
 pub struct Cli {
     /// Input source.
     #[arg(long, value_enum, default_value_t = InputMode::File)]
@@ -87,10 +84,12 @@ pub struct Cli {
     pub key_pem: Option<PathBuf>,
 
     /// Simulate N% random datagram loss (0-100). 0 disables.
+    #[cfg(feature = "sim-loss")]
     #[arg(long, default_value_t = 0u8)]
     pub sim_loss: u8,
 
     /// RNG seed for sim-loss (deterministic by default).
+    #[cfg(feature = "sim-loss")]
     #[arg(long, default_value_t = 42u64)]
     pub sim_seed: u64,
 
@@ -108,7 +107,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let cert_src = match cli.cert_mode {
-        CertMode::Self_ => cert::CertSource::SelfSigned {
+        CertMode::Self_ => CertSource::SelfSigned {
             sans: vec![
                 "localhost".to_string(),
                 "127.0.0.1".to_string(),
@@ -119,23 +118,21 @@ async fn main() -> Result<()> {
             let cert_pem = cli
                 .cert_pem
                 .clone()
-                .context_path("--cert-pem required for --cert-mode mkcert")?;
+                .ok_or_else(|| anyhow::anyhow!("--cert-pem required for --cert-mode mkcert"))?;
             let key_pem = cli
                 .key_pem
                 .clone()
-                .context_path("--key-pem required for --cert-mode mkcert")?;
-            cert::CertSource::Mkcert {
+                .ok_or_else(|| anyhow::anyhow!("--key-pem required for --cert-mode mkcert"))?;
+            CertSource::Mkcert {
                 cert: cert_pem,
                 key: key_pem,
             }
         }
     };
 
-    let cert = cert::Cert::build(cert_src).await?;
+    let cert = Cert::build(cert_src).await?;
 
-    // Always write cert-hash.js so the browser knows which mode we're in.
-    // Self-signed: writes the hash hex. Mkcert: writes null so the browser
-    // connects without serverCertificateHashes (uses system PKI trust).
+    // Write cert-hash.js so the browser knows which mode we're in.
     let hash_file = {
         let cwd = std::env::current_dir().unwrap_or_default();
         let candidate = cwd.join("web/public/cert-hash.js");
@@ -157,13 +154,6 @@ async fn main() -> Result<()> {
         let js = format!("window.CERT_HASH = \"{}\";", hex);
         let _ = std::fs::write(&hash_file, &js);
         tracing::info!("Wrote cert hash to {}", hash_file.display());
-        tracing::info!(
-            "Browser: pass this to serverCertificateHashes: {{algorithm:'sha-256', value:new Uint8Array([{}])}}",
-            hash.iter()
-                .map(|b| format!("0x{:02x}", b))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
     } else {
         tracing::info!("mkcert identity loaded; browser uses normal PKI");
         let js = "window.CERT_HASH = null;";
@@ -171,16 +161,64 @@ async fn main() -> Result<()> {
         tracing::info!("Wrote cert-hash.js (null for mkcert mode) to {}", hash_file.display());
     }
 
-    server::run(cert, cli).await
-}
+    // Build gateway
+    #[cfg_attr(not(feature = "sim-loss"), allow(unused_mut))]
+    let mut builder = Gateway::builder()
+        .bind_addr(format!("{}:{}", cli.bind, cli.wt_port).parse::<std::net::SocketAddr>()?)
+        .identity(cert.identity.clone_identity())
+        .latency_ms(cli.latency);
 
-/// Small helper to attach a context to an Option<PathBuf>-unwrap idiom.
-trait OptExt<T> {
-    fn context_path(self, msg: &str) -> Result<T>;
-}
-
-impl<T> OptExt<T> for Option<T> {
-    fn context_path(self, msg: &str) -> Result<T> {
-        self.ok_or_else(|| anyhow::anyhow!("{}", msg))
+    #[cfg(feature = "sim-loss")]
+    {
+        builder = builder.sim_loss(cli.sim_loss, cli.sim_seed);
     }
+
+    let gateway = builder.build();
+
+    // Setup ingester
+    match cli.input {
+        InputMode::File => {
+            let ingester = FileIngester::new(&cli.fixture, cli.fixture_duration).map_err(|e| {
+                tracing::error!(?e, "failed to open fixture; pass --fixture <path>");
+                e
+            })?;
+            tracing::info!(fixture = ?cli.fixture, "file ingester ready");
+            gateway.source_handle().set_ingester(ingester).await;
+        }
+        InputMode::Srt => {
+            let source = gateway.source_handle();
+            let srt_mode = cli.srt_mode;
+            let srt_port = cli.srt_port;
+            let srt_call = cli.srt_call.clone();
+            tokio::spawn(async move {
+                let result = match srt_mode {
+                    SrtMode::Listener => {
+                        tracing::info!(port = srt_port, "binding SRT listener for OBS");
+                        SrtIngester::bind(srt_port).await
+                    }
+                    SrtMode::Caller => {
+                        let addr = srt_call.unwrap_or_else(|| "127.0.0.1:9000".to_string());
+                        tracing::info!(%addr, "SRT caller mode: dialing OBS");
+                        SrtIngester::call(&addr).await
+                    }
+                };
+                match result {
+                    Ok(ingester) => {
+                        tracing::info!("OBS connected; starting broadcaster");
+                        source.set_ingester(ingester).await;
+                    }
+                    Err(e) => {
+                        tracing::error!(?e, "SRT ingester setup failed");
+                    }
+                }
+            });
+        }
+    }
+
+    // Run until ctrl-c
+    gateway
+        .run(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await
 }
