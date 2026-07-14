@@ -1,15 +1,3 @@
-//! SrtIngester: srt-tokio listener or caller for OBS.
-//!
-//! Two modes:
-//!   - **Listener** (default, `--srt-mode listener`): binds a UDP port, waits
-//!     for OBS to call in with `?mode=caller`.
-//!   - **Caller** (`--srt-mode caller`): dials OBS at the given address. Use
-//!     this when OBS is configured as `srt://...?mode=listener`.
-//!
-//! Supports automatic reconnection: when the SRT socket closes (OBS
-//! disconnect/restart), the ingester waits for a new connection rather than
-//! signalling end-of-stream.
-
 use super::{Ingester, TsMessage};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -28,7 +16,6 @@ pub struct SrtIngester {
 }
 
 impl SrtIngester {
-    /// Listener mode: bind `0.0.0.0:{port}`, wait for OBS to call in.
     pub async fn bind(port: u16) -> Result<Self> {
         Self::bind_with_addr(format!("0.0.0.0:{port}")).await
     }
@@ -66,7 +53,6 @@ impl SrtIngester {
         }
     }
 
-    /// Caller mode: dial OBS at `addr` (e.g. "192.168.1.3:1234").
     pub async fn call(addr: impl AsRef<str>) -> Result<Self> {
         let addr_str = addr.as_ref().to_string();
         tracing::info!(addr = %addr_str, "SRT caller: dialing OBS…");
@@ -109,30 +95,53 @@ impl SrtIngester {
             }
         }
     }
+
+    async fn close_socket(&mut self) {
+        if let Some(mut socket) = self.socket.take() {
+            match tokio::time::timeout(Duration::from_secs(5), socket.close_and_finish()).await {
+                Ok(Ok(())) => tracing::info!("SRT socket closed cleanly"),
+                Ok(Err(e)) => tracing::warn!(?e, "SRT socket close error"),
+                Err(_) => tracing::warn!("SRT socket close timed out after 5s; dropping"),
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl Ingester for SrtIngester {
     async fn next_message(&mut self) -> Result<Option<TsMessage>> {
+        const IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+
         loop {
-            if let Some(ref mut socket) = self.socket {
-                match socket.next().await {
-                    Some(Ok(msg)) => return Ok(Some(msg)),
-                    Some(Err(e)) => {
-                        tracing::warn!(?e, "srt recv error; will attempt reconnect");
-                        self.socket = None;
-                    }
-                    None => {
-                        tracing::info!("srt socket closed; attempting reconnect");
-                        self.socket = None;
+            if self.socket.is_none() {
+                match self.reconnect().await {
+                    Ok(s) => self.socket = Some(s),
+                    Err(e) => {
+                        tracing::error!(?e, "reconnect failed; retrying in 2s");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                 }
+                continue;
             }
-            match self.reconnect().await {
-                Ok(s) => self.socket = Some(s),
-                Err(e) => {
-                    tracing::error!(?e, "reconnect failed; retrying in 2s");
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+
+            let result = {
+                let socket = self.socket.as_mut().unwrap();
+                tokio::time::timeout(IDLE_TIMEOUT, socket.next()).await
+            };
+
+            match result {
+                Ok(Some(Ok(msg))) => return Ok(Some(msg)),
+                Ok(Some(Err(e))) => {
+                    tracing::warn!(?e, "srt recv error; closing socket");
+                    self.close_socket().await;
+                }
+                Ok(None) => {
+                    tracing::info!("srt socket closed; attempting reconnect");
+                    self.close_socket().await;
+                }
+                Err(_) => {
+                    tracing::warn!("srt socket idle for {:?} (no data); closing", IDLE_TIMEOUT);
+                    self.close_socket().await;
                 }
             }
         }
