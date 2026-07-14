@@ -11,7 +11,7 @@
       #log { white-space: pre-wrap; font-size: 12px; max-height: 60vh; overflow: auto; }
       video, canvas { background: #000; display: block; }
       #video-canvas { width: 100%; height: auto; }
-      #video-canvas:fullscreen { width: 100vw; height: 100vh; object-fit: contain; }
+      #video { width: 100%; height: auto; background: #000; display: block; }
       .ok { color: #6f6; }
       .err { color: #f66; }
       .info { color: #6cf; }
@@ -25,7 +25,8 @@
   <body>
     <div class="layout">
       <div class="left-panel">
-        <canvas id="video-canvas" width="640" height="360"></canvas>
+        <video id="video" playsinline></video>
+        <canvas id="video-canvas" width="640" height="360" hidden></canvas>
         <div class="controls">
           <button id="connect">connect</button>
           <label>latency: <input type="number" id="latency-num" min="20" max="8000" step="10" value="300" />ms</label>
