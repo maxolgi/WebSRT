@@ -67,11 +67,11 @@ function hexToBytes(hex: string): Uint8Array {
 }
 
 let worker: Worker | null = null;
+let wt: WebTransport | null = null;
+let datagramWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
 let video: VideoPipeline | null = null;
 let audio: OpusAudioPipeline | AacAudioPipeline | null = null;
 let renderer: CanvasRenderer | null = null;
-let audioStreamType: number | null = null;
-let lastStats: StatsMsg | null = null;
 
 const audioCb = {
   onError: (e: unknown) => log(`audio err: ${e}`, 'err'),
@@ -131,6 +131,9 @@ function teardown() {
   if (worker) {
     worker.postMessage({ cmd: 'stop' });
   }
+  try { wt?.close({}); } catch {}
+  wt = null;
+  datagramWriter = null;
   video = null;
   audio = null;
   renderer?.destroy();
@@ -138,10 +141,8 @@ function teardown() {
   if (audioEl) { try { audioEl.pause(); } catch {} audioEl.srcObject = null; }
   audioEl = null;
   audioReady = false;
-  audioStreamType = null;
   muteBtn.disabled = true;
   muteBtn.textContent = 'muted';
-  lastStats = null;
   statsEl.textContent = '';
 }
 
@@ -178,7 +179,7 @@ function wireAudio() {
   }
 }
 
-function doConnect() {
+async function doConnect() {
   teardown();
   manualDisconnect = false;
   setConnState('connecting');
@@ -209,13 +210,35 @@ function doConnect() {
   const wtHost = pageHost === 'localhost' ? '127.0.0.1' : pageHost;
   const wtUrl = `https://${wtHost}:4433/wt`;
 
-  let certHash: Uint8Array | null = null;
+  const wtOpts: WebTransportOptions = {};
   if (hashHex) {
-    certHash = hexToBytes(hashHex);
+    const hash = hexToBytes(hashHex);
+    wtOpts.serverCertificateHashes = [{ algorithm: 'sha-256', value: hash as BufferSource }];
     log(`connecting to ${wtUrl} (self-signed, hash ${hashHex.slice(0, 8)}…) …`, 'info');
   } else {
     log(`connecting to ${wtUrl} (mkcert/PKI) …`, 'info');
   }
+
+  const latencyMs = +latencySlider.value;
+  log(`TSBPD latency: ${formatLatency(latencyMs)}`, 'info');
+
+  try {
+    wt = new WebTransport(wtUrl, wtOpts);
+    await wt.ready;
+    log('WT ready ✓', 'ok');
+    setStatus('WT ready; awaiting SRT handshake');
+    setConnState('connected');
+  } catch (e) {
+    log(`connect failed: ${e}`, 'err');
+    if (!manualDisconnect) scheduleReconnect();
+    return;
+  }
+
+  datagramWriter = wt.datagrams.writable.getWriter();
+
+  wt.closed
+    .then(() => { log('WT closed', 'info'); if (!manualDisconnect) scheduleReconnect(); })
+    .catch((e) => { log(`WT closed (err): ${e}`, 'err'); if (!manualDisconnect) scheduleReconnect(); });
 
   if (!worker) {
     worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
@@ -223,9 +246,19 @@ function doConnect() {
     worker.onerror = (e) => log(`worker error: ${e.message}`, 'err');
   }
 
-  const latencyMs = +latencySlider.value;
-  log(`TSBPD latency: ${formatLatency(latencyMs)}`, 'info');
-  worker.postMessage({ cmd: 'connect', url: wtUrl, certHash, latencyMs });
+  worker.postMessage({ cmd: 'init', latencyMs });
+
+  (async () => {
+    const reader = wt.datagrams.readable.getReader();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) {
+        log('datagram reader done', 'info');
+        return;
+      }
+      worker?.postMessage({ cmd: 'datagram', data: value });
+    }
+  })();
 }
 
 function handleWorkerMsg(msg: WorkerMsg) {
@@ -233,20 +266,15 @@ function handleWorkerMsg(msg: WorkerMsg) {
     case 'log':
       log(msg.msg, msg.cls);
       break;
-    case 'wtReady':
-      log('WT ready ✓', 'ok');
-      setStatus('WT ready; awaiting SRT handshake');
-      setConnState('connected');
-      break;
     case 'handshakeComplete':
+      log('SRT handshake complete ✓', 'ok');
       reconnectAttempts = 0;
       setStatus('SRT connected; awaiting video stream');
       break;
     case 'pmt':
       if (msg.audioPid >= 0 && msg.audioStreamType >= 0 && !audio) {
-        audioStreamType = msg.audioStreamType;
-        const isOpus = audioStreamType === 0x06;
-        log(`audio PID ${msg.audioPid}: ${isOpus ? 'Opus' : 'AAC'} (stream type 0x${audioStreamType.toString(16)})`, 'info');
+        const isOpus = msg.audioStreamType === 0x06;
+        log(`audio PID ${msg.audioPid}: ${isOpus ? 'Opus' : 'AAC'} (stream type 0x${msg.audioStreamType.toString(16)})`, 'info');
         audio = isOpus
           ? new OpusAudioPipeline(audioCb)
           : new AacAudioPipeline(audioCb);
@@ -258,21 +286,15 @@ function handleWorkerMsg(msg: WorkerMsg) {
     case 'audioPes':
       audio?.feed(msg.data, msg.pts);
       break;
+    case 'send':
+      datagramWriter?.write(msg.data);
+      break;
     case 'stats':
-      lastStats = msg.stats;
       updateStats(msg.stats);
       break;
     case 'close':
-      log('session closed', 'err');
+      log('SRT closed', 'err');
       setStatus('closed');
-      break;
-    case 'wtClosed':
-      log('WT closed', 'info');
-      if (!manualDisconnect) scheduleReconnect();
-      break;
-    case 'wtError':
-      log(`WT error: ${msg.error}`, 'err');
-      if (!manualDisconnect) scheduleReconnect();
       break;
   }
 }

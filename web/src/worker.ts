@@ -1,8 +1,9 @@
-import { SrtController, type SrtStats } from './srt';
+import init, { SrtReceiver, type SrtAction, type SrtStats } from '../wasm/srt-wasm/srt_wasm.js';
 import { Demuxer } from './demux';
 
 export type WorkerCmd =
-  | { cmd: 'connect'; url: string; certHash: Uint8Array | null; latencyMs: number }
+  | { cmd: 'init'; latencyMs: number }
+  | { cmd: 'datagram'; data: Uint8Array }
   | { cmd: 'stop' };
 
 export interface StatsMsg {
@@ -22,36 +23,44 @@ export interface StatsMsg {
 
 export type WorkerMsg =
   | { type: 'log'; msg: string; cls?: string }
-  | { type: 'wtReady' }
   | { type: 'handshakeComplete' }
   | { type: 'pmt'; videoPid: number; audioPid: number; audioStreamType: number }
   | { type: 'videoPes'; data: Uint8Array; pts: number | null; isKeyframe: boolean }
   | { type: 'audioPes'; data: Uint8Array; pts: number | null }
+  | { type: 'send'; data: Uint8Array }
   | { type: 'stats'; stats: StatsMsg }
-  | { type: 'close' }
-  | { type: 'wtClosed' }
-  | { type: 'wtError'; error: string };
+  | { type: 'close' };
 
 const ST_H264 = 0x1b;
 const ST_AAC = 0x0f;
 const ST_OPUS_FFMPEG = 0x06;
 
-let srt: SrtController | null = null;
+let rx: SrtReceiver | null = null;
 let demux: Demuxer | null = null;
-let wt: WebTransport | null = null;
+let epoch = 0;
+let pollTimer: ReturnType<typeof setInterval> | null = null;
 let statsTimer: ReturnType<typeof setInterval> | null = null;
 let videoPid: number | null = null;
 let audioPid: number | null = null;
 let audioStreamType: number | null = null;
+let inited = false;
 
 self.onmessage = async (e: MessageEvent) => {
   const cmd = e.data as WorkerCmd;
   switch (cmd.cmd) {
-    case 'connect':
-      await doConnect(cmd.url, cmd.certHash, cmd.latencyMs);
+    case 'init':
+      await doInit(cmd.latencyMs);
+      break;
+    case 'datagram':
+      if (!rx || !inited) return;
+      {
+        const nowUs = (performance.now() - epoch) * 1000;
+        const actions = rx.handle_datagram(cmd.data, nowUs);
+        processActions(actions);
+      }
       break;
     case 'stop':
-      doTeardown();
+      doStop();
       break;
   }
 };
@@ -60,29 +69,14 @@ function post(msg: WorkerMsg) {
   (self as unknown as Worker).postMessage(msg);
 }
 
-async function doConnect(url: string, certHash: Uint8Array | null, latencyMs: number) {
-  doTeardown();
+async function doInit(latencyMs: number) {
+  doStop();
+  await init();
+  rx = SrtReceiver.newWithLatency(latencyMs);
+  epoch = performance.now();
   videoPid = null;
   audioPid = null;
   audioStreamType = null;
-
-  const wtOpts: WebTransportOptions = {};
-  if (certHash) {
-    wtOpts.serverCertificateHashes = [{ algorithm: 'sha-256', value: certHash as BufferSource }];
-  }
-
-  try {
-    wt = new WebTransport(url, wtOpts);
-    await wt.ready;
-    post({ type: 'wtReady' });
-  } catch (e) {
-    post({ type: 'wtError', error: String(e) });
-    return;
-  }
-
-  wt.closed
-    .then(() => post({ type: 'wtClosed' }))
-    .catch((err) => post({ type: 'wtError', error: String(err) }));
 
   demux = await Demuxer.create({
     onPmt: (entries) => {
@@ -113,31 +107,56 @@ async function doConnect(url: string, certHash: Uint8Array | null, latencyMs: nu
         post({ type: 'audioPes', data: bytes, pts });
       }
     },
-    onError: (msg) => post({ type: 'log', msg: `demux err: ${msg}`, cls: 'err' }),
+    onError: (msg_) => post({ type: 'log', msg: `demux err: ${msg_}`, cls: 'err' }),
   });
 
-  srt = await SrtController.start(wt, latencyMs, {
-    onLog: (msg, cls) => post({ type: 'log', msg, cls }),
-    onHandshakeComplete: () => post({ type: 'handshakeComplete' }),
-    onDeliverMessage: (bytes) => demux?.feed(bytes),
-    onClose: () => post({ type: 'close' }),
-  });
+  inited = true;
+
+  pollTimer = setInterval(() => {
+    if (!rx || !inited) return;
+    const nowUs = (performance.now() - epoch) * 1000;
+    const actions = rx.poll(nowUs);
+    processActions(actions);
+  }, 10);
 
   statsTimer = setInterval(() => {
-    if (!srt) return;
-    const s = srt.getStats();
+    if (!rx || !inited) return;
+    const s = rx.getStats();
     if (!s) return;
     post({ type: 'stats', stats: serializeStats(s) });
   }, 1000);
 }
 
-function doTeardown() {
+function doStop() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
-  srt?.stop();
-  srt = null;
-  try { wt?.close({}); } catch {}
-  wt = null;
+  rx = null;
   demux = null;
+  inited = false;
+}
+
+function processActions(actions: SrtAction[]) {
+  for (const a of actions) {
+    switch (a.kind) {
+      case 0:
+        post({ type: 'send', data: a.data });
+        break;
+      case 1:
+        demux?.feed(a.data);
+        break;
+      case 2:
+        post({ type: 'handshakeComplete' });
+        break;
+      case 3:
+        break;
+      case 4:
+        post({ type: 'close' });
+        break;
+      case 5:
+        post({ type: 'log', msg: `srt: ${a.text}`, cls: 'info' });
+        break;
+    }
+  }
 }
 
 function serializeStats(s: SrtStats): StatsMsg {
