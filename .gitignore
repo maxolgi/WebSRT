@@ -20,3 +20,7 @@ web/public/cert-hash.js
 
 # fixtures can be large; keep make-fixture.sh, gitignore the .ts
 # (test.ts committed per plan, so don't ignore it)
+
+# logs and tmp
+logs/
+tmp/

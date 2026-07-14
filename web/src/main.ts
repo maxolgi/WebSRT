@@ -6,7 +6,6 @@ const logEl = document.getElementById('log') as HTMLPreElement;
 const statusEl = document.getElementById('status') as HTMLParagraphElement;
 const connectBtn = document.getElementById('connect') as HTMLButtonElement;
 const canvas = document.getElementById('video-canvas') as HTMLCanvasElement;
-const latencySlider = document.getElementById('latency') as HTMLInputElement;
 const latencyNum = document.getElementById('latency-num') as HTMLInputElement;
 const statsEl = document.getElementById('stats') as HTMLPreElement;
 const muteBtn = document.getElementById('mute') as HTMLButtonElement;
@@ -38,10 +37,12 @@ function setStatus(s: string) { statusEl.textContent = s; }
 function formatLatency(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 1)}s` : `${ms}ms`;
 }
-latencySlider.addEventListener('input', () => { latencyNum.value = latencySlider.value; });
+const savedLatency = localStorage.getItem('latency');
+if (savedLatency) latencyNum.value = savedLatency;
 latencyNum.addEventListener('input', () => {
   const v = Math.max(20, Math.min(8000, +latencyNum.value || 120));
-  latencySlider.value = String(v);
+  latencyNum.value = String(v);
+  localStorage.setItem('latency', String(v));
 });
 
 function log(msg: string, cls = '') {
@@ -158,26 +159,15 @@ function wireAudio() {
       document.body.appendChild(audioEl);
     }
     audioEl.srcObject = new MediaStream([track]);
-    audioEl.muted = false;
+    audioEl.muted = true;
     audioEl.play()
-      .then(() => {
-        log('audio playing ✓', 'ok');
-        muteBtn.disabled = false;
-        muteBtn.textContent = 'mute';
-      })
-      .catch((e) => {
-        log(`audio autoplay blocked — click "muted" to enable: ${e}`, 'err');
-        muteBtn.disabled = false;
-        muteBtn.textContent = 'muted';
-      });
+      .then(() => { log('audio ready (muted — click to unmute)', 'info'); })
+      .catch((e) => log(`audio play failed: ${e}`, 'err'));
+    muteBtn.disabled = false;
+    muteBtn.textContent = 'muted';
   } else {
-    audio!.resume()
-      .then(() => {
-        log('audio playing ✓ (AudioWorklet)', 'ok');
-        muteBtn.disabled = false;
-        muteBtn.textContent = 'mute';
-      })
-      .catch((e) => log(`audio resume failed: ${e}`, 'err'));
+    muteBtn.disabled = false;
+    muteBtn.textContent = 'muted';
   }
 }
 
@@ -209,7 +199,7 @@ async function doConnect() {
     return;
   }
 
-  renderer = new CanvasRenderer(canvas, Math.min(150, Math.floor(+latencySlider.value / 2)));
+  renderer = new CanvasRenderer(canvas, Math.min(150, Math.floor(+latencyNum.value / 2)));
   let firstFrame = true;
   video = new VideoPipeline({
     onFrame: (frame) => {
@@ -238,7 +228,7 @@ async function doConnect() {
     log(`connecting to ${wtUrl} (mkcert/PKI) …`, 'info');
   }
 
-  const latencyMs = +latencySlider.value;
+  const latencyMs = +latencyNum.value;
   log(`TSBPD latency: ${formatLatency(latencyMs)}`, 'info');
 
   try {
