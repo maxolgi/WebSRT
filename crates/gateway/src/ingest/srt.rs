@@ -110,6 +110,8 @@ impl SrtIngester {
 #[async_trait]
 impl Ingester for SrtIngester {
     async fn next_message(&mut self) -> Result<Option<TsMessage>> {
+        const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+
         loop {
             if self.socket.is_none() {
                 match self.reconnect().await {
@@ -124,17 +126,21 @@ impl Ingester for SrtIngester {
 
             let result = {
                 let socket = self.socket.as_mut().unwrap();
-                socket.next().await
+                tokio::time::timeout(IDLE_TIMEOUT, socket.next()).await
             };
 
             match result {
-                Some(Ok(msg)) => return Ok(Some(msg)),
-                Some(Err(e)) => {
+                Ok(Some(Ok(msg))) => return Ok(Some(msg)),
+                Ok(Some(Err(e))) => {
                     tracing::warn!(?e, "srt recv error; closing socket");
                     self.close_socket().await;
                 }
-                None => {
+                Ok(None) => {
                     tracing::info!("srt socket closed; attempting reconnect");
+                    self.close_socket().await;
+                }
+                Err(_) => {
+                    tracing::warn!("srt idle {:?}; closing + reconnecting", IDLE_TIMEOUT);
                     self.close_socket().await;
                 }
             }

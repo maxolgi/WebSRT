@@ -128,6 +128,12 @@ function cancelReconnect() {
 function teardown() {
   cancelReconnect();
   setConnState('idle');
+  if (sendStatsTimer !== null) { window.clearInterval(sendStatsTimer); sendStatsTimer = null; }
+  // Drop any ACK/NAK queued for the now-dead connection so a fresh reconnect
+  // doesn't ship stale control packets (which could confuse the peer's flow
+  // window). An in-flight drainSends() will exit on its next loop iteration
+  // when it observes `datagramWriter === null`.
+  pendingSends = [];
   if (worker) {
     worker.postMessage({ cmd: 'stop' });
   }
@@ -254,6 +260,7 @@ async function doConnect() {
   }
 
   datagramWriter = wt.datagrams.writable.getWriter();
+  startSendStats();
 
   wt.closed
     .then(() => { log('WT closed', 'info'); if (!manualDisconnect) scheduleReconnect(); })
@@ -301,9 +308,17 @@ async function doConnect() {
 
 let pendingSends: Uint8Array[] = [];
 let draining = false;
+// Outgoing control-traffic (ACK/NAK/KeepAlive) accounting for the ACK path.
+// `queued` matches the worker's `sends` count; `written`/`failed` are the WT
+// write outcomes. Cross-check queued→written→gateway `rx_ack` to pinpoint any
+// loss between worker generation and gateway receipt. `maxReadyMs` exposes
+// WebTransport datagram backpressure stalls (a suspected ACK-loss vector).
+let sendStats = { queued: 0, attempted: 0, written: 0, failed: 0, readyWaits: 0, maxReadyMs: 0 };
+let sendStatsTimer: number | null = null;
 
 function queueSend(data: Uint8Array) {
   pendingSends.push(data);
+  sendStats.queued++;
   if (!draining) drainSends();
 }
 
@@ -311,11 +326,39 @@ async function drainSends() {
   draining = true;
   while (pendingSends.length > 0) {
     if (!datagramWriter) break;
+    const t0 = performance.now();
     try { await datagramWriter.ready; } catch { break; }
+    const readyMs = performance.now() - t0;
+    sendStats.readyWaits++;
+    if (readyMs > sendStats.maxReadyMs) sendStats.maxReadyMs = readyMs;
+    // Teardown may have nulled the writer while we awaited `.ready`.
+    if (!datagramWriter) break;
     const data = pendingSends.shift()!;
-    try { datagramWriter.write(data); } catch {}
+    sendStats.attempted++;
+    // Handle the write promise: a rejected write (stream errored) must be
+    // counted, not silently dropped — otherwise ACKs vanish without a trace.
+    datagramWriter.write(data).then(
+      () => { sendStats.written++; },
+      (e) => { sendStats.failed++; log(`wt write failed: ${e}`, 'err'); },
+    );
   }
   draining = false;
+}
+
+function startSendStats() {
+  if (sendStatsTimer !== null) window.clearInterval(sendStatsTimer);
+  sendStats = { queued: 0, attempted: 0, written: 0, failed: 0, readyWaits: 0, maxReadyMs: 0 };
+  sendStatsTimer = window.setInterval(() => {
+    if (sendStats.queued === 0 && sendStats.attempted === 0) return;
+    log(
+      `sends: queued=${sendStats.queued} attempted=${sendStats.attempted} ` +
+      `written=${sendStats.written} failed=${sendStats.failed} ` +
+      `readyWaits=${sendStats.readyWaits} maxReady=${sendStats.maxReadyMs.toFixed(1)}ms ` +
+      `pending=${pendingSends.length}`,
+      'info',
+    );
+    sendStats = { queued: 0, attempted: 0, written: 0, failed: 0, readyWaits: 0, maxReadyMs: 0 };
+  }, 5000);
 }
 
 function handleWorkerMsg(msg: WorkerMsg) {
