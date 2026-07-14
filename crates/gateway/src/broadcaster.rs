@@ -6,6 +6,7 @@
 
 use crate::ingest::{Ingester, TsMessage};
 use anyhow::Result;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -23,6 +24,7 @@ pub struct Broadcaster {
     tx: broadcast::Sender<TsMessage>,
     /// Maximum viewers; enforced by `subscribe()`.
     pub max_viewers: usize,
+    alive: Arc<AtomicBool>,
 }
 
 impl Broadcaster {
@@ -33,9 +35,12 @@ impl Broadcaster {
         I: Ingester + Send + 'static,
     {
         let (tx, _rx0) = broadcast::channel(capacity);
+        let alive = Arc::new(AtomicBool::new(true));
+        let alive_task = alive.clone();
         let broadcaster = Arc::new(Self {
             tx: tx.clone(),
             max_viewers,
+            alive,
         });
         let tx2 = tx.clone();
         tokio::spawn(async move {
@@ -50,7 +55,7 @@ impl Broadcaster {
                         let _ = tx2.send(msg);
                     }
                     Ok(None) => {
-                        tracing::info!("ingester source ended");
+                        tracing::info!("ingester source ended; broadcaster shutting down");
                         break;
                     }
                     Err(e) => {
@@ -59,12 +64,18 @@ impl Broadcaster {
                     }
                 }
             }
+            alive_task.store(false, Ordering::SeqCst);
+            tracing::info!("broadcaster task exited");
         });
         broadcaster
     }
 
-    /// Subscribe a new viewer. Returns `None` if the session cap is reached.
+    /// Subscribe a new viewer. Returns `None` if the session cap is reached
+    /// or the broadcaster is dead (source ended).
     pub fn subscribe(&self) -> Option<ViewerRx> {
+        if !self.alive.load(Ordering::SeqCst) {
+            return None;
+        }
         if self.tx.receiver_count() >= self.max_viewers {
             return None;
         }
@@ -72,6 +83,10 @@ impl Broadcaster {
             rx: self.tx.subscribe(),
             lag_count: 0,
         })
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
     }
 
     pub fn viewer_count(&self) -> usize {

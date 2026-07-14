@@ -86,12 +86,12 @@ impl BrowserSession {
 
     /// Spawn a session. `viewer` is this session's private subscription to the
     /// ingester fanout.
-    pub fn spawn(conn: Connection, viewer: ViewerRx, sim_loss: u8, sim_seed: u64, latency_ms: u64) {
+    pub fn spawn(conn: Connection, viewer: ViewerRx, sim_loss: u8, sim_seed: u64, latency_ms: u64) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             if let Err(e) = Self::run(conn, viewer, sim_loss, sim_seed, latency_ms).await {
                 tracing::info!(?e, "browser session ended");
             }
-        });
+        })
     }
 
     async fn run(
@@ -248,7 +248,7 @@ impl BrowserSession {
                 if init.is_connected() {
                     let mut drained = 0;
                     loop {
-                        if drained >= 16 { break; }
+                        if drained >= 32 { break; }
                         match viewer.try_recv() {
                             Ok(Some(m)) => { v.extend(init.push_message(m)); drained += 1; }
                             Ok(None) => break,

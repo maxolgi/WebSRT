@@ -150,6 +150,7 @@ function teardown() {
   demux = null;
   video = null;
   audio = null;
+  renderer?.destroy();
   renderer = null;
   if (audioEl) { try { audioEl.pause(); } catch {} audioEl.srcObject = null; }
   audioEl = null;
@@ -207,7 +208,7 @@ async function doConnect() {
     return;
   }
   try {
-    renderer = new CanvasRenderer(canvas);
+    renderer = new CanvasRenderer(canvas, Math.min(150, Math.floor(+latencySlider.value / 2)));
     video = new VideoPipeline({
       onFrame: (frame) => {
         stats.decodedFrames++;

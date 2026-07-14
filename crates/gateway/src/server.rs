@@ -17,8 +17,8 @@ use wtransport::ServerConfig;
 
 /// Default viewer cap. Override with `--max-viewers N`.
 const DEFAULT_MAX_VIEWERS: usize = 16;
-/// Broadcast ring-buffer depth. At ~1700 msg/sec this is ~1 second of buffer.
-const BROADCAST_CAPACITY: usize = 2048;
+/// Broadcast ring-buffer depth. At ~1700 msg/sec this is ~2.4s of buffer.
+const BROADCAST_CAPACITY: usize = 4096;
 
 pub async fn run(cert: Cert, cli: Cli) -> Result<()> {
     let bind_addr: SocketAddr = format!("{}:{}", cli.bind, cli.wt_port).parse()?;
@@ -94,7 +94,7 @@ pub async fn run(cert: Cert, cli: Cli) -> Result<()> {
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
 
-    let active_conns: Arc<Mutex<Vec<wtransport::Connection>>> =
+    let session_handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> =
         Arc::new(Mutex::new(Vec::new()));
 
     loop {
@@ -126,8 +126,22 @@ pub async fn run(cert: Cert, cli: Cli) -> Result<()> {
                 // Wait on the broadcaster (None until OBS connects in --input srt mode).
                 let viewer = {
                     let guard = broadcaster.lock().await;
-                    match guard.as_ref().and_then(|b| b.subscribe()) {
-                        Some(v) => v,
+                    match guard.as_ref() {
+                        Some(b) if !b.is_alive() => {
+                            drop(guard);
+                            tracing::warn!("session rejected: source is dead");
+                            session_request.too_many_requests().await;
+                            continue;
+                        }
+                        Some(b) => match b.subscribe() {
+                            Some(v) => v,
+                            None => {
+                                drop(guard);
+                                tracing::warn!("session rejected: viewer cap reached");
+                                session_request.too_many_requests().await;
+                                continue;
+                            }
+                        },
                         None => {
                             drop(guard);
                             tracing::warn!("session rejected: source not ready yet");
@@ -171,18 +185,18 @@ pub async fn run(cert: Cert, cli: Cli) -> Result<()> {
                     }
                 }
 
-                active_conns.lock().await.push(connection.clone());
-                BrowserSession::spawn(connection, viewer, cli.sim_loss, cli.sim_seed, cli.latency);
+                let handle = BrowserSession::spawn(connection, viewer, cli.sim_loss, cli.sim_seed, cli.latency);
+                session_handles.lock().await.push(handle);
             }
         }
     }
 
-    // Graceful drain: close all active sessions and give them time to wind down.
-    let conns = std::mem::take(&mut *active_conns.lock().await);
-    if !conns.is_empty() {
-        tracing::info!(count = conns.len(), "draining active sessions");
-        for c in &conns {
-            c.close(0u32.into(), b"server shutting down");
+    // Graceful drain: abort all session tasks so their connections close.
+    let handles = std::mem::take(&mut *session_handles.lock().await);
+    if !handles.is_empty() {
+        tracing::info!(count = handles.len(), "draining active sessions");
+        for h in &handles {
+            h.abort();
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
         tracing::info!("drain complete");

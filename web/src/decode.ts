@@ -277,6 +277,7 @@ export class VideoPipeline {
   // Each batch retains its original PTS so flushed chunks don't get stamped
   // with the wrong timestamp.
   private pendingNalus: { nalus: NalUnit[]; pts: number | null; isKeyframe: boolean }[] = [];
+  private static readonly PENDING_CAP = 30;
   private configured = false;
   private decodedCount = 0;
   private seenKeyframe = false;
@@ -311,11 +312,17 @@ export class VideoPipeline {
         this.configure();
       }
       this.pendingNalus.push({ nalus, pts, isKeyframe });
+      if (this.pendingNalus.length > VideoPipeline.PENDING_CAP) {
+        this.pendingNalus.splice(0, this.pendingNalus.length - VideoPipeline.PENDING_CAP);
+      }
       return;
     }
 
     if (!this.decoder || this.decoder.state !== 'configured') {
       this.pendingNalus.push({ nalus, pts, isKeyframe });
+      if (this.pendingNalus.length > VideoPipeline.PENDING_CAP) {
+        this.pendingNalus.splice(0, this.pendingNalus.length - VideoPipeline.PENDING_CAP);
+      }
       return;
     }
 
@@ -335,6 +342,10 @@ export class VideoPipeline {
     if (decodeNalus.length === 0) return;
     if (!this.seenKeyframe && !hasIdr) return;
     if (hasIdr) this.seenKeyframe = true;
+    const qDepth = this.decoder.decodeQueueSize;
+    if (!hasIdr && qDepth > 8) {
+      return;
+    }
     const data = nalusToLengthPrefixed(decodeNalus);
     const tsUs = pts != null ? Math.floor(pts / 90) : undefined;
     const chunk = new EncodedVideoChunk({
@@ -543,6 +554,9 @@ abstract class AudioPipelineBase {
   }
 
   protected feedFrame(chunk: EncodedAudioChunk) {
+    if (this.decoder && this.decoder.decodeQueueSize > 20) {
+      return;
+    }
     try {
       this.decoder?.decode(chunk);
       this.packetsDecoded++;
@@ -587,13 +601,34 @@ class PcmPlayerProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.queues = [];
+    this.heads = [];
+    this.tails = [];
+    this.counts = [];
+    this.CAP = 24000;
     this.port.onmessage = (e) => {
       const planes = e.data.planes;
       for (let ch = 0; ch < planes.length; ch++) {
-        if (!this.queues[ch]) this.queues[ch] = [];
-        for (let i = 0; i < planes[ch].length; i++) {
-          this.queues[ch].push(planes[ch][i]);
+        if (!this.queues[ch]) {
+          this.queues[ch] = new Float32Array(this.CAP);
+          this.heads[ch] = 0;
+          this.tails[ch] = 0;
+          this.counts[ch] = 0;
         }
+        const incoming = planes[ch];
+        const q = this.queues[ch];
+        let tail = this.tails[ch];
+        let count = this.counts[ch];
+        for (let i = 0; i < incoming.length; i++) {
+          if (count >= this.CAP) {
+            this.heads[ch] = (this.heads[ch] + 1) % this.CAP;
+            count--;
+          }
+          q[tail] = incoming[i];
+          tail = (tail + 1) % this.CAP;
+          count++;
+        }
+        this.tails[ch] = tail;
+        this.counts[ch] = count;
       }
     };
   }
@@ -601,12 +636,29 @@ class PcmPlayerProcessor extends AudioWorkletProcessor {
     const output = outputs[0];
     const framesNeeded = output[0].length;
     for (let ch = 0; ch < output.length; ch++) {
-      const q = this.queues[ch] || [];
-      const avail = Math.min(framesNeeded, q.length);
-      for (let i = 0; i < framesNeeded; i++) {
-        output[ch][i] = i < avail ? q[i] : 0;
+      if (!this.queues[ch]) {
+        for (let i = 0; i < framesNeeded; i++) output[ch][i] = 0;
+        continue;
       }
-      this.queues[ch] = q.slice(avail);
+      let head = this.heads[ch];
+      let count = this.counts[ch];
+      if (count > framesNeeded + 2400) {
+        const skip = count - framesNeeded - 2400;
+        head = (head + skip) % this.CAP;
+        count -= skip;
+      }
+      const q = this.queues[ch];
+      const toRead = Math.min(framesNeeded, count);
+      for (let i = 0; i < framesNeeded; i++) {
+        if (i < toRead) {
+          output[ch][i] = q[head];
+          head = (head + 1) % this.CAP;
+        } else {
+          output[ch][i] = 0;
+        }
+      }
+      this.heads[ch] = head;
+      this.counts[ch] = count - toRead;
     }
     return true;
   }

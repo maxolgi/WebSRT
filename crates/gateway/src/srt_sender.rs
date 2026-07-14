@@ -42,6 +42,7 @@ pub struct SrtInitiator {
     #[allow(dead_code)]
     local_addr: IpAddr,
     last_stats: Option<SocketStatistics>,
+    pushed: u64,
 }
 
 enum InitiatorState {
@@ -82,6 +83,7 @@ impl SrtInitiator {
             remote,
             local_addr,
             last_stats: None,
+            pushed: 0,
         }
     }
 
@@ -142,10 +144,9 @@ impl SrtInitiator {
         let mut out = Vec::new();
         if let InitiatorState::Connected(duplex) = &mut self.state {
             let now = Instant::now();
-            static PUSHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let n = PUSHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if n < 3 || n % 100 == 0 {
-                tracing::debug!(pushed = n + 1, bytes = msg.1.len(), "push_message: to sender");
+            self.pushed += 1;
+            if self.pushed <= 3 || self.pushed % 100 == 0 {
+                tracing::debug!(pushed = self.pushed, bytes = msg.1.len(), "push_message: to sender");
             }
             duplex.handle_data_input(now, Some(msg));
             drain(duplex, now, &mut out, &mut self.last_stats);
