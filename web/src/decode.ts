@@ -26,9 +26,19 @@ const NAL_SPS = 7;
 const NAL_PPS = 8;
 const NAL_AUD = 9;
 
+// HEVC NAL types.
+const HEVC_TRAIL_N = 0;
+const HEVC_IDR_W_RADL = 19;
+const HEVC_IDR_N_LP = 20;
+const HEVC_CRA = 21;
+const HEVC_VPS = 32;
+const HEVC_SPS = 33;
+const HEVC_PPS = 34;
+
 interface NalUnit {
-  type: number;
-  data: Uint8Array; // includes the 1-byte header
+  type: number;     // H.264 type: data[0] & 0x1f
+  hevcType: number; // HEVC type: (data[0] >> 1) & 0x3f
+  data: Uint8Array; // includes the 1-byte header (H.264) or 2-byte header (HEVC)
 }
 
 /** Split an Annex-B byte stream into individual NALUs (no start codes). */
@@ -63,7 +73,8 @@ export function parseAnnexB(payload: Uint8Array): NalUnit[] {
       const data = payload.subarray(start, end);
       if (data.length > 0) {
         const type = data[0] & 0x1f;
-        out.push({ type, data });
+        const hevcType = (data[0] >> 1) & 0x3f;
+        out.push({ type, hevcType, data });
       }
     }
   }
@@ -259,6 +270,153 @@ function nalusToLengthPrefixed(nalus: NalUnit[]): Uint8Array {
   return out;
 }
 
+/** Parse an HEVC SPS NAL unit for profile, level, and coded dimensions. */
+function parseHevcSps(sps: Uint8Array): {
+  profileSpace: number;
+  tierFlag: number;
+  profileIdc: number;
+  compatFlags: Uint8Array;
+  constraintFlags: Uint8Array;
+  levelIdc: number;
+  chromaFormatIdc: number;
+  bitDepthLumaMinus8: number;
+  bitDepthChromaMinus8: number;
+  width: number;
+  height: number;
+} | null {
+  if (sps.length < 15) return null;
+
+  const profileSpace = (sps[3] >> 6) & 0x03;
+  const tierFlag = (sps[3] >> 5) & 0x01;
+  const profileIdc = sps[3] & 0x1f;
+  const compatFlags = new Uint8Array(sps.subarray(4, 8));
+  const constraintFlags = new Uint8Array(sps.subarray(8, 14));
+  const levelIdc = sps[14];
+
+  const r = new BitReader(sps, 2);
+  r.readBits(4); // sps_video_parameter_set_id
+  const maxSubLayersMinus1 = r.readBits(3);
+  r.readBit();   // sps_temporal_id_nesting_flag
+  // Skip profile_tier_level (2+1+5 + 32 + 48 + 8 = 96 bits)
+  r.readBits(8);   // profile_space + tier + profile_idc
+  r.readBits(32);  // compat flags
+  for (let i = 0; i < 6; i++) r.readBits(8); // constraint flags (48 bits)
+  r.readBits(8);   // level_idc
+
+  // Sub-layer presence flags + data
+  if (maxSubLayersMinus1 > 0) {
+    const subProfile: boolean[] = [];
+    const subLevel: boolean[] = [];
+    for (let i = 0; i < maxSubLayersMinus1; i++) {
+      subProfile[i] = !!r.readBit();
+      subLevel[i] = !!r.readBit();
+    }
+    for (let i = maxSubLayersMinus1; i < 8; i++) r.readBits(2);
+    for (let i = 0; i < maxSubLayersMinus1; i++) {
+      if (subProfile[i]) {
+        r.readBits(5);  // profile_idc
+        r.readBits(32); // compat
+        for (let j = 0; j < 6; j++) r.readBits(8); // constraint (48 bits)
+      }
+      if (subLevel[i]) r.readBits(8);
+    }
+  }
+
+  r.readUe(); // sps_seq_parameter_set_id
+  const chromaFormatIdc = r.readUe();
+  if (chromaFormatIdc === 3) r.readBit(); // separate_colour_plane_flag
+  const picWidth = r.readUe();
+  const picHeight = r.readUe();
+
+  let cropLeft = 0, cropRight = 0, cropTop = 0, cropBottom = 0;
+  if (r.readBit()) { // conformance_window_flag
+    cropLeft = r.readUe();
+    cropRight = r.readUe();
+    cropTop = r.readUe();
+    cropBottom = r.readUe();
+  }
+  const bitDepthLumaMinus8 = r.readUe();
+  const bitDepthChromaMinus8 = r.readUe();
+
+  const subWidthC = (chromaFormatIdc === 1 || chromaFormatIdc === 2) ? 2 : 1;
+  const subHeightC = (chromaFormatIdc === 1) ? 2 : 1;
+  const width = picWidth - (cropLeft + cropRight) * subWidthC;
+  const height = picHeight - (cropTop + cropBottom) * subHeightC;
+
+  return {
+    profileSpace, tierFlag, profileIdc, compatFlags, constraintFlags,
+    levelIdc, chromaFormatIdc, bitDepthLumaMinus8, bitDepthChromaMinus8,
+    width, height,
+  };
+}
+
+/** Build an `hvcC` box (HEVCDecoderConfigurationRecord) from VPS+SPS+PPS. */
+function buildHvcC(vps: Uint8Array, sps: Uint8Array, pps: Uint8Array): Uint8Array {
+  const parsed = parseHevcSps(sps);
+
+  const headerSize = 23;
+  const totalSize = headerSize + 3 * 5 + vps.length + sps.length + pps.length;
+  const buf = new Uint8Array(totalSize);
+  let p = 0;
+
+  buf[p++] = 0x01; // configurationVersion
+
+  if (parsed) {
+    buf[p++] = (parsed.profileSpace << 6) | (parsed.tierFlag << 5) | parsed.profileIdc;
+    buf.set(parsed.compatFlags, p); p += 4;
+    buf.set(parsed.constraintFlags, p); p += 6;
+    buf[p++] = parsed.levelIdc;
+  } else {
+    buf[p++] = 0x01;
+    buf.set([0x60, 0x00, 0x00, 0x00], p); p += 4;
+    buf.set([0x90, 0x00, 0x00, 0x00, 0x00, 0x00], p); p += 6;
+    buf[p++] = 0x00;
+  }
+
+  buf[p++] = 0xF0; buf[p++] = 0x00; // min_spatial_segmentation_idc = 0
+  buf[p++] = 0xFC; // parallelismType = 0
+  buf[p++] = 0xFC | ((parsed?.chromaFormatIdc ?? 1) & 0x03);
+  buf[p++] = 0xF8 | ((parsed?.bitDepthLumaMinus8 ?? 0) & 0x07);
+  buf[p++] = 0xF8 | ((parsed?.bitDepthChromaMinus8 ?? 0) & 0x07);
+  buf[p++] = 0x00; buf[p++] = 0x00; // avgFrameRate = 0
+  buf[p++] = 0x0F; // constantFrameRate=0, numTemporalLayers=1, temporalIdNested=1, lengthSizeMinusOne=3
+
+  buf[p++] = 0x03; // numOfArrays (VPS, SPS, PPS)
+
+  // VPS
+  buf[p++] = 0xA0; // completeness=1, type=32
+  buf[p++] = 0x00; buf[p++] = 0x01; // 1 NALU
+  buf[p++] = (vps.length >> 8) & 0xff; buf[p++] = vps.length & 0xff;
+  buf.set(vps, p); p += vps.length;
+
+  // SPS
+  buf[p++] = 0xA1; // completeness=1, type=33
+  buf[p++] = 0x00; buf[p++] = 0x01;
+  buf[p++] = (sps.length >> 8) & 0xff; buf[p++] = sps.length & 0xff;
+  buf.set(sps, p); p += sps.length;
+
+  // PPS
+  buf[p++] = 0xA2; // completeness=1, type=34
+  buf[p++] = 0x00; buf[p++] = 0x01;
+  buf[p++] = (pps.length >> 8) & 0xff; buf[p++] = pps.length & 0xff;
+  buf.set(pps, p); p += pps.length;
+
+  return buf;
+}
+
+/** Build a WebCodecs codec string for HEVC (e.g. "hev1.1.6.L120.B0"). */
+function buildHevcCodecString(parsed: NonNullable<ReturnType<typeof parseHevcSps>>): string {
+  const profileStr = parsed.profileSpace === 0
+    ? String(parsed.profileIdc)
+    : `${parsed.profileSpace}${parsed.profileIdc}`;
+  let compatHex = '';
+  for (const b of parsed.compatFlags) compatHex += b.toString(16).padStart(2, '0');
+  compatHex = compatHex.replace(/^0+/, '') || '0';
+  const cb = parsed.constraintFlags[0];
+  const constraintStr = cb > 0 ? `.B${cb.toString(16).padStart(2, '0')}` : '';
+  return `hev1.${profileStr}.${compatHex}.L${parsed.levelIdc}${constraintStr}`;
+}
+
 function bytesEqual(a: Uint8Array | null, b: Uint8Array | null): boolean {
   if (a === b) return true;
   if (!a || !b || a.length !== b.length) return false;
@@ -268,10 +426,14 @@ function bytesEqual(a: Uint8Array | null, b: Uint8Array | null): boolean {
   return true;
 }
 
+type VideoCodec = 'h264' | 'hevc';
+
 export class VideoPipeline {
   private decoder: VideoDecoder | null = null;
+  private codec: VideoCodec | null = null;
   private sps: Uint8Array | null = null;
   private pps: Uint8Array | null = null;
+  private vps: Uint8Array | null = null; // HEVC only
   private cb: DecoderCallbacks;
   // Pending NALU batches seen between SPS/PPS arrival and decoder.configure().
   // Each batch retains its original PTS so flushed chunks don't get stamped
@@ -290,27 +452,38 @@ export class VideoPipeline {
   feed(payload: Uint8Array, pts: number | null, isKeyframe: boolean) {
     const nalus = parseAnnexB(payload);
 
-    // Only re-configure if the SPS/PPS bytes actually changed. OBS emits
-    // SPS/PPS in-band before every IDR (~2s); identical re-emissions must
-    // not trigger a re-configure cycle.
+    // Auto-detect codec on first recognizable NAL.
+    if (this.codec === null) {
+      for (const n of nalus) {
+        if (n.hevcType === HEVC_VPS || n.hevcType === HEVC_SPS || n.hevcType === HEVC_PPS) {
+          this.codec = 'hevc';
+          break;
+        }
+        if (n.type === NAL_SPS || n.type === NAL_PPS || n.type === NAL_IDR) {
+          this.codec = 'h264';
+          break;
+        }
+      }
+      if (this.codec === null) return;
+    }
+
+    const isHevc = this.codec === 'hevc';
+    const nt = (n: NalUnit) => isHevc ? n.hevcType : n.type;
+
+    // Collect parameter sets. HEVC needs VPS+SPS+PPS; H.264 needs SPS+PPS.
     for (const n of nalus) {
-      if (n.type === NAL_SPS) {
-        if (!bytesEqual(this.sps, n.data)) {
-          this.sps = n.data;
-          this.configured = false;
-        }
-      } else if (n.type === NAL_PPS) {
-        if (!bytesEqual(this.pps, n.data)) {
-          this.pps = n.data;
-          this.configured = false;
-        }
+      if (isHevc && nt(n) === HEVC_VPS) {
+        if (!bytesEqual(this.vps, n.data)) { this.vps = n.data; this.configured = false; }
+      } else if (nt(n) === (isHevc ? HEVC_SPS : NAL_SPS)) {
+        if (!bytesEqual(this.sps, n.data)) { this.sps = n.data; this.configured = false; }
+      } else if (nt(n) === (isHevc ? HEVC_PPS : NAL_PPS)) {
+        if (!bytesEqual(this.pps, n.data)) { this.pps = n.data; this.configured = false; }
       }
     }
 
     if (!this.configured) {
-      if (this.sps && this.pps) {
-        this.configure();
-      }
+      const ready = isHevc ? (this.vps && this.sps && this.pps) : (this.sps && this.pps);
+      if (ready) this.configure();
       this.pendingNalus.push({ nalus, pts, isKeyframe });
       if (this.pendingNalus.length > VideoPipeline.PENDING_CAP) {
         this.pendingNalus.splice(0, this.pendingNalus.length - VideoPipeline.PENDING_CAP);
@@ -337,8 +510,15 @@ export class VideoPipeline {
 
   private emitAu(nalus: NalUnit[], pts: number | null, _hint: boolean) {
     if (!this.decoder || this.decoder.state !== 'configured') return;
-    const hasIdr = nalus.some((n) => n.type === NAL_IDR);
-    const decodeNalus = nalus.filter((n) => n.type >= 1 && n.type <= 5);
+    const isHevc = this.codec === 'hevc';
+    const nt = (n: NalUnit) => isHevc ? n.hevcType : n.type;
+    const isKey = (n: NalUnit) => isHevc
+      ? (nt(n) === HEVC_IDR_W_RADL || nt(n) === HEVC_IDR_N_LP)
+      : (nt(n) === NAL_IDR);
+    const hasIdr = nalus.some(isKey);
+    const decodeNalus = isHevc
+      ? nalus.filter((n) => nt(n) < 32)
+      : nalus.filter((n) => nt(n) >= 1 && nt(n) <= 5);
     if (decodeNalus.length === 0) return;
     if (!this.seenKeyframe && !hasIdr) return;
     if (hasIdr) this.seenKeyframe = true;
@@ -363,6 +543,14 @@ export class VideoPipeline {
   }
 
   private configure() {
+    if (this.codec === 'hevc') {
+      this.configureHevc();
+    } else {
+      this.configureAvc();
+    }
+  }
+
+  private configureAvc() {
     if (!this.sps || !this.pps) return;
     const info = parseSps(this.sps);
     if (!info) return;
@@ -405,10 +593,48 @@ export class VideoPipeline {
     }
   }
 
+  private configureHevc() {
+    if (!this.vps || !this.sps || !this.pps) return;
+    const info = parseHevcSps(this.sps);
+    const hvcc = buildHvcC(this.vps, this.sps, this.pps);
+
+    if (this.decoder) {
+      try { this.decoder.close(); } catch {}
+    }
+    this.decoder = new VideoDecoder({
+      output: (frame) => {
+        this.decodedCount++;
+        this.cb.onFrame(frame);
+      },
+      error: (e) => this.cb.onError(e),
+    });
+
+    const codec = info ? buildHevcCodecString(info) : 'hev1.1.6.L0';
+    try {
+      this.decoder.configure({
+        codec,
+        description: hvcc,
+      } as VideoDecoderConfig);
+      this.configured = true;
+      this.seenKeyframe = false;
+      this.cb.onConfigured({
+        width: info?.width ?? 0,
+        height: info?.height ?? 0,
+        profile: info?.profileIdc ?? 0,
+        level: info?.levelIdc ?? 0,
+      });
+    } catch (e) {
+      this.cb.onError(e);
+      this.decoder = null;
+    }
+  }
+
   reset() {
     this.configured = false;
+    this.codec = null;
     this.sps = null;
     this.pps = null;
+    this.vps = null;
     this.pendingNalus = [];
     if (this.decoder) {
       try { this.decoder.close(); } catch {}

@@ -33,6 +33,7 @@ export type WorkerMsg =
   | { type: 'batch'; msgs: WorkerMsg[] };
 
 const ST_H264 = 0x1b;
+const ST_HEVC = 0x24;
 const ST_AAC = 0x0f;
 const ST_OPUS_FFMPEG = 0x06;
 
@@ -92,7 +93,7 @@ async function doInit(latencyMs: number) {
     onPmt: (entries) => {
       let changed = false;
       for (const e of entries) {
-        if (e.streamType === ST_H264 && videoPid !== e.pid) {
+        if ((e.streamType === ST_H264 || e.streamType === ST_HEVC) && videoPid !== e.pid) {
           videoPid = e.pid;
           changed = true;
         } else if ((e.streamType === ST_AAC || e.streamType === ST_OPUS_FFMPEG) && audioPid !== e.pid) {
