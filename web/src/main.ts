@@ -267,20 +267,44 @@ async function doConnect() {
 
   worker.postMessage({ cmd: 'init', latencyMs });
 
+  let dgramBatch: Uint8Array[] = [];
+  let flushPending = false;
+
+  const flushDgrams = () => {
+    flushPending = false;
+    if (dgramBatch.length > 0 && worker) {
+      const batch = dgramBatch;
+      dgramBatch = [];
+      const transfer = batch.map(d => d.buffer);
+      worker.postMessage({ cmd: 'datagrams', batch }, transfer);
+    }
+  };
+
   (async () => {
     const reader = wt.datagrams.readable.getReader();
     for (;;) {
       const { value, done } = await reader.read();
       if (done) {
+        flushDgrams();
         log('datagram reader done', 'info');
         return;
       }
-      worker?.postMessage({ cmd: 'datagram', data: value });
+      dgramBatch.push(value);
+      if (dgramBatch.length >= 16) {
+        flushDgrams();
+      } else if (!flushPending) {
+        flushPending = true;
+        setTimeout(flushDgrams, 0);
+      }
     }
   })();
 }
 
 function handleWorkerMsg(msg: WorkerMsg) {
+  if (msg.type === 'batch') {
+    for (const m of msg.msgs) handleWorkerMsg(m);
+    return;
+  }
   switch (msg.type) {
     case 'log':
       log(msg.msg, msg.cls);

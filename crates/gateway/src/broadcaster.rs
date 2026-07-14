@@ -45,22 +45,34 @@ impl Broadcaster {
         let tx2 = tx.clone();
         tokio::spawn(async move {
             let mut sent = 0u64;
+            let mut last_sent = 0u64;
+            let mut heartbeat_at = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
-                match ingester.next_message().await {
-                    Ok(Some(msg)) => {
-                        sent += 1;
-                        if sent <= 3 || sent % 100 == 0 {
-                            tracing::debug!(sent, bytes = msg.1.len(), "broadcaster: forwarded message");
+                let next_msg = ingester.next_message();
+                tokio::pin!(next_msg);
+                tokio::select! {
+                    res = &mut next_msg => match res {
+                        Ok(Some(msg)) => {
+                            sent += 1;
+                            let _ = tx2.send(msg);
                         }
-                        let _ = tx2.send(msg);
-                    }
-                    Ok(None) => {
-                        tracing::info!("ingester source ended; broadcaster shutting down");
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::warn!(?e, "ingester error");
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        Ok(None) => {
+                            tracing::info!("ingester source ended; broadcaster shutting down");
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::warn!(?e, "ingester error");
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    },
+                    _ = tokio::time::sleep_until(heartbeat_at) => {
+                        tracing::info!(
+                            sent, delta = sent - last_sent,
+                            rx_count = tx2.receiver_count(),
+                            "broadcaster heartbeat"
+                        );
+                        last_sent = sent;
+                        heartbeat_at = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
                     }
                 }
             }

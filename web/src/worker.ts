@@ -3,7 +3,7 @@ import { Demuxer } from './demux';
 
 export type WorkerCmd =
   | { cmd: 'init'; latencyMs: number }
-  | { cmd: 'datagram'; data: Uint8Array }
+  | { cmd: 'datagrams'; batch: Uint8Array[] }
   | { cmd: 'stop' };
 
 export interface StatsMsg {
@@ -29,7 +29,8 @@ export type WorkerMsg =
   | { type: 'audioPes'; data: Uint8Array; pts: number | null }
   | { type: 'send'; data: Uint8Array }
   | { type: 'stats'; stats: StatsMsg }
-  | { type: 'close' };
+  | { type: 'close' }
+  | { type: 'batch'; msgs: WorkerMsg[] };
 
 const ST_H264 = 0x1b;
 const ST_AAC = 0x0f;
@@ -44,6 +45,7 @@ let videoPid: number | null = null;
 let audioPid: number | null = null;
 let audioStreamType: number | null = null;
 let inited = false;
+let outgoing: WorkerMsg[] = [];
 
 self.onmessage = async (e: MessageEvent) => {
   const cmd = e.data as WorkerCmd;
@@ -51,11 +53,11 @@ self.onmessage = async (e: MessageEvent) => {
     case 'init':
       await doInit(cmd.latencyMs);
       break;
-    case 'datagram':
+    case 'datagrams':
       if (!rx || !inited) return;
-      {
+      for (const data of cmd.batch) {
         const nowUs = (performance.now() - epoch) * 1000;
-        const actions = rx.handle_datagram(cmd.data, nowUs);
+        const actions = rx.handle_datagram(data, nowUs);
         processActions(actions);
       }
       break;
@@ -63,10 +65,18 @@ self.onmessage = async (e: MessageEvent) => {
       doStop();
       break;
   }
+  flushOutgoing();
 };
 
-function post(msg: WorkerMsg) {
-  (self as unknown as Worker).postMessage(msg);
+function queue(msg: WorkerMsg) {
+  outgoing.push(msg);
+}
+
+function flushOutgoing() {
+  if (outgoing.length > 0) {
+    (self as unknown as Worker).postMessage({ type: 'batch', msgs: outgoing });
+    outgoing = [];
+  }
 }
 
 async function doInit(latencyMs: number) {
@@ -92,7 +102,7 @@ async function doInit(latencyMs: number) {
         }
       }
       if (changed) {
-        post({
+        queue({
           type: 'pmt',
           videoPid: videoPid ?? -1,
           audioPid: audioPid ?? -1,
@@ -102,12 +112,12 @@ async function doInit(latencyMs: number) {
     },
     onPes: (pid, pts, _dts, bytes, ra) => {
       if (pid === videoPid) {
-        post({ type: 'videoPes', data: bytes, pts, isKeyframe: ra });
+        queue({ type: 'videoPes', data: bytes, pts, isKeyframe: ra });
       } else if (pid === audioPid) {
-        post({ type: 'audioPes', data: bytes, pts });
+        queue({ type: 'audioPes', data: bytes, pts });
       }
     },
-    onError: (msg_) => post({ type: 'log', msg: `demux err: ${msg_}`, cls: 'err' }),
+    onError: (msg_) => queue({ type: 'log', msg: `demux err: ${msg_}`, cls: 'err' }),
   });
 
   inited = true;
@@ -117,13 +127,15 @@ async function doInit(latencyMs: number) {
     const nowUs = (performance.now() - epoch) * 1000;
     const actions = rx.poll(nowUs);
     processActions(actions);
+    flushOutgoing();
   }, 10);
 
   statsTimer = setInterval(() => {
     if (!rx || !inited) return;
     const s = rx.getStats();
     if (!s) return;
-    post({ type: 'stats', stats: serializeStats(s) });
+    queue({ type: 'stats', stats: serializeStats(s) });
+    flushOutgoing();
   }, 1000);
 }
 
@@ -139,21 +151,21 @@ function processActions(actions: SrtAction[]) {
   for (const a of actions) {
     switch (a.kind) {
       case 0:
-        post({ type: 'send', data: a.data });
+        queue({ type: 'send', data: a.data });
         break;
       case 1:
         demux?.feed(a.data);
         break;
       case 2:
-        post({ type: 'handshakeComplete' });
+        queue({ type: 'handshakeComplete' });
         break;
       case 3:
         break;
       case 4:
-        post({ type: 'close' });
+        queue({ type: 'close' });
         break;
       case 5:
-        post({ type: 'log', msg: `srt: ${a.text}`, cls: 'info' });
+        queue({ type: 'log', msg: `srt: ${a.text}`, cls: 'info' });
         break;
     }
   }

@@ -216,6 +216,7 @@ impl BrowserSession {
         let mut ticker = tokio::time::interval(Duration::from_millis(2));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut stats_at = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut action_count: u64 = 0;
 
         loop {
             let (msg, do_stats) = tokio::select! {
@@ -237,8 +238,13 @@ impl BrowserSession {
             };
             let now = Instant::now();
             let mut should_close = false;
+            let lock_start = Instant::now();
             let actions = {
                 let mut init = initiator.lock().await;
+                let lock_ms = lock_start.elapsed().as_millis();
+                if lock_ms > 10 {
+                    tracing::warn!(lock_ms, "sender_pump: initiator lock contention");
+                }
                 let mut v = init.tick(now);
                 if let Some(m) = msg {
                     if init.is_connected() {
@@ -260,6 +266,7 @@ impl BrowserSession {
             };
             {
                 let mut l = loss.lock().await;
+                action_count += actions.len() as u64;
                 for action in actions {
                     if matches!(action, SenderAction::Close) {
                         should_close = true;
@@ -293,6 +300,7 @@ impl BrowserSession {
                         rx_ack = s.rx_ack,
                         rx_nak = s.rx_nak,
                         tx_buffered = s.tx_buffered_data,
+                        actions = action_count,
                         "session stats"
                     );
                     let wt_rtt_ms = wt_rtt.as_secs_f64() * 1000.0;
@@ -309,6 +317,7 @@ impl BrowserSession {
                     tracing::debug!(sent, dropped, lag, "session stats (no SRT stats yet)");
                 }
                 stats_at = tokio::time::Instant::now() + Duration::from_secs(5);
+                action_count = 0;
                 let is_closed = initiator.lock().await.is_closed();
                 if is_closed {
                     tracing::info!("session: initiator closed");
