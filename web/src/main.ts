@@ -17,7 +17,7 @@ let reconnectTimer: number | null = null;
 let reconnectAttempts = 0;
 let manualDisconnect = false;
 const MAX_RECONNECT_DELAY_MS = 30000;
-const BASE_RECONNECT_DELAY_MS = 1000;
+const BASE_RECONNECT_DELAY_MS = 2000;
 
 type ConnectionState = 'idle' | 'connecting' | 'connected';
 let connState: ConnectionState = 'idle';
@@ -85,6 +85,7 @@ const audioCb = {
 connectBtn.addEventListener('click', () => {
   if (connState === 'connected' || connState === 'connecting') {
     manualDisconnect = true;
+    reconnectAttempts = 0;
     teardown();
     setStatus('disconnected');
   } else {
@@ -122,7 +123,6 @@ function cancelReconnect() {
     window.clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
-  reconnectAttempts = 0;
 }
 
 function teardown() {
@@ -247,6 +247,8 @@ async function doConnect() {
     setConnState('connected');
   } catch (e) {
     log(`connect failed: ${e}`, 'err');
+    try { wt?.close({}); } catch {}
+    wt = null;
     if (!manualDisconnect) scheduleReconnect();
     return;
   }
