@@ -20,8 +20,23 @@ let audioEl: HTMLAudioElement | null = null;
 let audioReady = false;
 let reconnectTimer: number | null = null;
 let reconnectAttempts = 0;
+let manualDisconnect = false;
 const MAX_RECONNECT_DELAY_MS = 30000;
 const BASE_RECONNECT_DELAY_MS = 1000;
+
+type ConnectionState = 'idle' | 'connecting' | 'connected';
+let connState: ConnectionState = 'idle';
+
+function setConnState(s: ConnectionState) {
+  connState = s;
+  if (s === 'connected') {
+    connectBtn.textContent = 'stop';
+  } else if (s === 'connecting') {
+    connectBtn.textContent = 'connecting…';
+  } else {
+    connectBtn.textContent = 'connect';
+  }
+}
 
 function setStatus(s: string) { statusEl.textContent = s; }
 
@@ -82,7 +97,16 @@ const audioCb = {
   },
 };
 
-connectBtn.addEventListener('click', () => doConnect());
+connectBtn.addEventListener('click', () => {
+  if (connState === 'connected' || connState === 'connecting') {
+    manualDisconnect = true;
+    teardown();
+    setStatus('disconnected');
+  } else {
+    manualDisconnect = false;
+    doConnect();
+  }
+});
 
 muteBtn.addEventListener('click', () => {
   if (!audioEl) return;
@@ -118,6 +142,7 @@ function cancelReconnect() {
 
 function teardown() {
   cancelReconnect();
+  setConnState('idle');
   srt?.stop();
   srt = null;
   try { wt?.close({}); } catch {}
@@ -174,6 +199,8 @@ function wireAudio() {
 
 async function doConnect() {
   teardown();
+  manualDisconnect = false;
+  setConnState('connecting');
   const hashHex = (window as any).CERT_HASH as string | null | undefined;
   if (hashHex === undefined) {
     log('No cert-hash.js — is the gateway running?', 'err');
@@ -210,6 +237,7 @@ async function doConnect() {
     await wt.ready;
     log('WT ready ✓', 'ok');
     setStatus('WT ready; awaiting SRT handshake');
+    setConnState('connected');
 
     demux = await Demuxer.create({
       onPat: (_prog, _pid) => {},
@@ -260,11 +288,11 @@ async function doConnect() {
     });
 
     wt.closed
-      .then(() => { log('WT closed', 'info'); scheduleReconnect(); })
-      .catch((e) => { log(`WT closed (err): ${e}`, 'err'); scheduleReconnect(); });
+      .then(() => { log('WT closed', 'info'); if (!manualDisconnect) scheduleReconnect(); })
+      .catch((e) => { log(`WT closed (err): ${e}`, 'err'); if (!manualDisconnect) scheduleReconnect(); });
   } catch (e) {
     log(`connect failed: ${e}`, 'err');
-    scheduleReconnect();
+    if (!manualDisconnect) scheduleReconnect();
   }
 }
 

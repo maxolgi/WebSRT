@@ -482,10 +482,11 @@ impl ReceiveBuffer {
             })
         });
 
-        let tsbpd_threshold = now - self.tsbpd_latency - self.tsbpd_tolerance;
+        let tsbpd_threshold = now.checked_sub(self.tsbpd_latency + self.tsbpd_tolerance);
         let too_late_packets = data_packets.take_while(|packet| {
             packet.map_or(true, |(_, packet_time, message_loc)| {
-                packet_time <= tsbpd_threshold || !message_loc.contains(PacketLocation::FIRST)
+                tsbpd_threshold.map_or(false, |t| packet_time <= t)
+                    || !message_loc.contains(PacketLocation::FIRST)
             })
         });
 
