@@ -1,5 +1,10 @@
 # WebSRT
 
+> **NOTE: THIS IS NOT PRODUCTION READY.** This is an experimental project that
+> implements SRT over WebTransport datagrams. The protocol works, streams play,
+> and NAK/retransmit recovers from packet loss, but it has not been hardened,
+> audited, or tested at scale. Use at your own risk.
+
 Pure-Rust gateway that bridges native SRT (from OBS or any SRT sender) to
 browsers running **the real SRT protocol over WebTransport datagrams** — same
 wire format, same NAK/ACK/retransmit semantics, no stream-per-frame remuxing,
