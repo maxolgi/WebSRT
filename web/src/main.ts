@@ -1,11 +1,6 @@
-// Phase 6: WebCodecs video decode.
-//
-// SRT-over-WebTransport → srt-wasm → mpeg2ts-wasm → VideoPipeline → canvas.
-
-import { SrtController } from './srt';
-import { Demuxer } from './demux';
 import { VideoPipeline, OpusAudioPipeline, AacAudioPipeline } from './decode';
 import { CanvasRenderer } from './render';
+import type { WorkerMsg, StatsMsg } from './worker';
 
 const logEl = document.getElementById('log') as HTMLPreElement;
 const statusEl = document.getElementById('status') as HTMLParagraphElement;
@@ -71,22 +66,12 @@ function hexToBytes(hex: string): Uint8Array {
   return out;
 }
 
-let wt: WebTransport | null = null;
-let srt: SrtController | null = null;
-let demux: Demuxer | null = null;
+let worker: Worker | null = null;
 let video: VideoPipeline | null = null;
 let audio: OpusAudioPipeline | AacAudioPipeline | null = null;
 let renderer: CanvasRenderer | null = null;
-
-// Stream-type IDs from MPEG-TS we recognize.
-const ST_H264 = 0x1B; // AVC
-const ST_AAC = 0x0F;
-const ST_OPUS_FFMPEG = 0x06; // private data (Opus-in-TS via ffmpeg)
-
-const stats = { pat: 0, pmt: 0, pesVideo: 0, pesAudio: 0, ra: 0, decodedFrames: 0 };
-let videoPid: number | null = null;
-let audioPid: number | null = null;
 let audioStreamType: number | null = null;
+let lastStats: StatsMsg | null = null;
 
 const audioCb = {
   onError: (e: unknown) => log(`audio err: ${e}`, 'err'),
@@ -143,11 +128,9 @@ function cancelReconnect() {
 function teardown() {
   cancelReconnect();
   setConnState('idle');
-  srt?.stop();
-  srt = null;
-  try { wt?.close({}); } catch {}
-  wt = null;
-  demux = null;
+  if (worker) {
+    worker.postMessage({ cmd: 'stop' });
+  }
   video = null;
   audio = null;
   renderer?.destroy();
@@ -155,19 +138,17 @@ function teardown() {
   if (audioEl) { try { audioEl.pause(); } catch {} audioEl.srcObject = null; }
   audioEl = null;
   audioReady = false;
+  audioStreamType = null;
   muteBtn.disabled = true;
   muteBtn.textContent = 'muted';
-  videoPid = null;
-  audioPid = null;
-  audioStreamType = null;
-  stats.pat = 0; stats.pmt = 0; stats.pesVideo = 0; stats.pesAudio = 0; stats.ra = 0; stats.decodedFrames = 0;
+  lastStats = null;
+  statsEl.textContent = '';
 }
 
 function wireAudio() {
   if (!audio || !audioReady) return;
   const track = audio.track;
   if (track) {
-    // MediaStreamTrackGenerator path (Chrome).
     if (!audioEl) {
       audioEl = document.createElement('audio');
       audioEl.autoplay = true;
@@ -187,7 +168,6 @@ function wireAudio() {
         muteBtn.textContent = 'muted';
       });
   } else {
-    // AudioWorklet path (Firefox). AudioContext needs a user gesture.
     audio!.resume()
       .then(() => {
         log('audio playing ✓ (AudioWorklet)', 'ok');
@@ -198,103 +178,123 @@ function wireAudio() {
   }
 }
 
-async function doConnect() {
+function doConnect() {
   teardown();
   manualDisconnect = false;
   setConnState('connecting');
+
   const hashHex = (window as any).CERT_HASH as string | null | undefined;
   if (hashHex === undefined) {
     log('No cert-hash.js — is the gateway running?', 'err');
     return;
   }
-  try {
-    renderer = new CanvasRenderer(canvas, Math.min(150, Math.floor(+latencySlider.value / 2)));
-    video = new VideoPipeline({
-      onFrame: (frame) => {
-        stats.decodedFrames++;
-        renderer?.draw(frame);
-        if (stats.decodedFrames === 1) {
-          log(`first frame decoded ✓ (${frame.displayWidth}x${frame.displayHeight})`, 'ok');
-          setStatus(`decoding ${frame.displayWidth}x${frame.displayHeight}`);
-        }
-      },
-      onError: (e) => log(`video err: ${e}`, 'err'),
-      onConfigured: (info) =>
-        log(`VideoDecoder configured (profile ${info.profile}, level ${info.level})`, 'info'),
-    });
 
-    const pageHost = location.hostname || '127.0.0.1';
-    const wtHost = pageHost === 'localhost' ? '127.0.0.1' : pageHost;
-    const wtUrl = `https://${wtHost}:4433/wt`;
-    const wtOpts: WebTransportOptions = {};
-    if (hashHex) {
-      const hash = hexToBytes(hashHex);
-      wtOpts.serverCertificateHashes = [{ algorithm: 'sha-256', value: hash as BufferSource }];
-      log(`connecting to ${wtUrl} (self-signed, hash ${hashHex.slice(0, 8)}…) …`, 'info');
-    } else {
-      log(`connecting to ${wtUrl} (mkcert/PKI) …`, 'info');
-    }
-    wt = new WebTransport(wtUrl, wtOpts);
-    await wt.ready;
-    log('WT ready ✓', 'ok');
-    setStatus('WT ready; awaiting SRT handshake');
-    setConnState('connected');
+  renderer = new CanvasRenderer(canvas, Math.min(150, Math.floor(+latencySlider.value / 2)));
+  let firstFrame = true;
+  video = new VideoPipeline({
+    onFrame: (frame) => {
+      renderer?.draw(frame);
+      if (firstFrame) {
+        firstFrame = false;
+        log(`first frame decoded ✓ (${frame.displayWidth}x${frame.displayHeight})`, 'ok');
+        setStatus(`decoding ${frame.displayWidth}x${frame.displayHeight}`);
+      }
+    },
+    onError: (e) => log(`video err: ${e}`, 'err'),
+    onConfigured: (info) =>
+      log(`VideoDecoder configured (profile ${info.profile}, level ${info.level})`, 'info'),
+  });
 
-    demux = await Demuxer.create({
-      onPat: (_prog, _pid) => {},
-      onPmt: (entries) => {
-        for (const e of entries) {
-          if (e.streamType === ST_H264) {
-            videoPid = e.pid;
-          } else if (e.streamType === ST_AAC || e.streamType === ST_OPUS_FFMPEG) {
-            audioPid = e.pid;
-            audioStreamType = e.streamType;
-          }
-        }
-        if (audioPid !== null && !audio) {
-          const isOpus = audioStreamType === ST_OPUS_FFMPEG;
-          log(`audio PID ${audioPid}: ${isOpus ? 'Opus' : 'AAC'} (stream type 0x${audioStreamType!.toString(16)})`, 'info');
-          audio = isOpus
-            ? new OpusAudioPipeline(audioCb)
-            : new AacAudioPipeline(audioCb);
-        }
-      },
-      onPes: (pid, pts, _dts, bytes, ra) => {
-        if (pid === videoPid) {
-          stats.pesVideo++;
-          if (ra) stats.ra++;
-          video?.feed(bytes, pts, ra);
-        } else if (pid === audioPid) {
-          stats.pesAudio++;
-          audio?.feed(bytes, pts);
-        }
-      },
-      onRandomAccess: () => {},
-      onError: (msg) => log(`demux err: ${msg}`, 'err'),
-    });
+  const pageHost = location.hostname || '127.0.0.1';
+  const wtHost = pageHost === 'localhost' ? '127.0.0.1' : pageHost;
+  const wtUrl = `https://${wtHost}:4433/wt`;
 
-    const latencyMs = +latencySlider.value;
-    log(`TSBPD latency: ${formatLatency(latencyMs)}`, 'info');
-    srt = await SrtController.start(wt, latencyMs, {
-      onLog: (m, c) => log(m, c),
-      onHandshakeComplete: () => {
-        reconnectAttempts = 0;
-        setStatus('SRT connected; awaiting video stream');
-      },
-      onDeliverMessage: (b) => demux?.feed(b),
-      onClose: () => {
-        log('session closed', 'err');
-        setStatus('closed');
-      },
-    });
-
-    wt.closed
-      .then(() => { log('WT closed', 'info'); if (!manualDisconnect) scheduleReconnect(); })
-      .catch((e) => { log(`WT closed (err): ${e}`, 'err'); if (!manualDisconnect) scheduleReconnect(); });
-  } catch (e) {
-    log(`connect failed: ${e}`, 'err');
-    if (!manualDisconnect) scheduleReconnect();
+  let certHash: Uint8Array | null = null;
+  if (hashHex) {
+    certHash = hexToBytes(hashHex);
+    log(`connecting to ${wtUrl} (self-signed, hash ${hashHex.slice(0, 8)}…) …`, 'info');
+  } else {
+    log(`connecting to ${wtUrl} (mkcert/PKI) …`, 'info');
   }
+
+  if (!worker) {
+    worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
+    worker.onmessage = (e: MessageEvent) => handleWorkerMsg(e.data as WorkerMsg);
+    worker.onerror = (e) => log(`worker error: ${e.message}`, 'err');
+  }
+
+  const latencyMs = +latencySlider.value;
+  log(`TSBPD latency: ${formatLatency(latencyMs)}`, 'info');
+  worker.postMessage({ cmd: 'connect', url: wtUrl, certHash, latencyMs });
+}
+
+function handleWorkerMsg(msg: WorkerMsg) {
+  switch (msg.type) {
+    case 'log':
+      log(msg.msg, msg.cls);
+      break;
+    case 'wtReady':
+      log('WT ready ✓', 'ok');
+      setStatus('WT ready; awaiting SRT handshake');
+      setConnState('connected');
+      break;
+    case 'handshakeComplete':
+      reconnectAttempts = 0;
+      setStatus('SRT connected; awaiting video stream');
+      break;
+    case 'pmt':
+      if (msg.audioPid >= 0 && msg.audioStreamType >= 0 && !audio) {
+        audioStreamType = msg.audioStreamType;
+        const isOpus = audioStreamType === 0x06;
+        log(`audio PID ${msg.audioPid}: ${isOpus ? 'Opus' : 'AAC'} (stream type 0x${audioStreamType.toString(16)})`, 'info');
+        audio = isOpus
+          ? new OpusAudioPipeline(audioCb)
+          : new AacAudioPipeline(audioCb);
+      }
+      break;
+    case 'videoPes':
+      video?.feed(msg.data, msg.pts, msg.isKeyframe);
+      break;
+    case 'audioPes':
+      audio?.feed(msg.data, msg.pts);
+      break;
+    case 'stats':
+      lastStats = msg.stats;
+      updateStats(msg.stats);
+      break;
+    case 'close':
+      log('session closed', 'err');
+      setStatus('closed');
+      break;
+    case 'wtClosed':
+      log('WT closed', 'info');
+      if (!manualDisconnect) scheduleReconnect();
+      break;
+    case 'wtError':
+      log(`WT error: ${msg.error}`, 'err');
+      if (!manualDisconnect) scheduleReconnect();
+      break;
+  }
+}
+
+function updateStats(s: StatsMsg) {
+  const lossRate = (s.rxData + s.rxLoss) > 0
+    ? ((s.rxLoss / (s.rxData + s.rxLoss)) * 100).toFixed(2)
+    : '0.00';
+  const mbps = (s.bandwidthBps / 1e6).toFixed(1);
+  const elapsed = (s.elapsedMs / 1000).toFixed(0);
+  statsEl.textContent =
+    `uptime   ${elapsed}s\n` +
+    `RTT      ${s.rttMs.toFixed(1)}ms\n` +
+    `bw       ${mbps} Mbps\n` +
+    `rx pkts  ${s.rxData}\n` +
+    `rx bytes ${(s.rxBytes / 1e6).toFixed(1)} MB\n` +
+    `loss     ${s.rxLoss} (${lossRate}%)\n` +
+    `re-xmit  ${s.rxRetransmit}\n` +
+    `dropped  ${s.rxDropped}\n` +
+    `belated  ${s.rxBelated}\n` +
+    `buf'd    ${s.rxBuffered}\n` +
+    `ACK/NAK  ${s.rxAck}/${s.rxNak}`;
 }
 
 if ((window as any).CERT_HASH !== undefined) {
@@ -303,28 +303,3 @@ if ((window as any).CERT_HASH !== undefined) {
 } else {
   log('No cert-hash.js. Start the gateway first, then reload.', 'info');
 }
-
-setInterval(() => {
-  if (!srt) { statsEl.textContent = ''; return; }
-  const s = srt.getStats();
-  if (!s) return;
-  const rxData = Number(s.rxData);
-  const rxLoss = Number(s.rxLoss);
-  const lossRate = (rxData + rxLoss) > 0
-    ? ((rxLoss / (rxData + rxLoss)) * 100).toFixed(2)
-    : '0.00';
-  const mbps = (Number(s.bandwidthBps) / 1e6).toFixed(1);
-  const elapsed = (s.elapsedMs / 1000).toFixed(0);
-  statsEl.textContent =
-    `uptime   ${elapsed}s\n` +
-    `RTT      ${s.rttMs.toFixed(1)}ms\n` +
-    `bw       ${mbps} Mbps\n` +
-    `rx pkts  ${rxData}\n` +
-    `rx bytes ${(Number(s.rxBytes) / 1e6).toFixed(1)} MB\n` +
-    `loss     ${rxLoss} (${lossRate}%)\n` +
-    `re-xmit  ${Number(s.rxRetransmit)}\n` +
-    `dropped  ${Number(s.rxDropped)}\n` +
-    `belated  ${Number(s.rxBelated)}\n` +
-    `buf'd    ${Number(s.rxBuffered)}\n` +
-    `ACK/NAK  ${Number(s.rxAck)}/${Number(s.rxNak)}`;
-}, 1000);

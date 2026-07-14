@@ -3,6 +3,8 @@
 
 import init, { SrtReceiver, type SrtAction, type SrtStats } from '../wasm/srt-wasm/srt_wasm.js';
 
+export type { SrtStats };
+
 let initPromise: Promise<unknown> | null = null;
 export async function ensureSrtWasm(): Promise<void> {
   if (!initPromise) initPromise = init();

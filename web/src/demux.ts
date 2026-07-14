@@ -39,7 +39,7 @@ export class Demuxer {
 
   private dispatch(e: TsEvent) {
     // Debug counter (exposed via window.__demuxStats).
-    const s = (window as any).__demuxStats ??= { pat: 0, pmt: 0, pes: 0, ra: 0, err: 0, raw: 0 };
+    const s = (globalThis as any).__demuxStats ??= { pat: 0, pmt: 0, pes: 0, ra: 0, err: 0, raw: 0 };
     switch (e.kind) {
       case 0: // pat
         s.pat++;
