@@ -179,11 +179,28 @@ function wireAudio() {
   }
 }
 
+async function refreshCertHash(): Promise<void> {
+  try {
+    const resp = await fetch('/cert-hash.js', { cache: 'no-store' });
+    const text = await resp.text();
+    const match = text.match(/CERT_HASH\s*=\s*("(.*?)"|null)/);
+    if (match) {
+      const newHash = match[2] ?? null;
+      const old = (window as any).CERT_HASH as string | null | undefined;
+      if (newHash !== old) {
+        (window as any).CERT_HASH = newHash;
+        log(`Cert hash refreshed: ${newHash ? newHash.slice(0, 8) + '…' : '(mkcert)'}`, 'info');
+      }
+    }
+  } catch { /* ignore — will use cached value */ }
+}
+
 async function doConnect() {
   teardown();
   manualDisconnect = false;
   setConnState('connecting');
 
+  await refreshCertHash();
   const hashHex = (window as any).CERT_HASH as string | null | undefined;
   if (hashHex === undefined) {
     log('No cert-hash.js — is the gateway running?', 'err');
