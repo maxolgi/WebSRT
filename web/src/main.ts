@@ -275,8 +275,7 @@ async function doConnect() {
     if (dgramBatch.length > 0 && worker) {
       const batch = dgramBatch;
       dgramBatch = [];
-      const transfer = batch.map(d => d.buffer);
-      worker.postMessage({ cmd: 'datagrams', batch }, transfer);
+      worker.postMessage({ cmd: 'datagrams', batch });
     }
   };
 
@@ -298,6 +297,25 @@ async function doConnect() {
       }
     }
   })();
+}
+
+let pendingSends: Uint8Array[] = [];
+let draining = false;
+
+function queueSend(data: Uint8Array) {
+  pendingSends.push(data);
+  if (!draining) drainSends();
+}
+
+async function drainSends() {
+  draining = true;
+  while (pendingSends.length > 0) {
+    if (!datagramWriter) break;
+    try { await datagramWriter.ready; } catch { break; }
+    const data = pendingSends.shift()!;
+    try { datagramWriter.write(data); } catch {}
+  }
+  draining = false;
 }
 
 function handleWorkerMsg(msg: WorkerMsg) {
@@ -330,7 +348,7 @@ function handleWorkerMsg(msg: WorkerMsg) {
       audio?.feed(msg.data, msg.pts);
       break;
     case 'send':
-      datagramWriter?.write(msg.data);
+      queueSend(msg.data);
       break;
     case 'stats':
       updateStats(msg.stats);

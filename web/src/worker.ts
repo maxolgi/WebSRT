@@ -46,6 +46,7 @@ let audioPid: number | null = null;
 let audioStreamType: number | null = null;
 let inited = false;
 let outgoing: WorkerMsg[] = [];
+let stats = { batches: 0, datagrams: 0, maxBatchMs: 0, pollMs: 0, pollCount: 0 };
 
 self.onmessage = async (e: MessageEvent) => {
   const cmd = e.data as WorkerCmd;
@@ -55,10 +56,17 @@ self.onmessage = async (e: MessageEvent) => {
       break;
     case 'datagrams':
       if (!rx || !inited) return;
-      for (const data of cmd.batch) {
-        const nowUs = (performance.now() - epoch) * 1000;
-        const actions = rx.handle_datagram(data, nowUs);
-        processActions(actions);
+      {
+        const t0 = performance.now();
+        for (const data of cmd.batch) {
+          const nowUs = (performance.now() - epoch) * 1000;
+          const actions = rx.handle_datagram(data, nowUs);
+          processActions(actions);
+        }
+        const elapsed = performance.now() - t0;
+        stats.batches++;
+        stats.datagrams += cmd.batch.length;
+        if (elapsed > stats.maxBatchMs) stats.maxBatchMs = elapsed;
       }
       break;
     case 'stop':
@@ -124,9 +132,13 @@ async function doInit(latencyMs: number) {
 
   pollTimer = setInterval(() => {
     if (!rx || !inited) return;
+    const t0 = performance.now();
     const nowUs = (performance.now() - epoch) * 1000;
     const actions = rx.poll(nowUs);
     processActions(actions);
+    const elapsed = performance.now() - t0;
+    stats.pollCount++;
+    if (elapsed > stats.pollMs) stats.pollMs = elapsed;
     flushOutgoing();
   }, 10);
 
@@ -135,8 +147,12 @@ async function doInit(latencyMs: number) {
     const s = rx.getStats();
     if (!s) return;
     queue({ type: 'stats', stats: serializeStats(s) });
+    if (stats.batches > 0 || stats.pollCount > 0) {
+      queue({ type: 'log', msg: `worker: ${stats.batches} batches, ${stats.datagrams} dgrams, maxBatch=${stats.maxBatchMs.toFixed(1)}ms, poll=${stats.pollCount}× maxPoll=${stats.pollMs.toFixed(1)}ms`, cls: 'info' });
+    }
+    stats = { batches: 0, datagrams: 0, maxBatchMs: 0, pollMs: 0, pollCount: 0 };
     flushOutgoing();
-  }, 1000);
+  }, 5000);
 }
 
 function doStop() {
