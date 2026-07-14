@@ -191,6 +191,7 @@ Options:
       --srt-mode <SRT_MODE>      SRT mode [default: listener] [possible values: listener, caller]
       --srt-port <SRT_PORT>      SRT listen port (listener mode) [default: 9000]
       --srt-call <SRT_CALL>      Address to dial (caller mode, e.g. 192.168.1.50:9000)
+      --srt-streamid <STREAMID> SRT stream id (listener: filter, caller: sent to OBS)
       --wt-port <WT_PORT>        WebTransport listen port [default: 4433]
       --bind <BIND>              WT bind address [default: 127.0.0.1]
       --cert-mode <CERT_MODE>    Certificate mode [default: self] [possible values: self, mkcert]

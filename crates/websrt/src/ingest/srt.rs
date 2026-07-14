@@ -6,8 +6,8 @@ use srt_tokio::{SrtIncoming, SrtListener, SrtSocket};
 use std::time::Duration;
 
 enum Kind {
-    Listener(SrtListener, SrtIncoming),
-    Caller(String),
+    Listener(SrtListener, SrtIncoming, Option<String>),
+    Caller(String, Option<String>),
 }
 
 pub struct SrtIngester {
@@ -17,23 +17,23 @@ pub struct SrtIngester {
 
 impl SrtIngester {
     pub async fn bind(port: u16) -> Result<Self> {
-        Self::bind_with_addr(format!("0.0.0.0:{port}")).await
+        Self::bind_with_addr(format!("0.0.0.0:{port}"), None).await
     }
 
-    pub async fn bind_with_addr(addr: impl AsRef<str>) -> Result<Self> {
+    pub async fn bind_with_addr(addr: impl AsRef<str>, streamid: Option<String>) -> Result<Self> {
         let (listener, mut incoming) = SrtListener::builder()
             .bind(addr.as_ref())
             .await
             .map_err(|e| anyhow!("srt listener bind: {e}"))?;
         tracing::info!("SRT listener bound, awaiting OBS connection…");
-        let socket = Self::accept_one(&mut incoming).await?;
+        let socket = Self::accept_one(&mut incoming, &streamid).await?;
         Ok(Self {
-            kind: Kind::Listener(listener, incoming),
+            kind: Kind::Listener(listener, incoming, streamid),
             socket: Some(socket),
         })
     }
 
-    async fn accept_one(incoming: &mut SrtIncoming) -> Result<SrtSocket> {
+    async fn accept_one(incoming: &mut SrtIncoming, filter: &Option<String>) -> Result<SrtSocket> {
         loop {
             let request = incoming
                 .incoming()
@@ -42,6 +42,12 @@ impl SrtIngester {
                 .ok_or_else(|| anyhow!("srt listener closed"))?;
             let remote = request.remote();
             let stream_id = request.stream_id().map(|s| s.to_string());
+            if let Some(ref expected) = filter {
+                if stream_id.as_deref() != Some(expected.as_str()) {
+                    tracing::warn!(%remote, ?stream_id, expected = %expected, "streamid mismatch; rejecting");
+                    continue;
+                }
+            }
             tracing::info!(%remote, ?stream_id, "SRT connection accepted from OBS");
             match request.accept(None).await {
                 Ok(socket) => return Ok(socket),
@@ -54,21 +60,25 @@ impl SrtIngester {
     }
 
     pub async fn call(addr: impl AsRef<str>) -> Result<Self> {
+        Self::call_with_streamid(addr, None).await
+    }
+
+    pub async fn call_with_streamid(addr: impl AsRef<str>, streamid: Option<String>) -> Result<Self> {
         let addr_str = addr.as_ref().to_string();
         tracing::info!(addr = %addr_str, "SRT caller: dialing OBS…");
-        let socket = Self::dial(&addr_str).await?;
+        let socket = Self::dial(&addr_str, &streamid).await?;
         Ok(Self {
-            kind: Kind::Caller(addr_str),
+            kind: Kind::Caller(addr_str, streamid),
             socket: Some(socket),
         })
     }
 
-    async fn dial(addr: &str) -> Result<SrtSocket> {
+    async fn dial(addr: &str, streamid: &Option<String>) -> Result<SrtSocket> {
         let socket_addr: srt_protocol::options::SocketAddress = addr
             .try_into()
             .map_err(|e| anyhow!("invalid SRT address {addr}: {e:?}"))?;
         let socket = SrtSocket::builder()
-            .call(socket_addr, None)
+            .call(socket_addr, streamid.as_deref())
             .await
             .map_err(|e| anyhow!("srt call to {addr}: {e}"))?;
         tracing::info!(addr, "SRT caller: connected to OBS");
@@ -77,14 +87,14 @@ impl SrtIngester {
 
     async fn reconnect(&mut self) -> Result<SrtSocket> {
         match &mut self.kind {
-            Kind::Listener(_, incoming) => {
+            Kind::Listener(_, incoming, streamid) => {
                 tracing::info!("SRT: OBS disconnected; waiting for reconnect…");
-                Self::accept_one(incoming).await
+                Self::accept_one(incoming, streamid).await
             }
-            Kind::Caller(addr) => {
+            Kind::Caller(addr, streamid) => {
                 tracing::info!(addr, "SRT caller: re-dialing OBS…");
                 loop {
-                    match Self::dial(addr).await {
+                    match Self::dial(addr, streamid).await {
                         Ok(s) => return Ok(s),
                         Err(e) => {
                             tracing::warn!(?e, addr, "SRT reconnect failed; retrying in 2s");

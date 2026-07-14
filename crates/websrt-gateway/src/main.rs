@@ -63,6 +63,11 @@ pub struct Cli {
     #[arg(long)]
     pub srt_call: Option<String>,
 
+    /// SRT stream id. Listener mode: only accept connections matching this id.
+    /// Caller mode: sent to OBS during connection.
+    #[arg(long)]
+    pub srt_streamid: Option<String>,
+
     /// WebTransport listen port.
     #[arg(long, default_value_t = 4433u16)]
     pub wt_port: u16,
@@ -189,17 +194,18 @@ async fn main() -> Result<()> {
             let source = gateway.source_handle();
             let srt_mode = cli.srt_mode;
             let srt_port = cli.srt_port;
-            let srt_call = cli.srt_call.clone();
+            let call_addr = cli.srt_call.clone();
+            let streamid = cli.srt_streamid.clone();
             tokio::spawn(async move {
                 let result = match srt_mode {
                     SrtMode::Listener => {
                         tracing::info!(port = srt_port, "binding SRT listener for OBS");
-                        SrtIngester::bind(srt_port).await
+                        SrtIngester::bind_with_addr(format!("0.0.0.0:{srt_port}"), streamid).await
                     }
                     SrtMode::Caller => {
-                        let addr = srt_call.unwrap_or_else(|| "127.0.0.1:9000".to_string());
+                        let addr = call_addr.unwrap_or_else(|| "127.0.0.1:9000".to_string());
                         tracing::info!(%addr, "SRT caller mode: dialing OBS");
-                        SrtIngester::call(&addr).await
+                        SrtIngester::call_with_streamid(&addr, streamid).await
                     }
                 };
                 match result {
