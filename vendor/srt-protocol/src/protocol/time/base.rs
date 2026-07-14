@@ -38,8 +38,14 @@ impl TimeBase {
 
     #[allow(clippy::assign_op_pattern)]
     pub fn adjust(&mut self, now: Instant, drift: TimeSpan) {
-        self.origin_time = self.origin_time - drift;
-        self.reference_time = self.reference_time - drift;
+        // drift = timestamp_from(now) - ts, i.e. our time base is `drift` AHEAD
+        // of the peer. To eliminate the error we must DECREASE timestamp_from by
+        // `drift`, which means DECREASING the offset (reference_ts - reference_time)
+        // by `drift`, i.e. INCREASING reference_time by `drift`. Applying `-drift`
+        // here (as upstream does) flips the sign and DOUBLES the error every sync,
+        // causing exponential TSBPD clock drift.
+        self.origin_time = self.origin_time + drift;
+        self.reference_time = self.reference_time + drift;
 
         if now > self.reference_time {
             let delta = now - self.reference_time;
@@ -100,7 +106,9 @@ mod timebase {
             timebase.adjust(now, drift);
 
             let original_time = timebase.instant_from(original_ts);
-            assert_eq!(start - drift - original_time, Duration::from_micros(0));
+            // adjust eliminates the drift: instant_from shifts by +drift (the
+            // offset reference_ts - reference_time decreases by drift).
+            assert_eq!(start + drift - original_time, Duration::from_micros(0));
 
             let ts = timebase.timestamp_from(start);
             prop_assert_eq!(ts, original_ts - drift);
