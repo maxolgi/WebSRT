@@ -316,7 +316,7 @@ Config file `websrt.conf` is deployed to `/etc/supervisor/conf.d/`:
 
 ```ini
 [program:websrt]
-command=/opt/WebSRT/target/release/gateway --input srt --srt-mode listener --srt-port 9000 --bind 0.0.0.0 --latency 1000 --sim-loss 5
+command=/opt/WebSRT/target/release/gateway --input srt --srt-mode listener --srt-port 9000 --bind 0.0.0.0 --latency 1000
 directory=/opt/WebSRT
 autostart=true
 autorestart=true
