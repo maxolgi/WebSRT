@@ -578,6 +578,7 @@ export class VideoPipeline {
         description: avcc,
         codedWidth: info.width || undefined,
         codedHeight: info.height || undefined,
+        hardwareAcceleration: 'prefer-hardware',
       } as VideoDecoderConfig);
       this.configured = true;
       this.seenKeyframe = false;
@@ -614,6 +615,7 @@ export class VideoPipeline {
       this.decoder.configure({
         codec,
         description: hvcc,
+        hardwareAcceleration: 'prefer-hardware',
       } as VideoDecoderConfig);
       this.configured = true;
       this.seenKeyframe = false;
