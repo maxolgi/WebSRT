@@ -107,6 +107,15 @@ muteBtn.addEventListener('click', () => {
   }
 });
 
+const fullscreenBtn = document.getElementById('fullscreen') as HTMLButtonElement;
+fullscreenBtn.addEventListener('click', () => {
+  if (document.fullscreenElement) {
+    document.exitFullscreen();
+  } else {
+    canvas.requestFullscreen();
+  }
+});
+
 function scheduleReconnect() {
   if (reconnectTimer !== null) return;
   const delay = Math.min(BASE_RECONNECT_DELAY_MS * 2 ** reconnectAttempts, MAX_RECONNECT_DELAY_MS);

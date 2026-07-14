@@ -11,6 +11,7 @@
       #log { white-space: pre-wrap; font-size: 12px; max-height: 60vh; overflow: auto; }
       video, canvas { background: #000; display: block; }
       #video-canvas { width: 100%; height: auto; }
+      #video-canvas:fullscreen { width: 100vw; height: 100vh; object-fit: contain; }
       .ok { color: #6f6; }
       .err { color: #f66; }
       .info { color: #6cf; }
@@ -29,6 +30,7 @@
           <button id="connect">connect</button>
           <label>latency: <input type="number" id="latency-num" min="20" max="8000" step="10" value="300" />ms</label>
           <button id="mute" disabled>muted</button>
+          <button id="fullscreen">fullscreen</button>
         </div>
       </div>
       <div class="right-panel">
