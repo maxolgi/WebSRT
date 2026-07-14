@@ -150,7 +150,7 @@ onward without OBS.
 ## Repo layout
 
 ```
-srtsocket/
+WebSRT/
   Cargo.toml                           # workspace
   crates/
     gateway/

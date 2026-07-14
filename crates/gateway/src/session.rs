@@ -51,7 +51,7 @@ impl LossInjector {
         if !self.enabled {
             return false;
         }
-        // SRT packet format (vendor/srt-protocol/src/packet/mod.rs:108):
+        // SRT packet format (srt-protocol/src/packet/mod.rs:108):
         //   bit 7 of first byte = 0  → DATA packet
         //   bit 7 of first byte = 1  → CONTROL packet
         // We only drop data packets so handshake/ACK/NAK always get through.

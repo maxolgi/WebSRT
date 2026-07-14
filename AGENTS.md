@@ -22,15 +22,22 @@ cd web && npx tsc --noEmit
 
 ## Critical build order
 
-1. Vendored crates (`vendor/srt-protocol`, `vendor/mpeg2ts`) change → rebuild BOTH the gateway binary AND the affected WASM crate + copy pkg to web/wasm/
+1. Forked `srt-protocol` (`maxolgi/srt-rs`) changes → rebuild BOTH the gateway binary AND the srt-wasm crate + copy pkg to web/wasm/
 2. Changing only `web/src/*.ts` → Vite hot-reloads, no rebuild needed
 3. Changing `crates/srt-wasm/src/lib.rs` → wasm-pack build + copy pkg + browser reload
 
-## Vendored crates (patched, not upstream)
+## Forked crates (patched, not upstream)
 
-- `vendor/srt-protocol` — patched to use `web_time::Instant` instead of `std::time::Instant` for WASM compatibility. Also contains a TLPKTL fix in `src/protocol/receiver/buffer.rs:485` (`checked_sub` instead of panicking `Sub<Duration>`).
-- `vendor/mpeg2ts` — unmodified vendoring for stability.
-- Both are patched via `[patch.crates-io]` in root `Cargo.toml`.
+- `maxolgi/srt-rs` (main) — forked from `russelltg/srt-rs` v0.4.4 (commit `d4c08ac`). Six patches:
+  1. `std::time::Instant` → `web_time::Instant` across all source files (WASM compat; no-op on native).
+  2. `TimeBase::adjust()` sign flip: upstream applies `-drift` which doubles TSBPD clock error every sync; changed to `+drift`.
+  3. TLPKTL `checked_sub` in `protocol/receiver/buffer.rs` to prevent underflow panic early in page life.
+  4. Stats tracking methods (`rtt()`, `bandwidth_bps()`, `buffered_packets()`, `buffer_available_packets()`) on ARQ/Receiver/Connection.
+  5. Sender buffer edge-case fixes (`send_next_packet` front_packet clamping, `send_packet` bounds-checked index, simplified `number_of_unacked_packets`).
+  6. `packet/time.rs` `Sub<TimeSpan>`: `unwrap_or(self)` → `unwrap()` to surface errors.
+- `maxolgi/mpeg2ts` (master) — forked from `sile/mpeg2ts` v0.6.0 (commit `82e68d4`). One patch:
+  1. `ts/reader.rs`: unknown PIDs return Raw bytes instead of erroring, preventing byte-stream misalignment when the receiver joins mid-stream.
+- Both wired via `[patch.crates-io]` in root `Cargo.toml`.
 
 ## Architecture
 
@@ -46,14 +53,15 @@ Browser runs the **same** `srt-protocol` + `mpeg2ts` Rust crates compiled to WAS
 - `crates/gateway/src/srt_sender.rs` — wraps `srt_protocol::Connect` → `DuplexConnection`. `drain()` captures `Action::UpdateStatistics` into `last_stats`.
 - `crates/srt-wasm/src/lib.rs` — `SrtReceiver` wraps `Listen` → `DuplexConnection`. State in `RefCell`. `handle_datagram(bytes, now_us)` + `poll(now_us)` return `Vec<SrtAction>`.
 - `web/src/decode.ts` — H.264 SPS parser (exp-Golomb, High profile), avcC builder, `VideoPipeline`, `OpusAudioPipeline`, `AacAudioPipeline`. AudioWorklet fallback when `MediaStreamTrackGenerator` unavailable.
+- `web/src/worker.ts` — Web Worker: runs SrtReceiver + Demuxer off main thread. Datagrams batched (up to 16) before processing. Polls SRT state machine every 10ms.
 - `web/src/main.ts` — WT connect, PMT codec detection (AAC 0x0F vs Opus 0x06), connect/stop button state, auto-reconnect with backoff.
 
 ## Runtime
 
 Gateway runs under supervisord:
-- Config: `srtsocket.conf` → deployed to `/etc/supervisor/conf.d/srtsocket.conf`
+- Config: `websrt.conf` → deployed to `/etc/supervisor/conf.d/websrt.conf`
 - Logs: `logs/gateway.out.log` + `logs/gateway.err.log`
-- Restart: `sudo supervisorctl reread && sudo supervisorctl update && sudo supervisorctl restart srtsocket`
+- Restart: `sudo supervisorctl reread && sudo supervisorctl update && sudo supervisorctl restart websrt`
 - **After rebuilding the binary**, must restart supervisord to pick it up
 - On boot, gateway writes `web/public/cert-hash.js` (hash for self-signed, null for mkcert)
 
@@ -66,9 +74,9 @@ Gateway runs under supervisord:
 ## Gotchas
 
 - `web/public/cert-hash.js` is **runtime-generated** (gitignored). Don't commit it.
+- `web/wasm/` contents are **gitignored**. Fresh clones must run the WASM build steps before the page works.
 - WASM camelCase warnings in `srt-wasm` are **required** by wasm-bindgen — don't "fix" them.
 - `SrtIngester.kind` field stores `SrtListener` to keep it alive (drop = close listener). The "never read" warning is intentional.
-- The first decoded video frame logs "(0x0)" dimensions — Chrome resolves actual dimensions from the avcC on subsequent frames. Cosmetic only.
 - `performance.now()` epoch mismatch: browser uses `web_time::Instant` (Performance API), gateway uses `std::time::Instant`. SRT protocol handles this via timestamp fields in packets + clock sync during handshake.
 - TSBPD latency negotiation: `max(sender_latency, receiver_latency)` during HSv5. Browser slider and `--latency` CLI both matter.
 

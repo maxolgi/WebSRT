@@ -50,7 +50,7 @@ fn adjust_eliminates_drift_instead_of_doubling() {
     );
 }
 
-/// Mirror of the vendored `time::base::adjust` proptest, to confirm the
+/// Mirror of the forked `time::base::adjust` proptest, to confirm the
 /// updated assertions hold with the fix.
 #[test]
 fn adjust_proptest_assertions_hold() {

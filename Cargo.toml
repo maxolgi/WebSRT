@@ -36,5 +36,5 @@ lto = true
 codegen-units = 1
 
 [patch.crates-io]
-srt-protocol = { path = "vendor/srt-protocol" }
-mpeg2ts = { path = "vendor/mpeg2ts" }
+srt-protocol = { git = "https://github.com/maxolgi/srt-rs.git" }
+mpeg2ts = { git = "https://github.com/maxolgi/mpeg2ts.git" }

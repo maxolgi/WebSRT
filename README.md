@@ -1,4 +1,4 @@
-# srtsocket
+# WebSRT
 
 Pure-Rust gateway that bridges native SRT (from OBS or any SRT sender) to
 browsers running **the real SRT protocol over WebTransport datagrams** — same
@@ -31,6 +31,9 @@ The browser runs `srt-protocol` and `mpeg2ts` compiled to WASM; JS is glue only.
   WASM. No JS-side SRT logic; no wire-format drift risk.
 - **SRT crypto disabled** between gateway and browser. WebTransport TLS
   replaces it.
+- **Web Worker architecture.** The SRT receiver and TS demuxer run in a Web
+  Worker off the main thread. Only WebCodecs decode and canvas rendering happen
+  on the main thread.
 - **Automatic OBS reconnect.** If OBS disconnects, the gateway waits for a new
   connection — no restart needed.
 - **rAF-gated video presentation.** Decoded frames are buffered and presented
@@ -55,6 +58,7 @@ cargo install wasm-pack
 ./fixtures/make-fixture.sh
 
 # one-time: build the WASM modules and copy to web/
+mkdir -p web/wasm/srt-wasm web/wasm/mpeg2ts-wasm
 (cd crates/srt-wasm     && wasm-pack build --target web --release)
 cp crates/srt-wasm/pkg/* web/wasm/srt-wasm/
 (cd crates/mpeg2ts-wasm && wasm-pack build --target web --release)
@@ -80,7 +84,7 @@ Terminal B:
 
 ```bash
 cd web && npm run dev
-# Vite at http://localhost:5173
+# Vite at https://localhost:5173 (self-signed; click through Chrome's warning)
 ```
 
 Open the page. The cert hash is auto-loaded from `cert-hash.js` — no manual
@@ -206,15 +210,32 @@ The split prevents ACK traffic from starving the sender under load.
 ### Browser pipeline
 
 ```
-WT datagram → SrtReceiver (WASM, srt-protocol::receiver)
-  ↓ TSBPD-paced (Instant, Bytes)
-SrtAction::DeliverMessage
-  ↓ raw TS bytes
-Demuxer (WASM, mpeg2ts)
-  ↓ PES packets (pid, pts, dts, payload, random_access)
-  ├── VideoPipeline (H.264 SPS parse → avcC → VideoDecoder → rAF-gated canvas)
-  └── OpusAudioPipeline / AacAudioPipeline (AudioDecoder → MediaStreamTrackGenerator / AudioWorklet)
+                        main thread                    │   Web Worker
+                                                       │
+WT datagram ──────────────────────────────────────────►│ SrtReceiver (WASM)
+  (batched, up to 16 per tick)                        │   ↓ TSBPD-paced
+                                                      │ SrtAction::DeliverMessage
+                                                      │   ↓ raw TS bytes
+                                                      │ Demuxer (WASM, mpeg2ts)
+                                                      │   ↓ PES packets
+  ◄────────────────── postMessage ────────────────────│ (pid, pts, payload)
+  │                                                   │
+  ├── VideoPipeline                                   │
+  │   H.264 SPS parse → avcC → VideoDecoder           │
+  │   ↓ VideoFrame                                    │
+  │   CanvasRenderer (rAF-gated PTS presentation)     │
+  │                                                   │
+  ├── OpusAudioPipeline / AacAudioPipeline            │
+  │   AudioDecoder → MediaStreamTrackGenerator        │
+  │   or AudioWorklet (Firefox fallback)              │
+  │                                                   │
+  └── datagramWriter (ACK/NAK → WT)                   │
 ```
+
+The SRT receiver and TS demuxer run in a **Web Worker** (`worker.ts`) to keep
+the main thread free for decoding and rendering. Datagrams are batched (up to
+16 per tick) before posting to the worker. The worker polls the SRT state
+machine every 10ms via `setInterval`.
 
 **Video presentation:** Decoded `VideoFrame`s are buffered in a 4-frame ring.
 A `requestAnimationFrame` loop presents the latest frame whose PTS-mapped
@@ -230,16 +251,30 @@ data exceeds the playout target by more than 50ms.
 submitting new chunks. Video skips delta frames when queue depth > 8; audio
 skips when queue depth > 20. Keyframes always pass to allow resync.
 
-### Vendored crates
+### Forked crates
 
-- `vendor/srt-protocol` — patched copy of srt-protocol 0.4.4. Two patches:
+This project depends on two forked crates, wired via `[patch.crates-io]` in the
+root `Cargo.toml`. Cargo fetches them automatically at build time — they are
+**not** submodules or vendored copies.
+
+- **[`maxolgi/srt-rs`](https://github.com/maxolgi/srt-rs)** (main) — fork of
+  `srt-protocol` 0.4.4. Six patches:
   1. Uses `web_time::Instant` instead of `std::time::Instant` (WASM compat).
-  2. TLPKTL fix at `src/protocol/receiver/buffer.rs:485` — `checked_sub`
-     instead of panicking `Sub<Duration>` to prevent underflow panic early in
-     page life.
-- `vendor/mpeg2ts` — unmodified vendoring of mpeg2ts 0.6.0 for stability.
+  2. `TimeBase::adjust()` sign flip — upstream applies `-drift` which doubles
+     TSBPD clock error every sync cycle; changed to `+drift`.
+  3. TLPKTL fix at `protocol/receiver/buffer.rs` — `checked_sub` instead of
+     panicking `Sub<Duration>` to prevent underflow panic early in page life.
+  4. Stats tracking methods (`rtt()`, `bandwidth_bps()`, `buffered_packets()`,
+     `buffer_available_packets()`).
+  5. Sender buffer edge-case fixes (`send_next_packet`, `send_packet`, and
+     `number_of_unacked_packets`).
+  6. `packet/time.rs` `Sub<TimeSpan>`: `unwrap_or(self)` → `unwrap()` to
+     surface errors.
 
-Both are wired via `[patch.crates-io]` in the root `Cargo.toml`.
+- **[`maxolgi/mpeg2ts`](https://github.com/maxolgi/mpeg2ts)** (master) — fork
+  of `mpeg2ts` 0.6.0. One patch:
+  1. `ts/reader.rs`: unknown PIDs return Raw bytes instead of erroring,
+     preventing byte-stream misalignment when the receiver joins mid-stream.
 
 ## Build commands
 
@@ -265,8 +300,8 @@ cd web && npx tsc --noEmit
 
 ### Critical build order
 
-1. Vendored crates (`vendor/srt-protocol`, `vendor/mpeg2ts`) change → rebuild
-   BOTH the gateway binary AND the affected WASM crate + copy pkg to `web/wasm/`.
+1. Forked `srt-protocol` (`maxolgi/srt-rs`) change → rebuild
+   BOTH the gateway binary AND the srt-wasm crate + copy pkg to `web/wasm/`.
 2. Changing only `web/src/*.ts` → Vite hot-reloads, no rebuild needed.
 3. Changing `crates/srt-wasm/src/lib.rs` → wasm-pack build + copy pkg + browser
    reload.
@@ -277,17 +312,17 @@ The gateway runs under supervisord in production.
 
 ### Supervisord config
 
-Config file `srtsocket.conf` is deployed to `/etc/supervisor/conf.d/`:
+Config file `websrt.conf` is deployed to `/etc/supervisor/conf.d/`:
 
 ```ini
-[program:srtsocket]
-command=/home/flibb/srtsocket/target/release/gateway --input srt --srt-mode listener --srt-port 9000 --bind 0.0.0.0 --latency 1000 --sim-loss 5
-directory=/home/flibb/srtsocket
+[program:websrt]
+command=/opt/WebSRT/target/release/gateway --input srt --srt-mode listener --srt-port 9000 --bind 0.0.0.0 --latency 1000 --sim-loss 5
+directory=/opt/WebSRT
 autostart=true
 autorestart=true
 startretries=3
-stdout_logfile=/home/flibb/srtsocket/logs/gateway.out.log
-stderr_logfile=/home/flibb/srtsocket/logs/gateway.err.log
+stdout_logfile=/opt/WebSRT/logs/gateway.out.log
+stderr_logfile=/opt/WebSRT/logs/gateway.err.log
 environment=RUST_LOG="debug"
 ```
 
@@ -295,10 +330,10 @@ environment=RUST_LOG="debug"
 
 ```bash
 # After rebuilding the binary:
-sudo supervisorctl reread && sudo supervisorctl update && sudo supervisorctl restart srtsocket
+sudo supervisorctl reread && sudo supervisorctl update && sudo supervisorctl restart websrt
 
 # Check status:
-sudo supervisorctl status srtsocket
+sudo supervisorctl status websrt
 
 # Tail logs:
 tail -f logs/gateway.err.log
@@ -342,10 +377,12 @@ node web/smoke.mjs
 ## Repo layout
 
 ```
-srtsocket/
-  Cargo.toml                  # workspace (3 crates, vendored patches)
+WebSRT/
+  Cargo.toml                  # workspace (3 crates, 2 forked deps via [patch.crates-io])
+  Cargo.lock                  # gitignored — regenerated on build
   AGENTS.md                   # build commands, architecture, gotchas
-  srtsocket.conf              # supervisord config (production)
+  websrt.conf                 # supervisord config (production)
+  LICENSE                     # MPL-2.0
   crates/
     gateway/                  # the gateway binary + dev/test binaries
       src/
@@ -365,21 +402,26 @@ srtsocket/
           wt_echo_client.rs   # WT datagram round-trip test
     srt-wasm/                 # wasm-bindgen wrapper around srt-protocol::receiver
     mpeg2ts-wasm/             # wasm-bindgen wrapper around mpeg2ts::TsDemuxer
-  vendor/
-    srt-protocol/             # patched srt-protocol 0.4.4
-    mpeg2ts/                  # vendored mpeg2ts 0.6.0
   web/
+    index.html                # page shell, loads cert-hash.js
+    package.json              # vite + typescript
+    vite.config.ts            # HTTPS dev server (basic-ssl plugin)
+    tsconfig.json
+    smoke.mjs                 # Node smoke test for WASM modules
     src/
       main.ts                 # WT connect, PMT codec detection, auto-reconnect
-      srt.ts                  # SrtController: drives SrtReceiver over WT datagrams
+      worker.ts               # Web Worker: SrtReceiver + Demuxer (off main thread)
+      srt.ts                  # SrtController (legacy main-thread path, unused)
       demux.ts                # Demuxer: wraps mpeg2ts-wasm, dispatches PES events
       decode.ts               # H.264 SPS parser, VideoPipeline, Opus/AAC audio pipelines
       render.ts               # CanvasRenderer: rAF-gated PTS-based presentation
+      wasm.d.ts               # Type declarations for MediaStreamTrackGenerator
     public/
       cert-hash.js            # runtime-generated (gitignored)
       favicon.ico
     wasm/                     # pre-built wasm-pack pkg output (gitignored)
-    smoke.mjs                 # Node smoke test for WASM modules
+      srt-wasm/
+      mpeg2ts-wasm/
   fixtures/
     make-fixture.sh           # ffmpeg generates 10s H.264+Opus test stream
     test.ts                   # generated fixture (committed)
@@ -408,14 +450,16 @@ to `min(150ms, latency/2)`.
 
 - `web/public/cert-hash.js` is **runtime-generated** (gitignored). Don't commit
   it. The gateway writes it on boot.
+- `web/wasm/` contents are **gitignored**. Fresh clones must run the WASM build
+  steps from Quick Start before the page will work.
 - WASM camelCase warnings in `srt-wasm` are **required** by wasm-bindgen —
   don't "fix" them.
-- The first decoded video frame logs "(0x0)" dimensions — Chrome resolves
-  actual dimensions from the avcC on subsequent frames. Cosmetic only.
 - `performance.now()` epoch mismatch: browser uses `web_time::Instant`
   (Performance API), gateway uses `std::time::Instant`. SRT protocol handles
   this via timestamp fields in packets + clock sync during handshake.
 - Cert hash changes on every gateway restart — browser must reload the page.
+- The Vite dev server uses HTTPS (self-signed). Click through Chrome's "not
+  private" warning on first load.
 
 ## Security note
 
@@ -423,6 +467,10 @@ Anyone with the cert hash can connect. Default `--cert-mode self` binds to
 `127.0.0.1` (localhost only). Do not bind `0.0.0.0` with self-signed mode
 unless you add an auth layer. Use mkcert mode for LAN access (Firefox
 compatible, PKI-validated).
+
+## License
+
+[MPL-2.0](LICENSE)
 
 ## Known limitations
 
