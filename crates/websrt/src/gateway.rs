@@ -33,6 +33,7 @@ pub struct Gateway {
     identity: Identity,
     path: String,
     auth_token: Option<String>,
+    allowed_origins: Vec<String>,
     latency_ms: u64,
     health_port: u16,
     #[cfg(feature = "sim-loss")]
@@ -57,6 +58,7 @@ pub struct GatewayBuilder {
     latency_ms: u64,
     path: String,
     auth_token: Option<String>,
+    allowed_origins: Vec<String>,
     health_port: u16,
     #[cfg(feature = "sim-loss")]
     sim_loss: u8,
@@ -84,6 +86,7 @@ impl Gateway {
             latency_ms: 300,
             path: "/wt".to_string(),
             auth_token: None,
+            allowed_origins: Vec::new(),
             health_port: 0,
             #[cfg(feature = "sim-loss")]
             sim_loss: 0,
@@ -179,6 +182,19 @@ impl Gateway {
                     if path_only != self.path {
                         session_request.not_found().await;
                         continue;
+                    }
+
+                    // Origin allowlist check
+                    if !self.allowed_origins.is_empty() {
+                        let origin_ok = session_request
+                            .origin()
+                            .map(|o| self.allowed_origins.iter().any(|allowed| allowed == o))
+                            .unwrap_or(false);
+                        if !origin_ok {
+                            tracing::warn!("session rejected: origin not allowed");
+                            session_request.not_found().await;
+                            continue;
+                        }
                     }
 
                     // Auth check
@@ -410,6 +426,14 @@ impl GatewayBuilder {
         self
     }
 
+    /// Set allowed origins for WebTransport requests (e.g., `https://example.com`).
+    /// When non-empty, requests whose Origin header doesn't match are rejected.
+    /// When empty (default), all origins are allowed.
+    pub fn allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.allowed_origins = origins;
+        self
+    }
+
     /// Set the HTTP health/metrics port (0 to disable).
     pub fn health_port(mut self, port: u16) -> Self {
         self.health_port = port;
@@ -437,6 +461,7 @@ impl GatewayBuilder {
             identity: self.identity.expect("identity must be set"),
             path: self.path,
             auth_token: self.auth_token,
+            allowed_origins: self.allowed_origins,
             latency_ms: self.latency_ms,
             health_port: self.health_port,
             #[cfg(feature = "sim-loss")]
