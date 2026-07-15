@@ -6,7 +6,7 @@ use srt_tokio::{SrtIncoming, SrtListener, SrtSocket};
 use std::time::Duration;
 
 enum Kind {
-    Listener(SrtListener, SrtIncoming, Option<String>),
+    Listener(#[allow(dead_code)] SrtListener, SrtIncoming, Option<String>),
     Caller(String, Option<String>),
 }
 
