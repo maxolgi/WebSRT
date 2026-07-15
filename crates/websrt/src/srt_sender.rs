@@ -16,7 +16,7 @@ use srt_protocol::protocol::pending_connection::ConnectionResult;
 use srt_protocol::settings::ConnInitSettings;
 use srt_protocol::statistics::SocketStatistics;
 use std::net::{IpAddr, SocketAddr};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// WebTransport datagram PMTU — must match the wasm-side constant.
 pub const PAYLOAD_SIZE: u64 = 1100;
@@ -119,8 +119,15 @@ impl SrtInitiator {
 
     /// Kick off (or retransmit) the handshake. Also drives the data plane when
     /// connected (drains pending output packets).
-    pub fn tick(&mut self, now: Instant) -> Vec<SenderAction> {
+    ///
+    /// Returns the actions to take and the duration until the SRT state
+    /// machine next needs servicing (from `Action::WaitForData`). When no
+    /// duration is surfaced (handshake state, or `Close`), returns 2ms — the
+    /// historical poll interval — so callers can always schedule the next
+    /// tick uniformly.
+    pub fn tick(&mut self, now: Instant) -> (Vec<SenderAction>, Duration) {
         let mut out = Vec::new();
+        let mut wait: Option<Duration> = None;
         match &mut self.state {
             InitiatorState::Handshaking(connect) => {
                 let r = connect.handle_tick(now);
@@ -137,25 +144,36 @@ impl SrtInitiator {
                     Action::UpdateStatistics(s) => {
                         self.last_stats = Some(s.clone());
                     }
+                    Action::WaitForData(d) => {
+                        wait = Some(d);
+                    }
                     _ => {}
                 }
-                drain(duplex, now, &mut out, &mut self.last_stats);
+                // drain() may overwrite `wait` with a fresher duration.
+                if let Some(d) = drain(duplex, now, &mut out, &mut self.last_stats) {
+                    wait = Some(d);
+                }
             }
             InitiatorState::Closed => {}
         }
-        out
+        (out, wait.unwrap_or_else(|| Duration::from_millis(2)))
     }
 
     /// Feed a WT datagram received from the browser (handshake reply or ACK/NAK).
-    pub fn handle_datagram(&mut self, bytes: &[u8], now: Instant) -> Vec<SenderAction> {
+    ///
+    /// Returns the actions to take and the SRT wait duration. The duration is
+    /// surfaced for symmetry with [`tick`]; reactive callers (e.g. recv_pump)
+    /// may ignore it via `let (actions, _) = ...`.
+    pub fn handle_datagram(&mut self, bytes: &[u8], now: Instant) -> (Vec<SenderAction>, Duration) {
         let mut out = Vec::new();
         let packet = match parse_packet(bytes) {
             Ok(p) => p,
             Err(e) => {
                 out.push(SenderAction::Log(format!("parse error: {e:?}")));
-                return out;
+                return (out, Duration::from_millis(2));
             }
         };
+        let mut wait: Option<Duration> = None;
         match &mut self.state {
             InitiatorState::Handshaking(connect) => {
                 let r = connect.handle_packet(Ok((packet, self.remote)), now);
@@ -163,27 +181,28 @@ impl SrtInitiator {
             }
             InitiatorState::Connected(duplex) => {
                 duplex.handle_packet_input(now, Ok((packet, self.remote)));
-                drain(duplex, now, &mut out, &mut self.last_stats);
+                wait = drain(duplex, now, &mut out, &mut self.last_stats);
             }
             InitiatorState::Closed => {}
         }
-        out
+        (out, wait.unwrap_or_else(|| Duration::from_millis(2)))
     }
 
     /// Push a TS message into the sender's queue. No-op before handshake
     /// completes; the message is dropped (call sites should check
     /// `is_connected()` first or accept the drop).
-    pub fn push_message(&mut self, msg: (Instant, Bytes), now: Instant) -> Vec<SenderAction> {
+    pub fn push_message(&mut self, msg: (Instant, Bytes), now: Instant) -> (Vec<SenderAction>, Duration) {
         let mut out = Vec::new();
+        let mut wait: Option<Duration> = None;
         if let InitiatorState::Connected(duplex) = &mut self.state {
             self.pushed += 1;
             if self.pushed <= 3 || self.pushed % 100 == 0 {
                 tracing::debug!(pushed = self.pushed, bytes = msg.1.len(), "push_message: to sender");
             }
             duplex.handle_data_input(now, Some(msg));
-            drain(duplex, now, &mut out, &mut self.last_stats);
+            wait = drain(duplex, now, &mut out, &mut self.last_stats);
         }
-        out
+        (out, wait.unwrap_or_else(|| Duration::from_millis(2)))
     }
 
     pub fn is_connected(&self) -> bool {
@@ -204,7 +223,7 @@ fn drain(
     now: Instant,
     out: &mut Vec<SenderAction>,
     stats: &mut Option<SocketStatistics>,
-) {
+) -> Option<Duration> {
     loop {
         let action = duplex.handle_input(now, Input::DataReleased);
         match action {
@@ -216,10 +235,10 @@ fn drain(
                 // the browser. Drop.
             }
             Action::UpdateStatistics(s) => { *stats = Some(s.clone()); continue; }
-            Action::WaitForData(_) => break,
+            Action::WaitForData(d) => return Some(d),
             Action::Close => {
                 out.push(SenderAction::Close);
-                break;
+                return None;
             }
         }
     }

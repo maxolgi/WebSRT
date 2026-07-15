@@ -6,6 +6,7 @@
 
 use crate::broadcaster::Broadcaster;
 use crate::ingest::Ingester;
+use crate::registry::SessionRegistry;
 use crate::session::BrowserSession;
 use crate::srt_sender::SrtConfig;
 use anyhow::Result;
@@ -159,6 +160,17 @@ impl Gateway {
 
         let session_handles: Arc<Mutex<Vec<(Arc<Notify>, tokio::task::JoinHandle<()>)>>> =
             Arc::new(Mutex::new(Vec::new()));
+
+        // Centralized session registry + ticker. ONE ticker task drives all
+        // sessions' SRT state machines, replacing N per-session sender_pump
+        // tasks (each with its own 2ms interval timer).
+        let registry = Arc::new(SessionRegistry::new());
+        let ticker_shutdown = Arc::new(Notify::new());
+        let ticker_registry = registry.clone();
+        let ticker_shutdown_for_task = ticker_shutdown.clone();
+        let ticker_handle = tokio::spawn(async move {
+            run_ticker(ticker_registry, ticker_shutdown_for_task.notified()).await;
+        });
 
         tokio::pin!(shutdown);
 
@@ -316,15 +328,17 @@ impl Gateway {
                     }
 
                     #[cfg(feature = "sim-loss")]
-                    let (session_shutdown, handle) = BrowserSession::spawn(
+                    let (entry, handle) = BrowserSession::create(
                         connection, viewer,
                         self.sim_loss, self.sim_seed, self.srt_config.clone(),
-                    );
+                    ).await;
                     #[cfg(not(feature = "sim-loss"))]
-                    let (session_shutdown, handle) = BrowserSession::spawn(
+                    let (entry, handle) = BrowserSession::create(
                         connection, viewer,
                         0, 0, self.srt_config.clone(),
-                    );
+                    ).await;
+                    let session_shutdown = entry.shutdown.clone();
+                    registry.insert(entry);
                     {
                         let mut handles = session_handles.lock().await;
                         handles.retain(|(_, h)| !h.is_finished());
@@ -333,6 +347,13 @@ impl Gateway {
                 }
             }
         }
+
+        // Stop the centralized ticker first so it doesn't keep ticking
+        // sessions we're about to drain. Bounded wait: tick_all iterates all
+        // sessions sequentially, so under heavy load this could take a while;
+        // cap at 2s and move on.
+        ticker_shutdown.notify_one();
+        let _ = tokio::time::timeout(Duration::from_secs(2), ticker_handle).await;
 
         // Graceful drain: signal each session's shutdown Notify, wait up to
         // 3s for it to exit on its own, then fall back to abort.
@@ -402,6 +423,46 @@ impl Gateway {
         let _ = stream.flush().await;
         let _ = addr;
     }
+}
+
+/// Single shared ticker task that drives every active session's SRT state
+/// machine ~every 2ms. Replaces N per-session `sender_pump` tasks. Exits when
+/// `shutdown` completes (signaled from `Gateway::run`'s drain path).
+async fn run_ticker(registry: Arc<SessionRegistry>, shutdown: impl Future<Output = ()>) {
+    let mut ticker = tokio::time::interval(Duration::from_millis(2));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut stats_interval = tokio::time::interval(Duration::from_secs(5));
+    // Consume the immediate first tick so the first stats log is at t+5s.
+    stats_interval.tick().await;
+
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => break,
+            _ = stats_interval.tick() => {
+                let active = registry.len();
+                // Aggregate WT-RTT check: warn for sessions whose RTT suggests
+                // the configured TSBPD latency is too low (4×RTT rule of thumb).
+                let entries = registry.snapshot();
+                let rtt_warn_count = entries.iter().filter(|e| {
+                    let wt_rtt_ms = e.conn.rtt().as_secs_f64() * 1000.0;
+                    wt_rtt_ms * 4.0 > e.latency_ms as f64
+                }).count();
+                tracing::info!(active, "ticker stats");
+                if rtt_warn_count > 0 {
+                    tracing::warn!(
+                        rtt_warn_count,
+                        "sessions with WT RTT > 4×latency; consider raising --latency"
+                    );
+                }
+            }
+            _ = ticker.tick() => {
+                registry.tick_all().await;
+            }
+        }
+    }
+    tracing::info!("ticker task exiting");
 }
 
 impl GatewayBuilder {

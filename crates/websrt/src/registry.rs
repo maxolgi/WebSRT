@@ -1,0 +1,200 @@
+//! Centralized session registry + ticker: replaces per-session sender_pump tasks.
+//!
+//! One ticker task drives all sessions' SRT state machines, eliminating
+//! N separate 2ms interval timers (at 500 viewers that's ~250k timer wakeups/s
+//! avoided). Per-session `recv_pump` tasks remain — they're cheap, blocking
+//! on WT datagram receive.
+//!
+//! Lock strategy:
+//! - `entries` lives behind a `std::sync::RwLock` — insert/remove from the
+//!   accept loop, snapshot from the ticker. The lock is held only long enough
+//!   to clone the `Arc<SessionEntry>` values; never across `.await`.
+//! - `entry.viewer` and `entry.next_deadline` use `std::sync::Mutex` — they're
+//!   touched only at known sync points inside `tick_all` and never held across
+//!   `.await`.
+//! - `entry.initiator` and `entry.loss` use `tokio::sync::Mutex` — they're
+//!   shared between the ticker and the recv_pump and may be held across
+//!   `.await`. Both lockers always acquire them in the same order
+//!   (initiator → loss) so there is no deadlock cycle.
+
+use crate::broadcaster::ViewerRx;
+use crate::session::{send_action, LossInjector};
+use crate::srt_sender::SrtInitiator;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
+use std::time::{Duration, Instant};
+use tokio::sync::{Mutex, Notify};
+use wtransport::Connection;
+
+/// All per-session state shared between the recv_pump task and the centralized
+/// ticker. Held inside `Arc` so both can reference it concurrently.
+pub(crate) struct SessionEntry {
+    pub conn: Connection,
+    pub initiator: Arc<Mutex<SrtInitiator>>,
+    pub loss: Arc<Mutex<LossInjector>>,
+    /// Ticker-exclusive; std::sync::Mutex is sufficient because it is never
+    /// held across an `.await` (locked only for `try_recv`).
+    pub viewer: StdMutex<ViewerRx>,
+    /// Next time this session's SRT state machine needs servicing, set by
+    /// the ticker from the `WaitForData` duration returned by `tick()`.
+    pub next_deadline: StdMutex<Instant>,
+    pub session_id: u64,
+    pub shutdown: Arc<Notify>,
+    pub finished: AtomicBool,
+    /// TSBPD latency (ms) — used for aggregate WT-RTT warnings in the ticker.
+    pub latency_ms: u64,
+}
+
+/// Central registry of active sessions, polled once per ~2ms by a single
+/// ticker task spawned in [`crate::gateway::Gateway::run`].
+pub(crate) struct SessionRegistry {
+    entries: RwLock<HashMap<u64, Arc<SessionEntry>>>,
+}
+
+impl SessionRegistry {
+    pub fn new() -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Insert a session entry. The key is `entry.session_id` (assigned by
+    /// `BrowserSession::create` via the global session counter).
+    /// Returns the session_id.
+    pub fn insert(&self, entry: Arc<SessionEntry>) -> u64 {
+        let id = entry.session_id;
+        let mut w = self.entries.write().unwrap();
+        w.insert(id, entry);
+        id
+    }
+
+    pub fn remove(&self, session_id: u64) {
+        let mut w = self.entries.write().unwrap();
+        w.remove(&session_id);
+    }
+
+    /// Number of active sessions. Used by the ticker's periodic stats logger;
+    /// cheaper than `snapshot().len()`.
+    pub fn len(&self) -> usize {
+        self.entries.read().unwrap().len()
+    }
+
+    /// Snapshot all active session entries. Used by the ticker for iteration
+    /// and by the periodic stats logger.
+    pub(crate) fn snapshot(&self) -> Vec<Arc<SessionEntry>> {
+        self.entries.read().unwrap().values().cloned().collect()
+    }
+
+    /// Drive every active session's SRT state machine once. Called by the
+    /// single ticker task approximately every 2ms.
+    pub(crate) async fn tick_all(&self) {
+        let now = Instant::now();
+        let entries = self.snapshot();
+        let mut to_remove: Vec<u64> = Vec::new();
+
+        for entry in &entries {
+            if entry.finished.load(Ordering::Relaxed) {
+                to_remove.push(entry.session_id);
+                continue;
+            }
+
+            // Fast path: skip sessions whose deadline hasn't arrived AND have
+            // no pending viewer data. try_recv is O(1).
+            let needs_service = {
+                let next = *entry.next_deadline.lock().unwrap();
+                if now >= next {
+                    true
+                } else {
+                    let mut v = entry.viewer.lock().unwrap();
+                    matches!(v.try_recv(), Ok(Some(_)))
+                }
+            };
+            if !needs_service {
+                continue;
+            }
+
+            // Lock the initiator, drive the SRT state machine, and push any
+            // viewer messages that became available. The viewer std Mutex is
+            // released before each `push_message` call (push is sync but we
+            // keep the critical section tight).
+            let (actions, wait_dur) = {
+                let mut init = entry.initiator.lock().await;
+                let (mut actions, mut wait) = init.tick(now);
+
+                if init.is_connected() {
+                    let mut drained = 0u32;
+                    loop {
+                        if drained >= 32 {
+                            break;
+                        }
+                        let maybe_msg = {
+                            let mut viewer = entry.viewer.lock().unwrap();
+                            viewer.try_recv()
+                        };
+                        match maybe_msg {
+                            Ok(Some(m)) => {
+                                let (a, w) = init.push_message(m, now);
+                                actions.extend(a);
+                                wait = w;
+                                drained += 1;
+                            }
+                            Ok(None) => break,
+                            Err(lag) => {
+                                tracing::warn!(
+                                    session_id = entry.session_id,
+                                    lag,
+                                    "viewer lagged; messages dropped"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                let dur = if init.is_closed() {
+                    entry.finished.store(true, Ordering::Relaxed);
+                    entry.shutdown.notify_waiters();
+                    Duration::from_millis(2)
+                } else {
+                    wait
+                };
+
+                (actions, dur)
+            };
+
+            // Schedule the next service point.
+            *entry.next_deadline.lock().unwrap() = now + wait_dur;
+
+            // Send the actions out via WebTransport. The loss injector is
+            // shared with the recv_pump; the tokio::sync::Mutex serializes
+            // access. `send_action` errors (e.g. WT connection closed) are
+            // ignored here — the recv_pump will observe the failure and mark
+            // the session finished.
+            {
+                let mut loss = entry.loss.lock().await;
+                for action in actions {
+                    if matches!(action, crate::srt_sender::SenderAction::Close) {
+                        entry.finished.store(true, Ordering::Relaxed);
+                        entry.shutdown.notify_waiters();
+                    }
+                    let _ = send_action(&entry.conn, action, &mut loss);
+                }
+            }
+
+            if entry.finished.load(Ordering::Relaxed) {
+                to_remove.push(entry.session_id);
+            }
+        }
+
+        for id in to_remove {
+            self.remove(id);
+        }
+    }
+}
+
+impl Default for SessionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}

@@ -38,6 +38,7 @@ pub mod broadcaster;
 pub mod cert;
 pub mod gateway;
 pub mod ingest;
+mod registry;
 pub mod session;
 pub mod srt_sender;
 
