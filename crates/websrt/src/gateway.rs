@@ -196,7 +196,7 @@ impl Gateway {
                             .unwrap_or(false);
 
                         if !token_valid {
-                            tracing::warn!(path = %request_path, "session rejected: invalid or missing auth token");
+                            tracing::warn!(path = %path_only, "session rejected: invalid or missing auth token");
                             session_request.not_found().await;
                             continue;
                         }
