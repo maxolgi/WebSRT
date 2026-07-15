@@ -120,7 +120,7 @@ impl SrtIngester {
 #[async_trait]
 impl Ingester for SrtIngester {
     async fn next_message(&mut self) -> Result<Option<TsMessage>> {
-        const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+        const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
         loop {
             if self.socket.is_none() {

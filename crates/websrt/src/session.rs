@@ -136,7 +136,7 @@ impl BrowserSession {
             let mut l = loss.lock().await;
             let now = Instant::now();
             for action in init.tick(now) {
-                Self::handle_action_locked(&conn, action, &mut l).await?;
+                Self::send_action(&conn, action, &mut l).await?;
             }
         }
 
@@ -211,7 +211,7 @@ impl BrowserSession {
                     if matches!(action, SenderAction::Close) {
                         should_close = true;
                     }
-                    Self::handle_action_locked(&conn, action, &mut l).await?;
+                    Self::send_action(&conn, action, &mut l).await?;
                 }
             }
             if should_close {
@@ -277,7 +277,10 @@ impl BrowserSession {
                         match viewer.try_recv() {
                             Ok(Some(m)) => { v.extend(init.push_message(m)); drained += 1; }
                             Ok(None) => break,
-                            Err(_lag) => continue,
+                            Err(lag) => {
+                                tracing::warn!(lag, "viewer lagged in try_recv drain; dropped messages");
+                                continue;
+                            }
                         }
                     }
                 }
@@ -290,7 +293,7 @@ impl BrowserSession {
                     if matches!(action, SenderAction::Close) {
                         should_close = true;
                     }
-                    Self::handle_action_locked(&conn, action, &mut l).await?;
+                    Self::send_action(&conn, action, &mut l).await?;
                 }
             }
             if do_stats {
@@ -351,7 +354,7 @@ impl BrowserSession {
         }
     }
 
-    async fn handle_action_locked(
+    async fn send_action(
         conn: &Connection,
         action: SenderAction,
         loss: &mut LossInjector,

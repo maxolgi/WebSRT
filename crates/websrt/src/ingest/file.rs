@@ -15,8 +15,6 @@ use bytes::Bytes;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::fs;
-use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 const TS_PACKET: usize = 188;
@@ -112,15 +110,4 @@ impl Ingester for FileIngester {
         // will delay delivery on the receiver.
         Ok(Some((Instant::now(), bytes)))
     }
-}
-
-// Unused Mutex import guard — keep tokio::sync visible in case future ingesters
-// share state across sessions.
-#[allow(dead_code)]
-fn _use_mutex() -> Arc<Mutex<()>> {
-    Arc::new(Mutex::new(()))
-}
-#[allow(dead_code)]
-fn _use_fs() -> fs::File {
-    unreachable!()
 }

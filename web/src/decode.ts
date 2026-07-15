@@ -408,7 +408,7 @@ function buildHvcC(vps: Uint8Array, sps: Uint8Array, pps: Uint8Array): Uint8Arra
 function buildHevcCodecString(parsed: NonNullable<ReturnType<typeof parseHevcSps>>): string {
   const profileStr = parsed.profileSpace === 0
     ? String(parsed.profileIdc)
-    : `${parsed.profileSpace}${parsed.profileIdc}`;
+    : `${['e', 'm', 'x'][parsed.profileSpace - 1]}${parsed.profileIdc}`;
   let compatHex = '';
   for (const b of parsed.compatFlags) compatHex += b.toString(16).padStart(2, '0');
   compatHex = compatHex.replace(/^0+/, '') || '0';
@@ -535,7 +535,6 @@ export class VideoPipeline {
     });
     try {
       this.decoder.decode(chunk);
-      this.decodedCount++;
     } catch (e) {
       this.cb.onError(e);
       this.reset();
@@ -803,13 +802,11 @@ abstract class AudioPipelineBase {
   }
 
   /** Gate for feed(): returns true if packets should be processed now. */
-  protected shouldFeed(channels: number): boolean {
+  protected canFeed(channels: number): boolean {
     if (this.outputPending) return false;
-    if (!this.configured || (this.decoder && this.channels !== channels)) {
-      this.channels = channels;
-      return false; // caller should call startInit
-    }
-    return this.configured;
+    if (!this.configured) return false;
+    if (this.decoder && this.channels !== channels) return false;
+    return true;
   }
 
   reset() {
@@ -906,8 +903,9 @@ export class OpusAudioPipeline extends AudioPipelineBase {
     const channels = stereo ? 2 : 1;
     const { frameDurationUs } = parseOpusToc(toc);
 
-    if (!this.shouldFeed(channels)) {
+    if (!this.canFeed(channels)) {
       if (!this.outputPending && !this.configured) {
+        this.channels = channels;
         this.configureOpus();
       }
       return;
@@ -963,8 +961,9 @@ export class AacAudioPipeline extends AudioPipelineBase {
     const sr = freqIndex < ADTS_SAMPLE_RATES.length ? ADTS_SAMPLE_RATES[freqIndex] : 48000;
     const ch = chanConfig > 0 ? chanConfig : 2;
 
-    if (!this.shouldFeed(ch)) {
+    if (!this.canFeed(ch)) {
       if (!this.outputPending && !this.configured) {
+        this.channels = ch;
         this.sampleRate = sr;
         this.configureAac(profile, freqIndex, chanConfig);
       }

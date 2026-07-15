@@ -5,7 +5,6 @@
 
 use clap::Parser;
 use wtransport::tls::Sha256Digest;
-use wtransport::tls::Sha256DigestFmt;
 use wtransport::ClientConfig;
 use wtransport::Endpoint;
 
@@ -58,7 +57,6 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let _ = Sha256DigestFmt::DottedHex; // suppress unused-import if any
     Ok(())
 }
 

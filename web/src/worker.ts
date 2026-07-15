@@ -81,63 +81,68 @@ function flushOutgoing() {
 }
 
 async function doInit(latencyMs: number) {
-  doStop();
-  await init();
-  rx = SrtReceiver.newWithLatency(latencyMs);
-  epoch = performance.now();
-  videoPid = null;
-  audioPid = null;
-  audioStreamType = null;
+  try {
+    doStop();
+    await init();
+    rx = SrtReceiver.newWithLatency(latencyMs);
+    epoch = performance.now();
+    videoPid = null;
+    audioPid = null;
+    audioStreamType = null;
 
-  demux = await Demuxer.create({
-    onPmt: (entries) => {
-      let changed = false;
-      for (const e of entries) {
-        if ((e.streamType === ST_H264 || e.streamType === ST_HEVC) && videoPid !== e.pid) {
-          videoPid = e.pid;
-          changed = true;
-        } else if ((e.streamType === ST_AAC || e.streamType === ST_OPUS_FFMPEG) && audioPid !== e.pid) {
-          audioPid = e.pid;
-          audioStreamType = e.streamType;
-          changed = true;
+    demux = await Demuxer.create({
+      onPmt: (entries) => {
+        let changed = false;
+        for (const e of entries) {
+          if ((e.streamType === ST_H264 || e.streamType === ST_HEVC) && videoPid !== e.pid) {
+            videoPid = e.pid;
+            changed = true;
+          } else if ((e.streamType === ST_AAC || e.streamType === ST_OPUS_FFMPEG) && audioPid !== e.pid) {
+            audioPid = e.pid;
+            audioStreamType = e.streamType;
+            changed = true;
+          }
         }
-      }
-      if (changed) {
-        queue({
-          type: 'pmt',
-          videoPid: videoPid ?? -1,
-          audioPid: audioPid ?? -1,
-          audioStreamType: audioStreamType ?? -1,
-        });
-      }
-    },
-    onPes: (pid, pts, _dts, bytes, ra) => {
-      if (pid === videoPid) {
-        queue({ type: 'videoPes', data: bytes, pts, isKeyframe: ra });
-      } else if (pid === audioPid) {
-        queue({ type: 'audioPes', data: bytes, pts });
-      }
-    },
-    onError: (msg_) => queue({ type: 'log', msg: `demux err: ${msg_}`, cls: 'err' }),
-  });
+        if (changed) {
+          queue({
+            type: 'pmt',
+            videoPid: videoPid ?? -1,
+            audioPid: audioPid ?? -1,
+            audioStreamType: audioStreamType ?? -1,
+          });
+        }
+      },
+      onPes: (pid, pts, _dts, bytes, ra) => {
+        if (pid === videoPid) {
+          queue({ type: 'videoPes', data: bytes, pts, isKeyframe: ra });
+        } else if (pid === audioPid) {
+          queue({ type: 'audioPes', data: bytes, pts });
+        }
+      },
+      onError: (msg_) => queue({ type: 'log', msg: `demux err: ${msg_}`, cls: 'err' }),
+    });
 
-  inited = true;
+    inited = true;
 
-  pollTimer = setInterval(() => {
-    if (!rx || !inited) return;
-    const nowUs = (performance.now() - epoch) * 1000;
-    const actions = rx.poll(nowUs);
-    processActions(actions);
+    pollTimer = setInterval(() => {
+      if (!rx || !inited) return;
+      const nowUs = (performance.now() - epoch) * 1000;
+      const actions = rx.poll(nowUs);
+      processActions(actions);
+      flushOutgoing();
+    }, 10);
+
+    statsTimer = setInterval(() => {
+      if (!rx || !inited) return;
+      const s = rx.getStats();
+      if (!s) return;
+      queue({ type: 'stats', stats: serializeStats(s) });
+      flushOutgoing();
+    }, 1000);
+  } catch (e) {
+    queue({ type: 'log', msg: `worker init failed: ${e}`, cls: 'err' });
     flushOutgoing();
-  }, 10);
-
-  statsTimer = setInterval(() => {
-    if (!rx || !inited) return;
-    const s = rx.getStats();
-    if (!s) return;
-    queue({ type: 'stats', stats: serializeStats(s) });
-    flushOutgoing();
-  }, 1000);
+  }
 }
 
 function doStop() {
@@ -150,24 +155,28 @@ function doStop() {
 
 function processActions(actions: SrtAction[]) {
   for (const a of actions) {
-    switch (a.kind) {
-      case 0:
-        queue({ type: 'send', data: a.data });
-        break;
-      case 1:
-        demux?.feed(a.data);
-        break;
-      case 2:
-        queue({ type: 'handshakeComplete' });
-        break;
-      case 3:
-        break;
-      case 4:
-        queue({ type: 'close' });
-        break;
-      case 5:
-        queue({ type: 'log', msg: `srt: ${a.text}`, cls: 'info' });
-        break;
+    try {
+      switch (a.kind) {
+        case 0:
+          queue({ type: 'send', data: a.data });
+          break;
+        case 1:
+          demux?.feed(a.data);
+          break;
+        case 2:
+          queue({ type: 'handshakeComplete' });
+          break;
+        case 3:
+          break;
+        case 4:
+          queue({ type: 'close' });
+          break;
+        case 5:
+          queue({ type: 'log', msg: `srt: ${a.text}`, cls: 'info' });
+          break;
+      }
+    } finally {
+      a.free();
     }
   }
 }

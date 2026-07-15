@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Generate the test fixture. ~1-2 MB, committed.
+# Generate the test fixture. ~350 KB, committed.
 #
 # H.264 baseline 3.0 (max WebCodecs compatibility), 30fps keyframe-every-1s,
 # Opus audio. Duration 10 seconds.

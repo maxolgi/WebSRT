@@ -11,7 +11,6 @@ use anyhow::Result;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::Mutex;
 use wtransport::Endpoint;
 use wtransport::Identity;
@@ -140,7 +139,13 @@ impl Gateway {
                         continue;
                     }
 
-                    let viewer = {
+                    // Pre-accept check: reject up-front without consuming a viewer
+                    // slot. The actual `subscribe()` happens after accept succeeds
+                    // so a failed accept cannot briefly inflate/decrement the
+                    // viewer count. `subscribe()` re-checks alive + cap after
+                    // accept to close the gap between this check and the real
+                    // subscription.
+                    {
                         let guard = self.inner.broadcaster.lock().await;
                         match guard.as_ref() {
                             Some(b) if !b.is_alive() => {
@@ -149,29 +154,45 @@ impl Gateway {
                                 session_request.too_many_requests().await;
                                 continue;
                             }
-                            Some(b) => match b.subscribe() {
-                                Some(v) => v,
-                                None => {
-                                    drop(guard);
-                                    tracing::warn!("session rejected: viewer cap reached");
-                                    session_request.too_many_requests().await;
-                                    continue;
-                                }
-                            },
+                            Some(b) if b.viewer_count() >= self.inner.max_viewers => {
+                                drop(guard);
+                                tracing::warn!("session rejected: viewer cap reached");
+                                session_request.too_many_requests().await;
+                                continue;
+                            }
                             None => {
                                 drop(guard);
                                 tracing::warn!("session rejected: source not ready yet");
                                 session_request.too_many_requests().await;
                                 continue;
                             }
+                            _ => {}
                         }
-                    };
+                    }
 
                     let connection = match session_request.accept().await {
                         Ok(c) => c,
                         Err(e) => {
                             tracing::warn!(?e, "accept failed");
                             continue;
+                        }
+                    };
+
+                    // Post-accept: actually subscribe. If this fails now (source
+                    // died or cap filled between the pre-check and here), close
+                    // the just-accepted connection rather than leaking it.
+                    let viewer = {
+                        let guard = self.inner.broadcaster.lock().await;
+                        match guard.as_ref().and_then(|b| b.subscribe()) {
+                            Some(v) => v,
+                            None => {
+                                drop(guard);
+                                tracing::warn!(
+                                    "post-accept subscribe failed; closing session"
+                                );
+                                connection.close(0u32.into(), b"subscribe failed");
+                                continue;
+                            }
                         }
                     };
 
@@ -211,7 +232,11 @@ impl Gateway {
                         connection, viewer,
                         0, 0, self.latency_ms,
                     );
-                    session_handles.lock().await.push(handle);
+                    {
+                        let mut handles = session_handles.lock().await;
+                        handles.retain(|h| !h.is_finished());
+                        handles.push(handle);
+                    }
                 }
             }
         }
@@ -219,12 +244,14 @@ impl Gateway {
         // Graceful drain: abort all session tasks.
         let handles = std::mem::take(&mut *session_handles.lock().await);
         if !handles.is_empty() {
-            tracing::info!(count = handles.len(), "draining active sessions");
+            tracing::info!(count = handles.len(), "shutting down active sessions");
             for h in &handles {
                 h.abort();
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            tracing::info!("drain complete");
+            for h in handles {
+                let _ = h.await;
+            }
+            tracing::info!("shutdown complete");
         }
 
         Ok(())

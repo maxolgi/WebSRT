@@ -152,6 +152,7 @@ impl SrtReceiver {
         console_error_panic_hook::set_once();
         let mut init = ConnInitSettings::default();
         init.send_buffer_size = srt_protocol::options::PacketCount(8192);
+        init.max_packet_size = srt_protocol::options::PacketSize(PAYLOAD_SIZE);
         init.recv_buffer_size = srt_protocol::options::PacketCount(8192);
         init.send_latency = std::time::Duration::from_millis(latency_ms as u64);
         init.recv_latency = std::time::Duration::from_millis(latency_ms as u64);

@@ -139,9 +139,10 @@ function teardown() {
   cancelReconnect();
   setConnState('idle');
   pendingSends = [];
-  pendingSends = [];
   if (worker) {
     worker.postMessage({ cmd: 'stop' });
+    worker.terminate();
+    worker = null;
   }
   try { wt?.close({}); } catch {}
   wt = null;
@@ -150,7 +151,7 @@ function teardown() {
   audio = null;
   renderer?.destroy();
   renderer = null;
-  if (audioEl) { try { audioEl.pause(); } catch {} audioEl.srcObject = null; }
+  if (audioEl) { try { audioEl.pause(); } catch {} audioEl.srcObject = null; audioEl.remove(); }
   audioEl = null;
   audioReady = false;
   muteBtn.disabled = true;
@@ -264,7 +265,10 @@ async function doConnect() {
   if (!worker) {
     worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
     worker.onmessage = (e: MessageEvent) => handleWorkerMsg(e.data as WorkerMsg);
-    worker.onerror = (e) => log(`worker error: ${e.message}`, 'err');
+    worker.onerror = (e) => {
+      log(`worker error: ${e.message}`, 'err');
+      if (!manualDisconnect) scheduleReconnect();
+    };
   }
 
   worker.postMessage({ cmd: 'init', latencyMs });
@@ -362,6 +366,7 @@ function handleWorkerMsg(msg: WorkerMsg) {
     case 'close':
       log('SRT closed', 'err');
       setStatus('closed');
+      if (!manualDisconnect) scheduleReconnect();
       break;
   }
 }

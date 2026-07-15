@@ -15,6 +15,7 @@ export class CanvasRenderer {
   private ptsAnchorUs: number | null = null;
   private wallAnchorMs = 0;
   private playoutDelayMs: number;
+  private lastFrameTsUs: number | null = null;
 
   private rafId: number | null = null;
   private frameCount = 0;
@@ -32,10 +33,20 @@ export class CanvasRenderer {
   }
 
   draw(frame: VideoFrame) {
+    if (
+      this.lastFrameTsUs !== null &&
+      (frame.timestamp < this.lastFrameTsUs ||
+        frame.timestamp - this.lastFrameTsUs > 5_000_000)
+    ) {
+      this.ptsAnchorUs = null;
+    }
+
     if (this.ptsAnchorUs === null) {
       this.ptsAnchorUs = frame.timestamp;
       this.wallAnchorMs = performance.now() + this.playoutDelayMs;
     }
+
+    this.lastFrameTsUs = frame.timestamp;
 
     if (this.ring.length >= CanvasRenderer.RING_CAP) {
       const old = this.ring.shift()!;
@@ -87,7 +98,7 @@ export class CanvasRenderer {
     this.ctx.drawImage(showFrame, 0, 0);
     showFrame.close();
 
-    this.ring = this.ring.slice(bestIdx + 1);
+    this.ring.splice(0, bestIdx + 1);
 
     this.frameCount++;
     if (this.frameCount % 30 === 0) {

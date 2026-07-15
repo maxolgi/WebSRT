@@ -34,6 +34,8 @@ impl Broadcaster {
     where
         I: Ingester + Send + 'static,
     {
+        // broadcast::channel requires ≥1 receiver to exist; we drop it immediately
+        // since each viewer creates its own via tx.subscribe().
         let (tx, _rx0) = broadcast::channel(capacity);
         let alive = Arc::new(AtomicBool::new(true));
         let alive_task = alive.clone();
