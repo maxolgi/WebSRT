@@ -90,7 +90,7 @@ pub struct Cli {
 
     /// Simulate N% random datagram loss (0-100). 0 disables.
     #[cfg(feature = "sim-loss")]
-    #[arg(long, default_value_t = 0u8)]
+    #[arg(long, default_value_t = 0u8, value_parser = clap::value_parser!(u8).range(0..=100))]
     pub sim_loss: u8,
 
     /// RNG seed for sim-loss (deterministic by default).
