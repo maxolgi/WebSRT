@@ -718,6 +718,8 @@ abstract class AudioPipelineBase {
   protected sampleRate = 48000;
   protected channels = 2;
   protected droppedAudio = 0;
+  protected lastWrittenPtsUs: number | null = null;
+  protected lastWrittenWallMs = 0;
 
   constructor(cb: AudioDecoderCallbacks) {
     this.cb = cb;
@@ -770,6 +772,8 @@ abstract class AudioPipelineBase {
 
   /** Route a decoded AudioData frame to whichever output path is active. */
   protected routeFrame(frame: AudioData) {
+    this.lastWrittenPtsUs = frame.timestamp;
+    this.lastWrittenWallMs = performance.now();
     if (this.writer) {
       this.writer.write(frame).catch(() => frame.close());
     } else if (this.workletNode) {
@@ -817,6 +821,14 @@ abstract class AudioPipelineBase {
     if (!this.configured) return false;
     if (this.decoder && this.channels !== channels) return false;
     return true;
+  }
+
+  /** Estimated audio playhead PTS in microseconds, or null if no audio written yet. */
+  audioPlayheadUs(): number | null {
+    if (this.lastWrittenPtsUs === null) return null;
+    // Audio hardware consumes samples at real-time rate from the write point.
+    // This approximation assumes the hardware clock runs at exactly real-time.
+    return this.lastWrittenPtsUs + (performance.now() - this.lastWrittenWallMs) * 1000;
   }
 
   reset() {

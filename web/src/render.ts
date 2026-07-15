@@ -57,6 +57,12 @@ export class CanvasRenderer {
     this.ring.push(frame);
   }
 
+  /** Current video presentation PTS in microseconds, or null if no anchor established yet. */
+  currentPtsUs(): number | null {
+    if (this.ptsAnchorUs === null) return null;
+    return this.ptsAnchorUs + (performance.now() - this.wallAnchorMs) * 1000;
+  }
+
   private startRafLoop() {
     const loop = () => {
       this.presentDueFrames();

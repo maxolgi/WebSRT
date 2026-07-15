@@ -137,6 +137,7 @@ function cancelReconnect() {
 
 function teardown() {
   cancelReconnect();
+  stopDriftMonitor();
   setConnState('idle');
   pendingSends = [];
   if (worker) {
@@ -157,6 +158,38 @@ function teardown() {
   muteBtn.disabled = true;
   muteBtn.textContent = 'muted';
   statsEl.textContent = '';
+}
+
+let driftTimer: ReturnType<typeof setInterval> | null = null;
+let latestDriftMs: number | null = null;
+
+function startDriftMonitor() {
+  if (driftTimer !== null) clearInterval(driftTimer);
+  driftTimer = setInterval(() => {
+    const videoPts = renderer?.currentPtsUs() ?? null;
+    const audioPts = audio?.audioPlayheadUs() ?? null;
+    if (videoPts === null || audioPts === null) {
+      latestDriftMs = null;
+      return;
+    }
+
+    const driftMs = (videoPts - audioPts) / 1000;
+    latestDriftMs = driftMs;
+    const absDrift = Math.abs(driftMs);
+
+    if (absDrift > 40) {
+      const direction = driftMs > 0 ? 'ahead of' : 'behind';
+      console.warn(`A/V drift: ${driftMs.toFixed(1)}ms (video ${direction} audio)`);
+    }
+  }, 2000);
+}
+
+function stopDriftMonitor() {
+  if (driftTimer !== null) {
+    clearInterval(driftTimer);
+    driftTimer = null;
+  }
+  latestDriftMs = null;
 }
 
 function wireAudio() {
@@ -278,6 +311,8 @@ async function doConnect() {
 
   worker.postMessage({ cmd: 'init', latencyMs });
 
+  startDriftMonitor();
+
   let dgramBatch: Uint8Array[] = [];
   let flushPending = false;
 
@@ -398,7 +433,10 @@ function updateStats(s: StatsMsg) {
     `dropped  ${s.rxDropped}\n` +
     `belated  ${s.rxBelated}\n` +
     `buf'd    ${s.rxBuffered}\n` +
-    `ACK/NAK  ${s.rxAck}/${s.rxNak}`;
+    `ACK/NAK  ${s.rxAck}/${s.rxNak}` +
+    (latestDriftMs !== null
+      ? `\ndrift    ${latestDriftMs >= 0 ? '+' : ''}${latestDriftMs.toFixed(0)}ms (video vs audio)`
+      : '');
 }
 
 document.addEventListener('visibilitychange', () => {
