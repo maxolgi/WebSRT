@@ -91,10 +91,21 @@ function queue(msg: WorkerMsg) {
 }
 
 function flushOutgoing() {
-  if (outgoing.length > 0) {
-    (self as unknown as Worker).postMessage({ type: 'batch', msgs: outgoing });
-    outgoing = [];
+  if (outgoing.length === 0) return;
+  const transfer: ArrayBuffer[] = [];
+  for (const m of outgoing) {
+    if (
+      (m.type === 'videoPes' || m.type === 'audioPes' || m.type === 'send') &&
+      m.data?.buffer instanceof ArrayBuffer
+    ) {
+      transfer.push(m.data.buffer);
+    }
   }
+  (self as unknown as Worker).postMessage(
+    { type: 'batch', msgs: outgoing },
+    transfer,
+  );
+  outgoing = [];
 }
 
 async function doInit(latencyMs: number) {
