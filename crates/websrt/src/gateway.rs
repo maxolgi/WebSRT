@@ -192,7 +192,7 @@ impl Gateway {
                                     None
                                 }
                             })
-                            .map(|t| t == expected_token.as_str())
+                            .map(|t| constant_time_eq(t.as_bytes(), expected_token.as_bytes()))
                             .unwrap_or(false);
 
                         if !token_valid {
@@ -454,4 +454,17 @@ impl GatewaySourceHandle {
         );
         *self.inner.broadcaster.lock().await = Some(b);
     }
+}
+
+/// Constant-time byte comparison to prevent timing side-channel attacks
+/// on auth token validation.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut result: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        result |= x ^ y;
+    }
+    result == 0
 }
