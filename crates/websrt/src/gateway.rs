@@ -36,6 +36,7 @@ pub struct Gateway {
     allowed_origins: Vec<String>,
     latency_ms: u64,
     health_port: u16,
+    health_bind_addr: String,
     #[cfg(feature = "sim-loss")]
     sim_loss: u8,
     #[cfg(feature = "sim-loss")]
@@ -46,7 +47,6 @@ struct GatewayInner {
     broadcaster: Mutex<Option<Arc<Broadcaster>>>,
     max_viewers: usize,
     broadcast_capacity: usize,
-    health_port: u16,
 }
 
 /// Builder for [`Gateway`].
@@ -60,6 +60,7 @@ pub struct GatewayBuilder {
     auth_token: Option<String>,
     allowed_origins: Vec<String>,
     health_port: u16,
+    health_bind_addr: String,
     #[cfg(feature = "sim-loss")]
     sim_loss: u8,
     #[cfg(feature = "sim-loss")]
@@ -88,6 +89,7 @@ impl Gateway {
             auth_token: None,
             allowed_origins: Vec::new(),
             health_port: 0,
+            health_bind_addr: "127.0.0.1".to_string(),
             #[cfg(feature = "sim-loss")]
             sim_loss: 0,
             #[cfg(feature = "sim-loss")]
@@ -120,31 +122,38 @@ impl Gateway {
             "WebTransport server listening"
         );
 
+        let mut health_server_handle: Option<tokio::task::JoinHandle<()>> = None;
         if self.health_port > 0 {
             let inner = self.inner.clone();
-            tokio::spawn(async move {
-                let listener = match std::net::TcpListener::bind(format!("0.0.0.0:{}", inner.health_port)) {
+            let health_port = self.health_port;
+            let health_bind = self.health_bind_addr.clone();
+            let health_handle = tokio::spawn(async move {
+                let listener = match tokio::net::TcpListener::bind(
+                    format!("{}:{}", health_bind, health_port)
+                ).await {
                     Ok(l) => l,
                     Err(e) => {
-                        tracing::warn!(?e, port = inner.health_port, "health server bind failed");
+                        tracing::warn!(?e, port = health_port, "health server bind failed");
                         return;
                     }
                 };
-                tracing::info!(port = inner.health_port, "health server listening");
+                tracing::info!(port = health_port, "health server listening");
                 loop {
-                    let (stream, addr) = match listener.accept() {
-                        Ok(c) => c,
+                    match listener.accept().await {
+                        Ok((stream, addr)) => {
+                            let inner = inner.clone();
+                            tokio::spawn(async move {
+                                Self::handle_health(stream, addr, &inner).await;
+                            });
+                        }
                         Err(e) => {
                             tracing::warn!(?e, "health accept error");
                             continue;
                         }
-                    };
-                    let inner = inner.clone();
-                    tokio::spawn(async move {
-                        Self::handle_health(stream, addr, &inner).await;
-                    });
+                    }
                 }
             });
+            health_server_handle = Some(health_handle);
         }
 
         let session_handles: Arc<Mutex<Vec<(Arc<Notify>, tokio::task::JoinHandle<()>)>>> =
@@ -333,33 +342,37 @@ impl Gateway {
             for (notify, _) in &handles {
                 notify.notify_one();
             }
-            // Wait up to 3s per session, then abort. We use select! on
-            // `&mut handle` (instead of `tokio::time::timeout`, which would
-            // move the JoinHandle) so we can still call `.abort()` + `.await`
-            // after the deadline elapses.
-            for (_notify, mut handle) in handles {
-                tokio::select! {
-                    _ = &mut handle => {}
-                    _ = tokio::time::sleep(Duration::from_secs(3)) => {
-                        tracing::warn!("session didn't drain in 3s; aborting");
-                        handle.abort();
-                        let _ = handle.await;
+            // Drain all sessions concurrently with a global 3s deadline
+            let drain_futures: Vec<_> = handles
+                .into_iter()
+                .map(|(_, mut handle)| async move {
+                    tokio::select! {
+                        _ = &mut handle => {}
+                        _ = tokio::time::sleep(Duration::from_secs(3)) => {
+                            tracing::warn!("session didn't drain in 3s; aborting");
+                            handle.abort();
+                            let _ = handle.await;
+                        }
                     }
-                }
-            }
+                })
+                .collect();
+            futures::future::join_all(drain_futures).await;
             tracing::info!("shutdown complete");
+        }
+
+        if let Some(h) = health_server_handle {
+            h.abort();
         }
 
         Ok(())
     }
 
     async fn handle_health(
-        stream: std::net::TcpStream,
+        mut stream: tokio::net::TcpStream,
         addr: std::net::SocketAddr,
         inner: &GatewayInner,
     ) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut stream = tokio::net::TcpStream::from_std(stream).unwrap();
 
         // Read and discard the HTTP request
         let mut buf = [0u8; 1024];
@@ -402,22 +415,23 @@ impl GatewayBuilder {
     }
 
     pub fn max_viewers(mut self, n: usize) -> Self {
-        self.max_viewers = n;
+        self.max_viewers = n.max(1);
         self
     }
 
     pub fn broadcast_capacity(mut self, n: usize) -> Self {
-        self.broadcast_capacity = n;
+        self.broadcast_capacity = n.max(1);
         self
     }
 
     pub fn latency_ms(mut self, ms: u64) -> Self {
-        self.latency_ms = ms;
+        self.latency_ms = ms.max(10);
         self
     }
 
     pub fn path(mut self, path: impl Into<String>) -> Self {
-        self.path = path.into();
+        let p = path.into();
+        self.path = if p.starts_with('/') { p } else { format!("/{p}") };
         self
     }
 
@@ -440,6 +454,12 @@ impl GatewayBuilder {
         self
     }
 
+    /// Set the bind address for the HTTP health/metrics server.
+    pub fn health_bind_addr(mut self, addr: impl Into<String>) -> Self {
+        self.health_bind_addr = addr.into();
+        self
+    }
+
     /// Configure simulated packet loss for testing.
     #[cfg(feature = "sim-loss")]
     pub fn sim_loss(mut self, pct: u8, seed: u64) -> Self {
@@ -448,27 +468,28 @@ impl GatewayBuilder {
         self
     }
 
-    /// Build the gateway. Panics if identity was not set.
-    pub fn build(self) -> Gateway {
-        Gateway {
+    /// Build the gateway. Returns error if identity was not set.
+    pub fn build(self) -> Result<Gateway> {
+        let identity = self.identity.ok_or_else(|| anyhow::anyhow!("identity must be set"))?;
+        Ok(Gateway {
             inner: Arc::new(GatewayInner {
                 broadcaster: Mutex::new(None),
                 max_viewers: self.max_viewers,
                 broadcast_capacity: self.broadcast_capacity,
-                health_port: self.health_port,
             }),
             bind_addr: self.bind_addr,
-            identity: self.identity.expect("identity must be set"),
+            identity,
             path: self.path,
             auth_token: self.auth_token,
             allowed_origins: self.allowed_origins,
             latency_ms: self.latency_ms,
             health_port: self.health_port,
+            health_bind_addr: self.health_bind_addr,
             #[cfg(feature = "sim-loss")]
             sim_loss: self.sim_loss,
             #[cfg(feature = "sim-loss")]
             sim_seed: self.sim_seed,
-        }
+        })
     }
 }
 

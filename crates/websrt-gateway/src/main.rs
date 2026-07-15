@@ -194,7 +194,7 @@ async fn main() -> Result<()> {
         builder = builder.auth_token(token);
     }
 
-    let gateway = builder.build();
+    let gateway = builder.build()?;
 
     // Setup ingester
     match cli.input {
