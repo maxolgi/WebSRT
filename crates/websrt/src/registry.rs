@@ -100,17 +100,25 @@ impl SessionRegistry {
             }
 
             // Fast path: skip sessions whose deadline hasn't arrived AND have
-            // no pending viewer data. try_recv is O(1).
-            let needs_service = {
+            // no pending viewer data. If try_recv does return a message, we
+            // MUST hold onto it — consuming-and-dropping it here would lose
+            // TS packets and corrupt the video stream.
+            let mut fast_path_msg = {
                 let next = *entry.next_deadline.lock().unwrap();
                 if now >= next {
-                    true
+                    // Deadline arrived — service unconditionally. Don't
+                    // consume a message here; the drain loop below handles it.
+                    None
                 } else {
+                    // Check for new data without losing it.
                     let mut v = entry.viewer.lock().unwrap();
-                    matches!(v.try_recv(), Ok(Some(_)))
+                    match v.try_recv() {
+                        Ok(Some(m)) => Some(m),
+                        _ => None,
+                    }
                 }
             };
-            if !needs_service {
+            if fast_path_msg.is_none() && now < *entry.next_deadline.lock().unwrap() {
                 continue;
             }
 
@@ -121,6 +129,16 @@ impl SessionRegistry {
             let (actions, wait_dur) = {
                 let mut init = entry.initiator.lock().await;
                 let (mut actions, mut wait) = init.tick(now);
+
+                // Push the message captured by the fast-path check (if any)
+                // BEFORE draining the rest, to preserve arrival order.
+                if let Some(m) = fast_path_msg.take() {
+                    if init.is_connected() {
+                        let (a, w) = init.push_message(m, now);
+                        actions.extend(a);
+                        wait = w;
+                    }
+                }
 
                 if init.is_connected() {
                     let mut drained = 0u32;
