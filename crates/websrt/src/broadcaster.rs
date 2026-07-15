@@ -7,7 +7,7 @@
 use crate::ingest::{Ingester, TsMessage};
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 /// One viewer's subscription. Holds a `broadcast::Receiver`. Each browser
@@ -20,8 +20,13 @@ pub struct ViewerRx {
 
 /// Wraps an Ingester in a many-reader pipeline. The source is read exactly
 /// once; every `ViewerRx` gets its own copy of each message.
+///
+/// `tx` is held behind a `Mutex<Option<_>>` so the background task can drop
+/// the sender when the source ends, closing the channel and unblocking all
+/// `ViewerRx::recv()` calls. Without this, viewers attached to a dead source
+/// would hang until the SRT idle timeout fires.
 pub struct Broadcaster {
-    tx: broadcast::Sender<TsMessage>,
+    tx: Mutex<Option<broadcast::Sender<TsMessage>>>,
     /// Maximum viewers; enforced by `subscribe()`.
     pub max_viewers: usize,
     alive: Arc<AtomicBool>,
@@ -40,10 +45,11 @@ impl Broadcaster {
         let alive = Arc::new(AtomicBool::new(true));
         let alive_task = alive.clone();
         let broadcaster = Arc::new(Self {
-            tx: tx.clone(),
+            tx: Mutex::new(Some(tx.clone())),
             max_viewers,
             alive,
         });
+        let bc_clone = broadcaster.clone();
         let tx2 = tx.clone();
         tokio::spawn(async move {
             let mut sent = 0u64;
@@ -84,6 +90,11 @@ impl Broadcaster {
                 }
             }
             alive_task.store(false, Ordering::SeqCst);
+            // Drop the task's Sender clone, then clear the Broadcaster's copy so
+            // the broadcast channel closes and every ViewerRx::recv() returns
+            // Ok(None) instead of hanging until the SRT idle timeout.
+            drop(tx2);
+            *bc_clone.tx.lock().unwrap() = None;
             tracing::info!("broadcaster task exited");
         });
         broadcaster
@@ -95,11 +106,13 @@ impl Broadcaster {
         if !self.alive.load(Ordering::SeqCst) {
             return None;
         }
-        if self.tx.receiver_count() >= self.max_viewers {
+        let guard = self.tx.lock().unwrap();
+        let tx = guard.as_ref()?;
+        if tx.receiver_count() >= self.max_viewers {
             return None;
         }
         Some(ViewerRx {
-            rx: self.tx.subscribe(),
+            rx: tx.subscribe(),
             lag_count: 0,
         })
     }
@@ -109,7 +122,12 @@ impl Broadcaster {
     }
 
     pub fn viewer_count(&self) -> usize {
-        self.tx.receiver_count()
+        self.tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|t| t.receiver_count())
+            .unwrap_or(0)
     }
 }
 
