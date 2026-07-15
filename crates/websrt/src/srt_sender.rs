@@ -143,10 +143,9 @@ impl SrtInitiator {
     /// Push a TS message into the sender's queue. No-op before handshake
     /// completes; the message is dropped (call sites should check
     /// `is_connected()` first or accept the drop).
-    pub fn push_message(&mut self, msg: (Instant, Bytes)) -> Vec<SenderAction> {
+    pub fn push_message(&mut self, msg: (Instant, Bytes), now: Instant) -> Vec<SenderAction> {
         let mut out = Vec::new();
         if let InitiatorState::Connected(duplex) = &mut self.state {
-            let now = Instant::now();
             self.pushed += 1;
             if self.pushed <= 3 || self.pushed % 100 == 0 {
                 tracing::debug!(pushed = self.pushed, bytes = msg.1.len(), "push_message: to sender");
