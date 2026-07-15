@@ -284,7 +284,7 @@ impl BrowserSession {
                 let mut v = init.tick(now);
                 if let Some(m) = msg {
                     if init.is_connected() {
-                        v.extend(init.push_message(m));
+                        v.extend(init.push_message(m, now));
                     }
                 }
                 if init.is_connected() {
@@ -292,7 +292,7 @@ impl BrowserSession {
                     loop {
                         if drained >= 32 { break; }
                         match viewer.try_recv() {
-                            Ok(Some(m)) => { v.extend(init.push_message(m)); drained += 1; }
+                            Ok(Some(m)) => { v.extend(init.push_message(m, now)); drained += 1; }
                             Ok(None) => break,
                             Err(lag) => {
                                 tracing::warn!(session_id, lag, "viewer lagged in try_recv drain; dropped messages");
@@ -387,8 +387,8 @@ impl BrowserSession {
                     tracing::warn!(len = bytes.len(), "outgoing datagram > 1200B; QUIC may reject");
                 }
                 if let Err(e) = conn.send_datagram(bytes) {
-                    tracing::warn!(?e, "send_datagram failed; packet will be NAK'd");
-                    return Ok(());
+                    tracing::warn!(?e, "send_datagram failed; closing session");
+                    return Err(anyhow::Error::new(e));
                 }
             }
             SenderAction::HandshakeComplete => {
