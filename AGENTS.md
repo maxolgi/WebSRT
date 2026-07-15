@@ -37,6 +37,20 @@ cd web && npx tsc --noEmit
 - `crates/srt-wasm/` — browser-side SRT receiver (WASM).
 - `crates/mpeg2ts-wasm/` — browser-side TS demuxer (WASM).
 
+## Production readiness scope
+
+**The library (`crates/websrt/`) is the product.** Everything else is a demo or dev tool.
+
+When reviewing, hardening, or auditing code, prioritize by layer:
+
+1. **`crates/websrt/` (library) — production-critical.** This is what downstream developers embed. It must have: correct resource cleanup (no leaked tasks, dropped senders close channels), proper error propagation, no panics on bad input, security primitives exposed as builder options (auth callbacks, origin allowlists, constant-time token comparison, configurable health bind address), input validation on builder methods, and no blocking calls inside async paths. Every public API should be usable in a hardened deployment.
+
+2. **`crates/websrt-gateway/` (demo binary) — should work, doesn't need to be bulletproof.** It demonstrates the library. Loose defaults (auth token in query string, health on 0.0.0.0, no origin check) are acceptable here as long as the *library* exposes the APIs to do better. If the library lacks a capability the demo needs, add it to the library.
+
+3. **`web/` (demo client) — dev tool, lowest priority.** It exists to test against. Memory leaks, reconnect races, imprecise timers, and missing security checks are fine to note but should not block production readiness. The only exception: if a web-side issue reveals a library API gap (e.g., the library doesn't expose stats the client needs), fix the library.
+
+**Rule of thumb:** If a security or robustness issue can be fixed in the library so that any consumer benefits, fix it there. If it's purely demo-app glue, leave it or mention it but don't prioritize it.
+
 ## Forked crates (patched, not upstream)
 
 - `maxolgi/srt-rs` (main) — forked from `russelltg/srt-rs` v0.4.4 (commit `d4c08ac`). Six patches:
@@ -99,6 +113,16 @@ Gateway runs under supervisord:
 - `cargo run -p websrt-gateway --bin wt_hs_probe` — SRT handshake + TS continuity-counter probe (tests NAK/retransmit under sim-loss)
 - `cargo run -p websrt-gateway --bin mock_obs` — Sends fixture over SRT to test ingester without real OBS
 - `cargo run -p websrt-gateway --bin wt_echo_client` — WT datagram round-trip test
+
+## Git workflow for agents
+
+**Agents commit, humans push.**
+
+- **Commit your work** as you complete each logical unit. Small, focused commits with clear messages. Stage only the files you changed — never `git add -A` blindly.
+- **Never push.** Never run `git push`, `gh pr create`, or any remote command. The human reviews the commit log and pushes when ready.
+- **One commit per logical change.** If you fix three issues, that's three commits. Write messages that match the repo's existing style (look at `git log --oneline -10`).
+- **Before committing:** inspect `git status` and `git diff` to confirm only intended files are staged. Never commit secrets, `cert-hash.js`, or `web/wasm/` contents.
+- **Rebase is fine** if you need to fix your own earlier commit (e.g., `git commit --amend`), but never force-push.
 
 ## Behavioral guidelines
 
