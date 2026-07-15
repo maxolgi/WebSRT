@@ -121,14 +121,20 @@ impl SrtIngester {
 impl Ingester for SrtIngester {
     async fn next_message(&mut self) -> Result<Option<TsMessage>> {
         const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+        const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+        let mut reconnect_delay = Duration::from_secs(1);
 
         loop {
             if self.socket.is_none() {
                 match self.reconnect().await {
-                    Ok(s) => self.socket = Some(s),
+                    Ok(s) => {
+                        self.socket = Some(s);
+                        reconnect_delay = Duration::from_secs(1);
+                    }
                     Err(e) => {
-                        tracing::error!(?e, "reconnect failed; retrying in 2s");
-                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        tracing::error!(?e, delay = ?reconnect_delay, "reconnect failed; retrying");
+                        tokio::time::sleep(reconnect_delay).await;
+                        reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY);
                     }
                 }
                 continue;
