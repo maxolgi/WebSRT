@@ -16,7 +16,7 @@
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
 use crate::broadcaster::ViewerRx;
-use crate::srt_sender::{SenderAction, SrtInitiator};
+use crate::srt_sender::{SenderAction, SrtConfig, SrtInitiator};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -113,12 +113,12 @@ impl BrowserSession {
     /// Spawn a session. `viewer` is this session's private subscription to the
     /// ingester fanout. Returns a `(shutdown, join_handle)` tuple so the caller
     /// can trigger graceful drain via `shutdown.notify_one()`.
-    pub fn spawn(conn: Connection, viewer: ViewerRx, sim_loss: u8, sim_seed: u64, latency_ms: u64) -> (Arc<Notify>, tokio::task::JoinHandle<()>) {
+    pub fn spawn(conn: Connection, viewer: ViewerRx, sim_loss: u8, sim_seed: u64, config: SrtConfig) -> (Arc<Notify>, tokio::task::JoinHandle<()>) {
         let shutdown = Arc::new(Notify::new());
         let handle = tokio::spawn({
             let shutdown = shutdown.clone();
             async move {
-                if let Err(e) = Self::run(conn, viewer, sim_loss, sim_seed, latency_ms, shutdown).await {
+                if let Err(e) = Self::run(conn, viewer, sim_loss, sim_seed, config, shutdown).await {
                     tracing::info!(?e, "browser session ended");
                 }
             }
@@ -131,7 +131,7 @@ impl BrowserSession {
         viewer: ViewerRx,
         sim_loss: u8,
         sim_seed: u64,
-        latency_ms: u64,
+        config: SrtConfig,
         shutdown: Arc<Notify>,
     ) -> anyhow::Result<()> {
         let peer = conn.remote_address();
@@ -141,7 +141,7 @@ impl BrowserSession {
         let initiator = Arc::new(Mutex::new(SrtInitiator::new(
             Self::DUMMY_LOCAL_ADDR.ip(),
             Self::DUMMY_REMOTE_ADDR,
-            latency_ms,
+            &config,
         )));
         let loss = Arc::new(Mutex::new(LossInjector::new(sim_loss, sim_seed)));
 
@@ -169,7 +169,7 @@ impl BrowserSession {
             viewer,
             shutdown.clone(),
             session_id,
-            latency_ms,
+            config.send_latency.as_millis() as u64,
         ));
         let recv_abort = recv_task.abort_handle();
         let sender_abort = sender_task.abort_handle();

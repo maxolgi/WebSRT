@@ -46,4 +46,4 @@ pub use cert::{Cert, CertSource};
 pub use gateway::{Gateway, GatewayBuilder, GatewaySourceHandle};
 pub use ingest::{Ingester, TsMessage};
 pub use session::BrowserSession;
-pub use srt_sender::{SenderAction, SrtInitiator};
+pub use srt_sender::{SenderAction, SrtConfig, SrtInitiator};

@@ -21,6 +21,36 @@ use std::time::Instant;
 /// WebTransport datagram PMTU — must match the wasm-side constant.
 pub const PAYLOAD_SIZE: u64 = 1100;
 
+/// Configurable SRT protocol parameters.
+#[derive(Debug, Clone)]
+pub struct SrtConfig {
+    /// SRT payload size in bytes (MTU minus headers).
+    pub payload_size: u64,
+    /// Send buffer depth in packets.
+    pub send_buffer_size: u32,
+    /// Receive buffer depth in packets.
+    pub recv_buffer_size: u32,
+    /// Peer idle timeout.
+    pub peer_idle_timeout: std::time::Duration,
+    /// TSBPD send latency.
+    pub send_latency: std::time::Duration,
+    /// TSBPD receive latency.
+    pub recv_latency: std::time::Duration,
+}
+
+impl Default for SrtConfig {
+    fn default() -> Self {
+        Self {
+            payload_size: PAYLOAD_SIZE,
+            send_buffer_size: 8192,
+            recv_buffer_size: 8192,
+            peer_idle_timeout: std::time::Duration::from_secs(30),
+            send_latency: std::time::Duration::from_millis(300),
+            recv_latency: std::time::Duration::from_millis(300),
+        }
+    }
+}
+
 /// Outgoing actions the gateway must take when driving the sender.
 #[derive(Debug)]
 pub enum SenderAction {
@@ -54,14 +84,14 @@ enum InitiatorState {
 }
 
 impl SrtInitiator {
-    pub fn new(local_addr: IpAddr, remote: SocketAddr, latency_ms: u64) -> Self {
+    pub fn new(local_addr: IpAddr, remote: SocketAddr, config: &SrtConfig) -> Self {
         let mut settings = ConnInitSettings::default();
-        settings.max_packet_size = srt_protocol::options::PacketSize(PAYLOAD_SIZE);
-        settings.send_buffer_size = srt_protocol::options::PacketCount(8192);
-        settings.recv_buffer_size = srt_protocol::options::PacketCount(8192);
-        settings.peer_idle_timeout = std::time::Duration::from_secs(30);
-        settings.send_latency = std::time::Duration::from_millis(latency_ms);
-        settings.recv_latency = std::time::Duration::from_millis(latency_ms);
+        settings.max_packet_size = srt_protocol::options::PacketSize(config.payload_size);
+        settings.send_buffer_size = srt_protocol::options::PacketCount(config.send_buffer_size.into());
+        settings.recv_buffer_size = srt_protocol::options::PacketCount(config.recv_buffer_size.into());
+        settings.peer_idle_timeout = config.peer_idle_timeout;
+        settings.send_latency = config.send_latency;
+        settings.recv_latency = config.recv_latency;
         settings.too_late_packet_drop = true;
         Self::new_with_settings(local_addr, remote, settings)
     }

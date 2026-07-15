@@ -7,6 +7,7 @@
 use crate::broadcaster::Broadcaster;
 use crate::ingest::Ingester;
 use crate::session::BrowserSession;
+use crate::srt_sender::SrtConfig;
 use anyhow::Result;
 use percent_encoding::percent_decode_str;
 use std::future::Future;
@@ -34,7 +35,7 @@ pub struct Gateway {
     path: String,
     auth_token: Option<String>,
     allowed_origins: Vec<String>,
-    latency_ms: u64,
+    srt_config: SrtConfig,
     health_port: u16,
     health_bind_addr: String,
     #[cfg(feature = "sim-loss")]
@@ -55,7 +56,7 @@ pub struct GatewayBuilder {
     identity: Option<Identity>,
     max_viewers: usize,
     broadcast_capacity: usize,
-    latency_ms: u64,
+    srt_config: SrtConfig,
     path: String,
     auth_token: Option<String>,
     allowed_origins: Vec<String>,
@@ -84,7 +85,7 @@ impl Gateway {
             identity: None,
             max_viewers: DEFAULT_MAX_VIEWERS,
             broadcast_capacity: DEFAULT_BROADCAST_CAPACITY,
-            latency_ms: 300,
+            srt_config: SrtConfig::default(),
             path: "/wt".to_string(),
             auth_token: None,
             allowed_origins: Vec::new(),
@@ -317,12 +318,12 @@ impl Gateway {
                     #[cfg(feature = "sim-loss")]
                     let (session_shutdown, handle) = BrowserSession::spawn(
                         connection, viewer,
-                        self.sim_loss, self.sim_seed, self.latency_ms,
+                        self.sim_loss, self.sim_seed, self.srt_config.clone(),
                     );
                     #[cfg(not(feature = "sim-loss"))]
                     let (session_shutdown, handle) = BrowserSession::spawn(
                         connection, viewer,
-                        0, 0, self.latency_ms,
+                        0, 0, self.srt_config.clone(),
                     );
                     {
                         let mut handles = session_handles.lock().await;
@@ -425,7 +426,16 @@ impl GatewayBuilder {
     }
 
     pub fn latency_ms(mut self, ms: u64) -> Self {
-        self.latency_ms = ms.max(10);
+        let dur = std::time::Duration::from_millis(ms.max(10));
+        self.srt_config.send_latency = dur;
+        self.srt_config.recv_latency = dur;
+        self
+    }
+
+    /// Set the full SRT protocol configuration. Overrides any prior `latency_ms`
+    /// settings (and vice-versa — whichever is called last wins).
+    pub fn srt_config(mut self, config: SrtConfig) -> Self {
+        self.srt_config = config;
         self
     }
 
@@ -482,7 +492,7 @@ impl GatewayBuilder {
             path: self.path,
             auth_token: self.auth_token,
             allowed_origins: self.allowed_origins,
-            latency_ms: self.latency_ms,
+            srt_config: self.srt_config,
             health_port: self.health_port,
             health_bind_addr: self.health_bind_addr,
             #[cfg(feature = "sim-loss")]
@@ -517,4 +527,88 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         result |= x ^ y;
     }
     result == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constant_time_eq_equal() {
+        assert!(constant_time_eq(b"hello", b"hello"));
+    }
+
+    #[test]
+    fn constant_time_eq_different() {
+        assert!(!constant_time_eq(b"hello", b"world"));
+    }
+
+    #[test]
+    fn constant_time_eq_different_lengths() {
+        assert!(!constant_time_eq(b"short", b"longer_string"));
+    }
+
+    #[test]
+    fn constant_time_eq_empty() {
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn builder_max_viewers_clamps_to_1() {
+        let builder = Gateway::builder()
+            .max_viewers(0)
+            .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
+        let gateway = builder.build().unwrap();
+        assert_eq!(gateway.inner.max_viewers, 1);
+    }
+
+    #[test]
+    fn builder_broadcast_capacity_clamps_to_1() {
+        let builder = Gateway::builder()
+            .broadcast_capacity(0)
+            .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
+        let gateway = builder.build().unwrap();
+        assert_eq!(gateway.inner.broadcast_capacity, 1);
+    }
+
+    #[test]
+    fn builder_latency_clamps_to_10() {
+        let builder = Gateway::builder()
+            .latency_ms(0)
+            .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
+        let gateway = builder.build().unwrap();
+        assert!(gateway.latency_ms >= 10);
+    }
+
+    #[test]
+    fn builder_path_prepends_slash() {
+        let builder = Gateway::builder()
+            .path("stream")
+            .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
+        let gateway = builder.build().unwrap();
+        assert_eq!(gateway.path, "/stream");
+    }
+
+    #[test]
+    fn builder_path_with_slash_unchanged() {
+        let builder = Gateway::builder()
+            .path("/stream")
+            .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
+        let gateway = builder.build().unwrap();
+        assert_eq!(gateway.path, "/stream");
+    }
+
+    #[test]
+    fn build_fails_without_identity() {
+        let result = Gateway::builder().build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn health_bind_addr_defaults_to_localhost() {
+        let builder = Gateway::builder()
+            .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
+        let gateway = builder.build().unwrap();
+        assert_eq!(gateway.health_bind_addr, "127.0.0.1");
+    }
 }
