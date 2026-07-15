@@ -8,6 +8,7 @@ use crate::broadcaster::Broadcaster;
 use crate::ingest::Ingester;
 use crate::session::BrowserSession;
 use anyhow::Result;
+use percent_encoding::percent_decode_str;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -192,7 +193,10 @@ impl Gateway {
                                     None
                                 }
                             })
-                            .map(|t| constant_time_eq(t.as_bytes(), expected_token.as_bytes()))
+                            .map(|t| {
+                                let decoded = percent_decode_str(t).decode_utf8_lossy();
+                                constant_time_eq(decoded.as_bytes(), expected_token.as_bytes())
+                            })
                             .unwrap_or(false);
 
                         if !token_valid {

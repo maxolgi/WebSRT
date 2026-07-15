@@ -1920,6 +1920,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
+ "percent-encoding",
  "rand 0.8.7",
  "srt-protocol",
  "srt-tokio",
