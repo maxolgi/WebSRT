@@ -577,7 +577,7 @@ mod tests {
             .latency_ms(0)
             .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
         let gateway = builder.build().unwrap();
-        assert!(gateway.latency_ms >= 10);
+        assert!(gateway.srt_config.send_latency.as_millis() >= 10);
     }
 
     #[test]
