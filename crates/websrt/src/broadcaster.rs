@@ -56,7 +56,12 @@ impl Broadcaster {
                     res = &mut next_msg => match res {
                         Ok(Some(msg)) => {
                             sent += 1;
-                            let _ = tx2.send(msg);
+                            if tx2.send(msg).is_err() {
+                                tracing::debug!(
+                                    rx_count = tx2.receiver_count(),
+                                    "broadcast send failed (no active receivers)"
+                                );
+                            }
                         }
                         Ok(None) => {
                             tracing::info!("ingester source ended; broadcaster shutting down");

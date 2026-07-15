@@ -10,7 +10,7 @@ export class CanvasRenderer {
   private canvas: HTMLCanvasElement;
 
   private ring: VideoFrame[] = [];
-  private static readonly RING_CAP = 4;
+  private static readonly RING_CAP = 8;
 
   private ptsAnchorUs: number | null = null;
   private wallAnchorMs = 0;

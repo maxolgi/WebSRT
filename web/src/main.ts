@@ -62,7 +62,7 @@ function hexToBytes(hex: string): Uint8Array {
   }
   const out = new Uint8Array(32);
   for (let i = 0; i < 32; i++) {
-    out[i] = parseInt(clean.substr(i * 2, 2), 16);
+    out[i] = parseInt(clean.substring(i * 2, i * 2 + 2), 16);
   }
   return out;
 }
@@ -228,7 +228,12 @@ async function doConnect() {
 
   const pageHost = location.hostname || '127.0.0.1';
   const wtHost = pageHost === 'localhost' ? '127.0.0.1' : pageHost;
-  const wtUrl = `https://${wtHost}:4433/wt`;
+  const urlParams = new URLSearchParams(location.search);
+  const wtPort = urlParams.get('port') || '4433';
+  const authToken = urlParams.get('token');
+  const wtUrl = authToken
+    ? `https://${wtHost}:${wtPort}/wt?token=${encodeURIComponent(authToken)}`
+    : `https://${wtHost}:${wtPort}/wt`;
 
   const wtOpts: WebTransportOptions = {};
   if (hashHex) {
@@ -305,11 +310,16 @@ async function doConnect() {
   })();
 }
 
+const MAX_PENDING_SENDS = 256;
 let pendingSends: Uint8Array[] = [];
 let draining = false;
 
 function queueSend(data: Uint8Array) {
   pendingSends.push(data);
+  if (pendingSends.length > MAX_PENDING_SENDS) {
+    const dropped = pendingSends.splice(0, pendingSends.length - MAX_PENDING_SENDS);
+    console.debug(`pendingSends overflow: dropped ${dropped.length} datagrams`);
+  }
   if (!draining) drainSends();
 }
 
@@ -390,6 +400,10 @@ function updateStats(s: StatsMsg) {
     `buf'd    ${s.rxBuffered}\n` +
     `ACK/NAK  ${s.rxAck}/${s.rxNak}`;
 }
+
+document.addEventListener('visibilitychange', () => {
+  worker?.postMessage({ cmd: 'visibility', visible: !document.hidden });
+});
 
 if ((window as any).CERT_HASH !== undefined) {
   log((window as any).CERT_HASH ? 'Cert hash loaded — auto-connecting…' : 'mkcert mode — auto-connecting…', 'info');

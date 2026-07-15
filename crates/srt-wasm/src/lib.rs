@@ -52,6 +52,11 @@ impl SrtAction {
     #[wasm_bindgen(getter)]
     pub fn data(&self) -> Vec<u8> { self.data.clone() }
 
+    #[wasm_bindgen(js_name = takeData)]
+    pub fn take_data(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.data)
+    }
+
     #[wasm_bindgen(getter)]
     pub fn text(&self) -> String { self.text.clone() }
 

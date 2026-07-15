@@ -3,7 +3,7 @@
 //! This is the reference application built on the `websrt` library.
 //! For embedding, use the library crate directly.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
@@ -101,6 +101,15 @@ pub struct Cli {
     /// SRT TSBPD latency in milliseconds.
     #[arg(long, default_value_t = 300u64)]
     pub latency: u64,
+
+    /// Health/metrics HTTP port (0 to disable).
+    #[arg(long, default_value_t = 0u16)]
+    pub health_port: u16,
+
+    /// Auth token for viewer connections. If set, browsers must pass ?token=<value>.
+    /// If not set, authentication is disabled.
+    #[arg(long)]
+    pub auth_token: Option<String>,
 }
 
 #[tokio::main]
@@ -139,7 +148,7 @@ async fn main() -> Result<()> {
 
     // Write cert-hash.js so the browser knows which mode we're in.
     let hash_file = {
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = std::env::current_dir().context("failed to get current directory")?;
         let candidate = cwd.join("web/public/cert-hash.js");
         if cwd.join("web/public").exists() {
             candidate
@@ -157,12 +166,14 @@ async fn main() -> Result<()> {
         let hex = hex::encode(hash);
         tracing::info!("WebTransport cert DER SHA-256: {}", hex);
         let js = format!("window.CERT_HASH = \"{}\";", hex);
-        let _ = std::fs::write(&hash_file, &js);
+        std::fs::write(&hash_file, &js)
+            .with_context(|| format!("failed to write cert hash to {}", hash_file.display()))?;
         tracing::info!("Wrote cert hash to {}", hash_file.display());
     } else {
         tracing::info!("mkcert identity loaded; browser uses normal PKI");
         let js = "window.CERT_HASH = null;";
-        let _ = std::fs::write(&hash_file, js);
+        std::fs::write(&hash_file, js)
+            .with_context(|| format!("failed to write cert hash to {}", hash_file.display()))?;
         tracing::info!("Wrote cert-hash.js (null for mkcert mode) to {}", hash_file.display());
     }
 
@@ -171,11 +182,16 @@ async fn main() -> Result<()> {
     let mut builder = Gateway::builder()
         .bind_addr(format!("{}:{}", cli.bind, cli.wt_port).parse::<std::net::SocketAddr>()?)
         .identity(cert.identity.clone_identity())
-        .latency_ms(cli.latency);
+        .latency_ms(cli.latency)
+        .health_port(cli.health_port);
 
     #[cfg(feature = "sim-loss")]
     {
         builder = builder.sim_loss(cli.sim_loss, cli.sim_seed);
+    }
+
+    if let Some(ref token) = cli.auth_token {
+        builder = builder.auth_token(token);
     }
 
     let gateway = builder.build();
@@ -203,9 +219,13 @@ async fn main() -> Result<()> {
                         SrtIngester::bind_with_addr(format!("0.0.0.0:{srt_port}"), streamid).await
                     }
                     SrtMode::Caller => {
-                        let addr = call_addr.unwrap_or_else(|| "127.0.0.1:9000".to_string());
-                        tracing::info!(%addr, "SRT caller mode: dialing OBS");
-                        SrtIngester::call_with_streamid(&addr, streamid).await
+                        match call_addr {
+                            Some(addr) => {
+                                tracing::info!(%addr, "SRT caller mode: dialing OBS");
+                                SrtIngester::call_with_streamid(&addr, streamid).await
+                            }
+                            None => Err(anyhow::anyhow!("--srt-call <addr> required when --srt-mode caller")),
+                        }
                     }
                 };
                 match result {

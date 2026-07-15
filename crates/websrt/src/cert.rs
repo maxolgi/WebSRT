@@ -45,6 +45,10 @@ impl Cert {
             .context("empty certificate chain")?;
         let hash = leaf.hash();
         let der_sha256 = *hash.as_ref();
+        tracing::info!(
+            sans = ?sans,
+            "self-signed cert generated (valid ≤14 days; regenerate via restart)"
+        );
         Ok(Self {
             identity,
             der_sha256: Some(der_sha256),

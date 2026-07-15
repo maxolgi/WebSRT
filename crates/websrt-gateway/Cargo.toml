@@ -34,6 +34,9 @@ path = "src/bin/mock_obs.rs"
 name = "wt_echo_client"
 path = "src/bin/wt_echo_client.rs"
 
+[dev-dependencies]
+async-trait.workspace = true
+
 [[bin]]
 name = "wt_hs_probe"
 path = "src/bin/wt_hs_probe.rs"

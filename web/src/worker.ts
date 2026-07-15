@@ -4,6 +4,7 @@ import { Demuxer } from './demux';
 export type WorkerCmd =
   | { cmd: 'init'; latencyMs: number }
   | { cmd: 'datagrams'; batch: Uint8Array[] }
+  | { cmd: 'visibility'; visible: boolean }
   | { cmd: 'stop' };
 
 export interface StatsMsg {
@@ -60,6 +61,22 @@ self.onmessage = async (e: MessageEvent) => {
         const nowUs = (performance.now() - epoch) * 1000;
         const actions = rx.handle_datagram(data, nowUs);
         processActions(actions);
+      }
+      break;
+    case 'visibility':
+      if (cmd.visible) {
+        if (rx && inited) {
+          // Tab returned to foreground — catch up on missed ticks
+          for (let i = 0; i < 10; i++) {
+            const nowUs = (performance.now() - epoch) * 1000;
+            const actions = rx.poll(nowUs);
+            processActions(actions);
+          }
+          flushOutgoing();
+        }
+      } else {
+        queue({ type: 'log', msg: 'tab backgrounded — SRT ticks may be throttled', cls: 'info' });
+        flushOutgoing();
       }
       break;
     case 'stop':
@@ -158,10 +175,10 @@ function processActions(actions: SrtAction[]) {
     try {
       switch (a.kind) {
         case 0:
-          queue({ type: 'send', data: a.data });
+          queue({ type: 'send', data: a.takeData() });
           break;
         case 1:
-          demux?.feed(a.data);
+          demux?.feed(a.takeData());
           break;
         case 2:
           queue({ type: 'handshakeComplete' });
@@ -173,6 +190,9 @@ function processActions(actions: SrtAction[]) {
           break;
         case 5:
           queue({ type: 'log', msg: `srt: ${a.text}`, cls: 'info' });
+          break;
+        default:
+          console.warn(`srt: unknown action kind ${a.kind}`);
           break;
       }
     } finally {

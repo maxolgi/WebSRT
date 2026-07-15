@@ -18,11 +18,15 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use crate::broadcaster::ViewerRx;
 use crate::srt_sender::{SenderAction, SrtInitiator};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use wtransport::Connection;
+
+/// Monotonic counter for short per-session correlation IDs.
+static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Probabilistic outgoing-datagram dropper. Only data packets are dropped;
 /// control packets (handshake, ACK, NAK, KeepAlive, Shutdown) always pass so
@@ -98,19 +102,28 @@ impl LossInjector {
 pub struct BrowserSession;
 
 impl BrowserSession {
-    const GATEWAY_ADDR: SocketAddr =
+    /// Dummy socket addresses required by srt-protocol's Connect/Listen state
+    /// machines. They're never used on the WebTransport path — srt-protocol
+    /// just needs them for internal bookkeeping (socket IDs, etc).
+    const DUMMY_LOCAL_ADDR: SocketAddr =
         SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0);
-    const BROWSER_ADDR: SocketAddr =
+    const DUMMY_REMOTE_ADDR: SocketAddr =
         SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 1);
 
     /// Spawn a session. `viewer` is this session's private subscription to the
-    /// ingester fanout.
-    pub fn spawn(conn: Connection, viewer: ViewerRx, sim_loss: u8, sim_seed: u64, latency_ms: u64) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            if let Err(e) = Self::run(conn, viewer, sim_loss, sim_seed, latency_ms).await {
-                tracing::info!(?e, "browser session ended");
+    /// ingester fanout. Returns a `(shutdown, join_handle)` tuple so the caller
+    /// can trigger graceful drain via `shutdown.notify_one()`.
+    pub fn spawn(conn: Connection, viewer: ViewerRx, sim_loss: u8, sim_seed: u64, latency_ms: u64) -> (Arc<Notify>, tokio::task::JoinHandle<()>) {
+        let shutdown = Arc::new(Notify::new());
+        let handle = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                if let Err(e) = Self::run(conn, viewer, sim_loss, sim_seed, latency_ms, shutdown).await {
+                    tracing::info!(?e, "browser session ended");
+                }
             }
-        })
+        });
+        (shutdown, handle)
     }
 
     async fn run(
@@ -119,13 +132,15 @@ impl BrowserSession {
         sim_loss: u8,
         sim_seed: u64,
         latency_ms: u64,
+        shutdown: Arc<Notify>,
     ) -> anyhow::Result<()> {
         let peer = conn.remote_address();
-        tracing::info!(%peer, sim_loss, "session: starting SRT initiator");
+        let session_id = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        tracing::info!(session_id, %peer, sim_loss, "session: starting SRT initiator");
 
         let initiator = Arc::new(Mutex::new(SrtInitiator::new(
-            Self::GATEWAY_ADDR.ip(),
-            Self::BROWSER_ADDR,
+            Self::DUMMY_LOCAL_ADDR.ip(),
+            Self::DUMMY_REMOTE_ADDR,
             latency_ms,
         )));
         let loss = Arc::new(Mutex::new(LossInjector::new(sim_loss, sim_seed)));
@@ -136,17 +151,16 @@ impl BrowserSession {
             let mut l = loss.lock().await;
             let now = Instant::now();
             for action in init.tick(now) {
-                Self::send_action(&conn, action, &mut l).await?;
+                Self::send_action(&conn, action, &mut l)?;
             }
         }
-
-        let shutdown = Arc::new(Notify::new());
 
         let recv_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(Self::recv_pump(
             conn.clone(),
             initiator.clone(),
             loss.clone(),
             shutdown.clone(),
+            session_id,
         ));
         let sender_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(Self::sender_pump(
             conn.clone(),
@@ -154,6 +168,7 @@ impl BrowserSession {
             loss.clone(),
             viewer,
             shutdown.clone(),
+            session_id,
             latency_ms,
         ));
         let recv_abort = recv_task.abort_handle();
@@ -172,7 +187,6 @@ impl BrowserSession {
                 r
             }
         };
-        shutdown.notify_waiters();
         joined??;
         Ok(())
     }
@@ -184,6 +198,7 @@ impl BrowserSession {
         initiator: Arc<Mutex<SrtInitiator>>,
         loss: Arc<Mutex<LossInjector>>,
         shutdown: Arc<Notify>,
+        session_id: u64,
     ) -> anyhow::Result<()> {
         loop {
             let d = tokio::select! {
@@ -192,7 +207,7 @@ impl BrowserSession {
                 res = conn.receive_datagram() => match res {
                     Ok(d) => d,
                     Err(e) => {
-                        tracing::info!(?e, "session: recv datagram stream closed");
+                        tracing::info!(session_id, ?e, "session: recv datagram stream closed");
                         shutdown.notify_waiters();
                         return Ok(());
                     }
@@ -211,11 +226,11 @@ impl BrowserSession {
                     if matches!(action, SenderAction::Close) {
                         should_close = true;
                     }
-                    Self::send_action(&conn, action, &mut l).await?;
+                    Self::send_action(&conn, action, &mut l)?;
                 }
             }
             if should_close {
-                tracing::info!("session: initiator returned Close; recv loop exiting");
+                tracing::info!(session_id, "session: initiator returned Close; recv loop exiting");
                 shutdown.notify_waiters();
                 return Ok(());
             }
@@ -230,27 +245,29 @@ impl BrowserSession {
         loss: Arc<Mutex<LossInjector>>,
         mut viewer: ViewerRx,
         shutdown: Arc<Notify>,
+        session_id: u64,
         latency_ms: u64,
     ) -> anyhow::Result<()> {
         let mut ticker = tokio::time::interval(Duration::from_millis(2));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut stats_at = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut stats_interval = tokio::time::interval(Duration::from_secs(5));
+        stats_interval.tick().await; // consume the immediate first tick
         let mut action_count: u64 = 0;
 
         loop {
             let (msg, do_stats) = tokio::select! {
                 biased;
                 _ = shutdown.notified() => return Ok(()),
-                _ = tokio::time::sleep_until(stats_at) => (None, true),
+                _ = stats_interval.tick() => (None, true),
                 _ = ticker.tick() => (None, false),
                 msg = viewer.recv() => match msg {
                     Ok(Some(m)) => (Some(m), false),
                     Ok(None) => {
-                        tracing::info!("session: viewer source ended");
+                        tracing::info!(session_id, "session: viewer source ended");
                         return Ok(());
                     }
                     Err(e) => {
-                        tracing::warn!(?e, "viewer recv error");
+                        tracing::warn!(session_id, ?e, "viewer recv error");
                         return Ok(());
                     }
                 },
@@ -262,7 +279,7 @@ impl BrowserSession {
                 let mut init = initiator.lock().await;
                 let lock_ms = lock_start.elapsed().as_millis();
                 if lock_ms > 10 {
-                    tracing::warn!(lock_ms, "sender_pump: initiator lock contention");
+                    tracing::warn!(session_id, lock_ms, "sender_pump: initiator lock contention");
                 }
                 let mut v = init.tick(now);
                 if let Some(m) = msg {
@@ -278,8 +295,8 @@ impl BrowserSession {
                             Ok(Some(m)) => { v.extend(init.push_message(m)); drained += 1; }
                             Ok(None) => break,
                             Err(lag) => {
-                                tracing::warn!(lag, "viewer lagged in try_recv drain; dropped messages");
-                                continue;
+                                tracing::warn!(session_id, lag, "viewer lagged in try_recv drain; dropped messages");
+                                break;
                             }
                         }
                     }
@@ -293,7 +310,7 @@ impl BrowserSession {
                     if matches!(action, SenderAction::Close) {
                         should_close = true;
                     }
-                    Self::send_action(&conn, action, &mut l).await?;
+                    Self::send_action(&conn, action, &mut l)?;
                 }
             }
             if do_stats {
@@ -309,6 +326,7 @@ impl BrowserSession {
                 };
                 if let Some(ref s) = srt_stats {
                     tracing::info!(
+                        session_id,
                         sent,
                         dropped,
                         lag,
@@ -328,6 +346,7 @@ impl BrowserSession {
                     let wt_rtt_ms = wt_rtt.as_secs_f64() * 1000.0;
                     if wt_rtt_ms * 4.0 > latency_ms as f64 {
                         tracing::warn!(
+                            session_id,
                             wt_rtt_ms,
                             latency_ms,
                             recommended = (wt_rtt_ms * 4.0) as u64,
@@ -336,25 +355,24 @@ impl BrowserSession {
                         );
                     }
                 } else {
-                    tracing::debug!(sent, dropped, lag, "session stats (no SRT stats yet)");
+                    tracing::debug!(session_id, sent, dropped, lag, "session stats (no SRT stats yet)");
                 }
-                stats_at = tokio::time::Instant::now() + Duration::from_secs(5);
                 action_count = 0;
                 let is_closed = initiator.lock().await.is_closed();
                 if is_closed {
-                    tracing::info!("session: initiator closed");
+                    tracing::info!(session_id, "session: initiator closed");
                     return Ok(());
                 }
             }
             if should_close {
-                tracing::info!("session: initiator returned Close; exiting loop");
+                tracing::info!(session_id, "session: initiator returned Close; exiting loop");
                 shutdown.notify_waiters();
                 return Ok(());
             }
         }
     }
 
-    async fn send_action(
+    fn send_action(
         conn: &Connection,
         action: SenderAction,
         loss: &mut LossInjector,
@@ -368,7 +386,10 @@ impl BrowserSession {
                 if bytes.len() > 1200 {
                     tracing::warn!(len = bytes.len(), "outgoing datagram > 1200B; QUIC may reject");
                 }
-                conn.send_datagram(bytes)?;
+                if let Err(e) = conn.send_datagram(bytes) {
+                    tracing::warn!(?e, "send_datagram failed; packet will be NAK'd");
+                    return Ok(());
+                }
             }
             SenderAction::HandshakeComplete => {
                 tracing::info!("session: HandshakeComplete");

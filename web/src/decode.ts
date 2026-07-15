@@ -443,6 +443,7 @@ export class VideoPipeline {
   private configured = false;
   private decodedCount = 0;
   private seenKeyframe = false;
+  private droppedVideo = 0;
 
   constructor(cb: DecoderCallbacks) {
     this.cb = cb;
@@ -524,6 +525,10 @@ export class VideoPipeline {
     if (hasIdr) this.seenKeyframe = true;
     const qDepth = this.decoder.decodeQueueSize;
     if (!hasIdr && qDepth > 8) {
+      this.droppedVideo++;
+      if (this.droppedVideo % 30 === 0) {
+        console.debug(`VideoPipeline: dropped ${this.droppedVideo} frames (queue full, qDepth=${qDepth})`);
+      }
       return;
     }
     const data = nalusToLengthPrefixed(decodeNalus);
@@ -712,6 +717,7 @@ abstract class AudioPipelineBase {
   protected packetsDecoded = 0;
   protected sampleRate = 48000;
   protected channels = 2;
+  protected droppedAudio = 0;
 
   constructor(cb: AudioDecoderCallbacks) {
     this.cb = cb;
@@ -748,7 +754,7 @@ abstract class AudioPipelineBase {
 
   /** AudioWorklet fallback for Firefox and other browsers without MediaStreamTrackGenerator. */
   private async initWorklet(): Promise<void> {
-    const Ctx = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext;
+    const Ctx = (window.AudioContext || (window as unknown as Window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext);
     this.audioCtx = new Ctx({ sampleRate: this.sampleRate });
 
     const blob = new Blob([PCM_PLAYER_WORKLET], { type: 'application/javascript' });
@@ -782,6 +788,10 @@ abstract class AudioPipelineBase {
 
   protected feedFrame(chunk: EncodedAudioChunk) {
     if (this.decoder && this.decoder.decodeQueueSize > 20) {
+      this.droppedAudio++;
+      if (this.droppedAudio % 30 === 0) {
+        console.debug(`${this.constructor.name}: dropped ${this.droppedAudio} packets (queue full)`);
+      }
       return;
     }
     try {
@@ -919,7 +929,7 @@ export class OpusAudioPipeline extends AudioPipelineBase {
       data: opusData,
     }));
     if (this.packetsDecoded === 1) {
-      this.cb.onError(`opus: first packet (${opusData.length}B, ${channels}ch, ${frameDurationUs / 1000}ms)`);
+      console.info(`opus: first packet (${opusData.length}B, ${channels}ch, ${frameDurationUs / 1000}ms)`);
     }
   }
 
@@ -981,7 +991,7 @@ export class AacAudioPipeline extends AudioPipelineBase {
       data: aacData,
     }));
     if (this.packetsDecoded === 1) {
-      this.cb.onError(`aac: first packet (${aacData.length}B, ${ch}ch, ${sr}Hz, profile ${profile + 1})`);
+      console.info(`aac: first packet (${aacData.length}B, ${ch}ch, ${sr}Hz, profile ${profile + 1})`);
     }
   }
 

@@ -104,6 +104,9 @@ impl SrtInitiator {
                     Action::Close => {
                         out.push(SenderAction::Close);
                     }
+                    Action::UpdateStatistics(s) => {
+                        self.last_stats = Some(s.clone());
+                    }
                     _ => {}
                 }
                 drain(duplex, now, &mut out, &mut self.last_stats);

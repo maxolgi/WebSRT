@@ -45,6 +45,16 @@ impl FileIngester {
                 data.len()
             ));
         }
+        for (i, chunk) in data.chunks(TS_PACKET).enumerate() {
+            if chunk[0] != 0x47 {
+                return Err(anyhow!(
+                    "fixture {} sync byte error at offset {} (expected 0x47, got 0x{:02x}) — not a valid MPEG-TS file",
+                    path.display(),
+                    i * TS_PACKET,
+                    chunk[0]
+                ));
+            }
+        }
         let bytes_per_sec = if duration_secs > 0.0 {
             (data.len() as f64) / duration_secs
         } else {
