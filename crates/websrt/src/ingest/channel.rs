@@ -1,6 +1,7 @@
 use super::{Ingester, TsMessage};
 use anyhow::Result;
 use async_trait::async_trait;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 /// Ingester backed by an mpsc channel. Used when a browser publishes upstream
@@ -20,7 +21,7 @@ impl ChannelIngester {
 impl Ingester for ChannelIngester {
     async fn next_message(&mut self) -> Result<Option<TsMessage>> {
         match self.rx.recv().await {
-            Some(msg) => Ok(Some(msg)),
+            Some(msg) => Ok(Some((Instant::now(), msg.1))),
             None => Ok(None),
         }
     }
