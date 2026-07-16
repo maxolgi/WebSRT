@@ -105,7 +105,7 @@ Gateway runs under supervisord:
 - WASM camelCase warnings in `srt-wasm` are **required** by wasm-bindgen — don't "fix" them.
 - `SrtIngester.kind` field stores `SrtListener` to keep it alive (drop = close listener). The "never read" warning is intentional.
 - `performance.now()` epoch mismatch: browser uses `web_time::Instant` (Performance API), gateway uses `std::time::Instant`. SRT protocol handles this via timestamp fields in packets + clock sync during handshake.
-- TSBPD latency negotiation: `max(sender_latency, receiver_latency)` during HSv5. Browser slider and `--latency` CLI both matter.
+- TSBPD latency negotiation: `max(sender_latency, receiver_latency)` during HSv5. The browser slider solely controls the gateway→browser TSBPD (gateway-side floor is 10ms). `--latency` controls the OBS→gateway ingester SRT latency (default 120ms).
 
 ## Testing
 

@@ -12,6 +12,7 @@ enum Kind {
 
 pub struct SrtIngester {
     kind: Kind,
+    latency: Duration,
     socket: Option<SrtSocket>,
 }
 
@@ -21,7 +22,16 @@ impl SrtIngester {
     }
 
     pub async fn bind_with_addr(addr: impl AsRef<str>, streamid: Option<String>) -> Result<Self> {
+        Self::bind_with_latency(addr, streamid, Duration::from_millis(120)).await
+    }
+
+    pub async fn bind_with_latency(
+        addr: impl AsRef<str>,
+        streamid: Option<String>,
+        latency: Duration,
+    ) -> Result<Self> {
         let (listener, mut incoming) = SrtListener::builder()
+            .latency(latency)
             .bind(addr.as_ref())
             .await
             .map_err(|e| anyhow!("srt listener bind: {e}"))?;
@@ -29,6 +39,7 @@ impl SrtIngester {
         let socket = Self::accept_one(&mut incoming, &streamid).await?;
         Ok(Self {
             kind: Kind::Listener(listener, incoming, streamid),
+            latency,
             socket: Some(socket),
         })
     }
@@ -64,20 +75,30 @@ impl SrtIngester {
     }
 
     pub async fn call_with_streamid(addr: impl AsRef<str>, streamid: Option<String>) -> Result<Self> {
+        Self::call_with_latency(addr, streamid, Duration::from_millis(120)).await
+    }
+
+    pub async fn call_with_latency(
+        addr: impl AsRef<str>,
+        streamid: Option<String>,
+        latency: Duration,
+    ) -> Result<Self> {
         let addr_str = addr.as_ref().to_string();
         tracing::info!(addr = %addr_str, "SRT caller: dialing OBS…");
-        let socket = Self::dial(&addr_str, &streamid).await?;
+        let socket = Self::dial(&addr_str, &streamid, latency).await?;
         Ok(Self {
             kind: Kind::Caller(addr_str, streamid),
+            latency,
             socket: Some(socket),
         })
     }
 
-    async fn dial(addr: &str, streamid: &Option<String>) -> Result<SrtSocket> {
+    async fn dial(addr: &str, streamid: &Option<String>, latency: Duration) -> Result<SrtSocket> {
         let socket_addr: srt_protocol::options::SocketAddress = addr
             .try_into()
             .map_err(|e| anyhow!("invalid SRT address {addr}: {e:?}"))?;
         let socket = SrtSocket::builder()
+            .latency(latency)
             .call(socket_addr, streamid.as_deref())
             .await
             .map_err(|e| anyhow!("srt call to {addr}: {e}"))?;
@@ -94,7 +115,7 @@ impl SrtIngester {
             Kind::Caller(addr, streamid) => {
                 tracing::info!(addr, "SRT caller: re-dialing OBS…");
                 loop {
-                    match Self::dial(addr, streamid).await {
+                    match Self::dial(addr, streamid, self.latency).await {
                         Ok(s) => return Ok(s),
                         Err(e) => {
                             tracing::warn!(?e, addr, "SRT reconnect failed; retrying in 2s");

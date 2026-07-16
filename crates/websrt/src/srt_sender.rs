@@ -45,8 +45,8 @@ impl Default for SrtConfig {
             send_buffer_size: 8192,
             recv_buffer_size: 8192,
             peer_idle_timeout: std::time::Duration::from_secs(30),
-            send_latency: std::time::Duration::from_millis(300),
-            recv_latency: std::time::Duration::from_millis(300),
+            send_latency: std::time::Duration::from_millis(10),
+            recv_latency: std::time::Duration::from_millis(10),
         }
     }
 }

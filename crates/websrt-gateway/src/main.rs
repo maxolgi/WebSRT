@@ -98,8 +98,8 @@ pub struct Cli {
     #[arg(long, default_value_t = 42u64)]
     pub sim_seed: u64,
 
-    /// SRT TSBPD latency in milliseconds.
-    #[arg(long, default_value_t = 300u64)]
+    /// SRT TSBPD latency for OBS input, in milliseconds.
+    #[arg(long, default_value_t = 120u64)]
     pub latency: u64,
 
     /// Health/metrics HTTP port (0 to disable).
@@ -182,7 +182,6 @@ async fn main() -> Result<()> {
     let mut builder = Gateway::builder()
         .bind_addr(format!("{}:{}", cli.bind, cli.wt_port).parse::<std::net::SocketAddr>()?)
         .identity(cert.identity.clone_identity())
-        .latency_ms(cli.latency)
         .health_port(cli.health_port);
 
     #[cfg(feature = "sim-loss")]
@@ -212,17 +211,28 @@ async fn main() -> Result<()> {
             let srt_port = cli.srt_port;
             let call_addr = cli.srt_call.clone();
             let streamid = cli.srt_streamid.clone();
+            let latency_ms = cli.latency;
             tokio::spawn(async move {
                 let result = match srt_mode {
                     SrtMode::Listener => {
                         tracing::info!(port = srt_port, "binding SRT listener for OBS");
-                        SrtIngester::bind_with_addr(format!("0.0.0.0:{srt_port}"), streamid).await
+                        SrtIngester::bind_with_latency(
+                            format!("0.0.0.0:{srt_port}"),
+                            streamid,
+                            std::time::Duration::from_millis(latency_ms),
+                        )
+                        .await
                     }
                     SrtMode::Caller => {
                         match call_addr {
                             Some(addr) => {
                                 tracing::info!(%addr, "SRT caller mode: dialing OBS");
-                                SrtIngester::call_with_streamid(&addr, streamid).await
+                                SrtIngester::call_with_latency(
+                                    &addr,
+                                    streamid,
+                                    std::time::Duration::from_millis(latency_ms),
+                                )
+                                .await
                             }
                             None => Err(anyhow::anyhow!("--srt-call <addr> required when --srt-mode caller")),
                         }
