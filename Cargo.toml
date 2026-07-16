@@ -5,6 +5,7 @@ members = [
     "crates/websrt-gateway",
     "crates/srt-wasm",
     "crates/mpeg2ts-wasm",
+    "crates/ts-muxer-wasm",
 ]
 
 [workspace.package]

@@ -1798,6 +1798,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ts-muxer-wasm"
+version = "0.1.0"
+dependencies = [
+ "wasm-bindgen",
+ "web-time",
+]
+
+[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
