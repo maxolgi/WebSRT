@@ -1,9 +1,9 @@
 //! `ts-muxer-wasm` — wasm32 MPEG-TS muxer for the browser.
 //!
-//! Takes H.264 NAL units (Annex B) and optional AAC ADTS frames and produces
-//! 188-byte ISO/IEC 13818-1 MPEG-TS packets. JS drives it by pushing encoded
-//! chunks via `pushVideo` / `pushAudio` and draining finished packets via
-//! `poll`.
+//! Takes H.264 NAL units (Annex B) and Opus packets (one per PES, with a
+//! 2-byte control header the viewer strips) and produces 188-byte
+//! ISO/IEC 13818-1 MPEG-TS packets. JS drives it by pushing encoded chunks
+//! via `push_video` / `push_audio` and draining finished packets via `poll`.
 
 use wasm_bindgen::prelude::*;
 
@@ -14,7 +14,8 @@ const AUDIO_PID: u16 = 0x101;
 const PMT_PID: u16 = 0x1000;
 
 const STREAM_TYPE_H264: u8 = 0x1B;
-const STREAM_TYPE_AAC: u8 = 0x0F;
+const STREAM_TYPE_HEVC: u8 = 0x24;
+const STREAM_TYPE_OPUS: u8 = 0x06;
 
 const SYNC_BYTE: u8 = 0x47;
 
@@ -52,8 +53,8 @@ impl TsMuxer {
         }
     }
 
-    #[wasm_bindgen(js_name = pushVideo)]
-    pub fn push_video(&mut self, data: &[u8], pts_us: i64, dts_us: i64, is_keyframe: bool) {
+    #[wasm_bindgen(js_name = push_video)]
+    pub fn push_video(&mut self, data: &[u8], pts_us: f64, dts_us: f64, is_keyframe: bool) {
         let pts_90k = us_to_90k(pts_us);
         let dts_90k = us_to_90k(dts_us);
         self.pcr = pts_90k.wrapping_mul(300);
@@ -76,10 +77,15 @@ impl TsMuxer {
         );
     }
 
-    #[wasm_bindgen(js_name = pushAudio)]
-    pub fn push_audio(&mut self, data: &[u8], pts_us: i64) {
+    #[wasm_bindgen(js_name = push_audio)]
+    pub fn push_audio(&mut self, data: &[u8], pts_us: f64) {
         let pts_90k = us_to_90k(pts_us);
-        let pes = build_pes_audio(data, pts_90k);
+        // Prepend the 2-byte Opus-in-TS control header (ffmpeg convention). The
+        // viewer's OpusAudioPipeline strips exactly these 2 bytes before decoding.
+        let mut payload = Vec::with_capacity(2 + data.len());
+        payload.extend_from_slice(&[0x7F, 0xE0]);
+        payload.extend_from_slice(data);
+        let pes = build_pes_audio(&payload, pts_90k);
         packetize(
             &mut self.output,
             self.audio_pid,
@@ -133,8 +139,8 @@ impl TsMuxer {
             0x00, 0x00,                 // section_number, last_section_number
             0xE1, 0x00,                 // reserved(111) + PCR_PID = 0x100
             0xF0, 0x00,                 // reserved(1111) + program_info_length = 0
-            STREAM_TYPE_H264, 0xE1, 0x00, 0xF0, 0x00, // video: PID 0x100, ES_info_length 0
-            STREAM_TYPE_AAC,  0xE1, 0x01, 0xF0, 0x00, // audio: PID 0x101, ES_info_length 0
+            STREAM_TYPE_H264,  0xE1, 0x00, 0xF0, 0x00, // video: PID 0x100 (H.264), ES_info_length 0
+            STREAM_TYPE_OPUS, 0xE1, 0x01, 0xF0, 0x00, // audio: PID 0x101, ES_info_length 0
         ];
         let crc = crc32(&section);
         section.extend_from_slice(&crc.to_be_bytes());
@@ -300,12 +306,8 @@ fn crc32(data: &[u8]) -> u32 {
     crc
 }
 
-fn us_to_90k(us: i64) -> u64 {
-    if us <= 0 {
-        0
-    } else {
-        (us as u64) * 9 / 100
-    }
+fn us_to_90k(us: f64) -> u64 {
+    (us.max(0.0) * 9.0 / 100.0) as u64
 }
 
 impl Default for TsMuxer {

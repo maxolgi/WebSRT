@@ -13,6 +13,7 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5173,
+    cors: { origin: [/^https?:\/\/(localhost|127\.0\.0\.1):8100$/] },
   },
   plugins: [basicSsl()],
 });
