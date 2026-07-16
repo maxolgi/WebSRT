@@ -4,17 +4,18 @@
 //! `SrtInitiator`) into a single run-loop. The caller provides an `Ingester`
 //! (either immediately or deferred via `source_handle`).
 
-use crate::broadcaster::Broadcaster;
-use crate::ingest::Ingester;
+use crate::ingest::{Ingester, TsMessage};
 use crate::registry::SessionRegistry;
 use crate::session::BrowserSession;
 use crate::srt_sender::SrtConfig;
+use crate::stream_registry::StreamRegistry;
 use anyhow::Result;
 use percent_encoding::percent_decode_str;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::sync::{Mutex, Notify};
 use wtransport::Endpoint;
 use wtransport::Identity;
@@ -46,9 +47,7 @@ pub struct Gateway {
 }
 
 struct GatewayInner {
-    broadcaster: Mutex<Option<Arc<Broadcaster>>>,
-    max_viewers: usize,
-    broadcast_capacity: usize,
+    streams: Arc<StreamRegistry>,
 }
 
 /// Builder for [`Gateway`].
@@ -244,35 +243,24 @@ impl Gateway {
                         }
                     }
 
-                    // Pre-accept check: reject up-front without consuming a viewer
-                    // slot. The actual `subscribe()` happens after accept succeeds
-                    // so a failed accept cannot briefly inflate/decrement the
-                    // viewer count. `subscribe()` re-checks alive + cap after
-                    // accept to close the gap between this check and the real
-                    // subscription.
-                    {
-                        let guard = self.inner.broadcaster.lock().await;
-                        match guard.as_ref() {
-                            Some(b) if !b.is_alive() => {
-                                drop(guard);
-                                tracing::warn!("session rejected: source is dead");
-                                session_request.too_many_requests().await;
-                                continue;
-                            }
-                            Some(b) if b.viewer_count() >= self.inner.max_viewers => {
-                                drop(guard);
-                                tracing::warn!("session rejected: viewer cap reached");
-                                session_request.too_many_requests().await;
-                                continue;
-                            }
-                            None => {
-                                drop(guard);
-                                tracing::warn!("session rejected: source not ready yet");
-                                session_request.too_many_requests().await;
-                                continue;
-                            }
-                            _ => {}
-                        }
+                    // Parse stream routing from query params.
+                    //   ?stream=<name> or ?subscribe=<name> → view this stream
+                    //   ?publish=<name>                     → publish this stream
+                    // A session may both publish and view (different streams).
+                    let stream_name = parse_query_param(query, "stream")
+                        .or_else(|| parse_query_param(query, "subscribe"))
+                        .unwrap_or_else(|| "default".to_string());
+                    let publish_name = parse_query_param(query, "publish");
+
+                    // Pre-accept check: for viewer-only sessions, reject
+                    // up-front if the requested stream isn't available (no
+                    // source yet, or source ended). This avoids a wasted WT
+                    // handshake. Publishing sessions skip this — they create
+                    // the stream after accept.
+                    if publish_name.is_none() && !self.inner.streams.is_alive(&stream_name) {
+                        tracing::warn!(stream = %stream_name, "session rejected: stream not available");
+                        session_request.too_many_requests().await;
+                        continue;
                     }
 
                     let connection = match session_request.accept().await {
@@ -280,24 +268,6 @@ impl Gateway {
                         Err(e) => {
                             tracing::warn!(?e, "accept failed");
                             continue;
-                        }
-                    };
-
-                    // Post-accept: actually subscribe. If this fails now (source
-                    // died or cap filled between the pre-check and here), close
-                    // the just-accepted connection rather than leaking it.
-                    let viewer = {
-                        let guard = self.inner.broadcaster.lock().await;
-                        match guard.as_ref().and_then(|b| b.subscribe()) {
-                            Some(v) => v,
-                            None => {
-                                drop(guard);
-                                tracing::warn!(
-                                    "post-accept subscribe failed; closing session"
-                                );
-                                connection.close(1u32.into(), b"subscribe failed");
-                                continue;
-                            }
                         }
                     };
 
@@ -327,17 +297,48 @@ impl Gateway {
                         }
                     }
 
+                    // Resolve the viewer subscription and/or publish channel
+                    // after a successful accept + PMTU check. `subscribe()`
+                    // re-checks alive + per-stream cap atomically; if it fails
+                    // now (source died or cap filled between the pre-check and
+                    // here) close the just-accepted connection rather than
+                    // leaking it.
+                    let (viewer, publish_tx) = match &publish_name {
+                        Some(pub_name) => {
+                            // Publishing session: create the stream channel.
+                            let tx = self.inner.streams.publish(pub_name);
+                            // Optionally also view a different stream.
+                            let view = if pub_name.as_str() != stream_name.as_str() {
+                                self.inner.streams.subscribe(&stream_name)
+                            } else {
+                                None
+                            };
+                            (view, Some(tx))
+                        }
+                        None => match self.inner.streams.subscribe(&stream_name) {
+                            Some(v) => (Some(v), None),
+                            None => {
+                                tracing::warn!(
+                                    stream = %stream_name,
+                                    "post-accept subscribe failed; closing session"
+                                );
+                                connection.close(1u32.into(), b"stream not found");
+                                continue;
+                            }
+                        },
+                    };
+
                     #[cfg(feature = "sim-loss")]
                     let (entry, handle) = BrowserSession::create(
                         connection, viewer,
                         self.sim_loss, self.sim_seed, self.srt_config.clone(),
-                        None, None,
+                        publish_tx, None,
                     ).await;
                     #[cfg(not(feature = "sim-loss"))]
                     let (entry, handle) = BrowserSession::create(
                         connection, viewer,
                         0, 0, self.srt_config.clone(),
-                        None, None,
+                        publish_tx, None,
                     ).await;
                     let session_shutdown = entry.shutdown.clone();
                     registry.insert(entry);
@@ -402,19 +403,18 @@ impl Gateway {
         let mut buf = [0u8; 1024];
         let _ = tokio::time::timeout(std::time::Duration::from_millis(500), stream.read(&mut buf)).await;
 
-        let (viewers, alive) = {
-            let guard = inner.broadcaster.lock().await;
-            match guard.as_ref() {
-                Some(b) => (b.viewer_count(), b.is_alive()),
-                None => (0usize, false),
-            }
-        };
+        let streams = inner.streams.stream_count();
+        let alive_streams = inner.streams.alive_stream_count();
+        let viewers = inner.streams.total_viewers();
+        let max_viewers = inner.streams.max_viewers();
 
         let json = format!(
-            r#"{{"status":"{}","viewers":{},"max_viewers":{}}}"#,
-            if alive { "ok" } else { "no_source" },
+            r#"{{"status":"{}","streams":{},"alive_streams":{},"viewers":{},"max_viewers":{}}}"#,
+            if alive_streams > 0 { "ok" } else { "no_source" },
+            streams,
+            alive_streams,
             viewers,
-            inner.max_viewers,
+            max_viewers,
         );
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -544,12 +544,9 @@ impl GatewayBuilder {
     /// Build the gateway. Returns error if identity was not set.
     pub fn build(self) -> Result<Gateway> {
         let identity = self.identity.ok_or_else(|| anyhow::anyhow!("identity must be set"))?;
+        let streams = Arc::new(StreamRegistry::new(self.max_viewers, self.broadcast_capacity));
         Ok(Gateway {
-            inner: Arc::new(GatewayInner {
-                broadcaster: Mutex::new(None),
-                max_viewers: self.max_viewers,
-                broadcast_capacity: self.broadcast_capacity,
-            }),
+            inner: Arc::new(GatewayInner { streams }),
             bind_addr: self.bind_addr,
             identity,
             path: self.path,
@@ -567,15 +564,19 @@ impl GatewayBuilder {
 }
 
 impl GatewaySourceHandle {
-    /// Set the source ingester. Creates a [`Broadcaster`] and makes it
-    /// immediately available to new viewer sessions.
-    pub async fn set_ingester<I: Ingester + Send + 'static>(&self, ingester: I) {
-        let b = Broadcaster::spawn(
-            ingester,
-            self.inner.max_viewers,
-            self.inner.broadcast_capacity,
-        );
-        *self.inner.broadcaster.lock().await = Some(b);
+    /// Publish a stream from an external ingester (e.g. SRT from OBS, a file
+    /// fixture). The stream is immediately available for viewers to subscribe
+    /// under `name`. Replaces any previously registered stream of the same
+    /// name.
+    pub fn publish_stream<I: Ingester + Send + 'static>(&self, name: &str, ingester: I) {
+        self.inner.streams.publish_ingester(name, ingester);
+    }
+
+    /// Create a channel-backed stream for browser upstream sessions. Returns
+    /// the [`mpsc::Sender`] for pushing TS messages into the stream. The stream
+    /// is immediately available for viewers to subscribe under `name`.
+    pub fn publish_channel(&self, name: &str) -> mpsc::Sender<TsMessage> {
+        self.inner.streams.publish(name)
     }
 }
 
@@ -590,6 +591,19 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         result |= x ^ y;
     }
     result == 0
+}
+
+/// Extract a percent-decoded query parameter value from a `key=value&...`
+/// query string. Returns `None` if the key is absent.
+fn parse_query_param(query: &str, key: &str) -> Option<String> {
+    for kv in query.split('&') {
+        let mut parts = kv.splitn(2, '=');
+        if parts.next() == Some(key) {
+            let val = parts.next().unwrap_or("");
+            return Some(percent_decode_str(val).decode_utf8_lossy().into_owned());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -622,7 +636,7 @@ mod tests {
             .max_viewers(0)
             .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
         let gateway = builder.build().unwrap();
-        assert_eq!(gateway.inner.max_viewers, 1);
+        assert_eq!(gateway.inner.streams.max_viewers(), 1);
     }
 
     #[test]
@@ -631,7 +645,7 @@ mod tests {
             .broadcast_capacity(0)
             .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
         let gateway = builder.build().unwrap();
-        assert_eq!(gateway.inner.broadcast_capacity, 1);
+        assert_eq!(gateway.inner.streams.broadcast_capacity(), 1);
     }
 
     #[test]
@@ -673,5 +687,27 @@ mod tests {
             .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
         let gateway = builder.build().unwrap();
         assert_eq!(gateway.health_bind_addr, "127.0.0.1");
+    }
+
+    #[test]
+    fn parse_query_param_basic() {
+        assert_eq!(parse_query_param("stream=foo&token=abc", "stream"), Some("foo".into()));
+        assert_eq!(parse_query_param("stream=foo&token=abc", "token"), Some("abc".into()));
+        assert_eq!(parse_query_param("stream=foo&token=abc", "missing"), None);
+    }
+
+    #[test]
+    fn parse_query_param_empty_query() {
+        assert_eq!(parse_query_param("", "stream"), None);
+    }
+
+    #[test]
+    fn parse_query_param_percent_decodes() {
+        assert_eq!(parse_query_param("stream=foo%20bar", "stream"), Some("foo bar".into()));
+    }
+
+    #[test]
+    fn parse_query_param_key_without_value() {
+        assert_eq!(parse_query_param("publish", "publish"), Some("".into()));
     }
 }

@@ -24,7 +24,7 @@
 //! let source = gateway.source_handle();
 //! tokio::spawn(async move {
 //!     let ingester = SrtIngester::bind(9000).await.unwrap();
-//!     source.set_ingester(ingester).await;
+//!     source.publish_stream("default", ingester);
 //! });
 //!
 //! gateway.run(async {
@@ -41,6 +41,7 @@ pub mod ingest;
 mod registry;
 pub mod session;
 pub mod srt_sender;
+pub mod stream_registry;
 
 pub use broadcaster::{Broadcaster, ViewerRx};
 pub use cert::{Cert, CertSource};
@@ -48,3 +49,4 @@ pub use gateway::{Gateway, GatewayBuilder, GatewaySourceHandle};
 pub use ingest::{ChannelIngester, Ingester, TsMessage};
 pub use session::BrowserSession;
 pub use srt_sender::{SenderAction, SrtConfig, SrtInitiator};
+pub use stream_registry::StreamRegistry;

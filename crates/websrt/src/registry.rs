@@ -35,8 +35,9 @@ pub(crate) struct SessionEntry {
     pub initiator: Arc<Mutex<SrtInitiator>>,
     pub loss: Arc<Mutex<LossInjector>>,
     /// Ticker-exclusive; std::sync::Mutex is sufficient because it is never
-    /// held across an `.await` (locked only for `try_recv`).
-    pub viewer: StdMutex<ViewerRx>,
+    /// held across an `.await` (locked only for `try_recv`). `None` for
+    /// publish-only sessions that have no downstream to drain.
+    pub viewer: StdMutex<Option<ViewerRx>>,
     /// Next time this session's SRT state machine needs servicing, set by
     /// the ticker from the `WaitForData` duration returned by `tick()`.
     pub next_deadline: StdMutex<Instant>,
@@ -116,9 +117,13 @@ impl SessionRegistry {
                 } else {
                     // Check for new data without losing it.
                     let mut v = entry.viewer.lock().unwrap();
-                    match v.try_recv() {
-                        Ok(Some(m)) => Some(m),
-                        _ => None,
+                    match v.as_mut() {
+                        Some(vx) => match vx.try_recv() {
+                            Ok(Some(m)) => Some(m),
+                            _ => None,
+                        },
+                        // Publish-only session: no downstream data to push.
+                        None => None,
                     }
                 }
             };
@@ -152,17 +157,18 @@ impl SessionRegistry {
                         }
                         let maybe_msg = {
                             let mut viewer = entry.viewer.lock().unwrap();
-                            viewer.try_recv()
+                            // Publish-only session (None) has nothing to drain.
+                            viewer.as_mut().map(|v| v.try_recv())
                         };
                         match maybe_msg {
-                            Ok(Some(m)) => {
+                            Some(Ok(Some(m))) => {
                                 let (a, w) = init.push_message(m, now);
                                 actions.extend(a);
                                 wait = w;
                                 drained += 1;
                             }
-                            Ok(None) => break,
-                            Err(lag) => {
+                            Some(Ok(None)) => break,
+                            Some(Err(lag)) => {
                                 tracing::warn!(
                                     session_id = entry.session_id,
                                     lag,
@@ -170,6 +176,7 @@ impl SessionRegistry {
                                 );
                                 break;
                             }
+                            None => break,
                         }
                     }
                 }

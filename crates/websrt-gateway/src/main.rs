@@ -204,7 +204,7 @@ async fn main() -> Result<()> {
                 e
             })?;
             tracing::info!(fixture = ?cli.fixture, "file ingester ready");
-            gateway.source_handle().set_ingester(ingester).await;
+            gateway.source_handle().publish_stream("default", ingester);
         }
         InputMode::Srt => {
             let source = gateway.source_handle();
@@ -231,7 +231,7 @@ async fn main() -> Result<()> {
                 match result {
                     Ok(ingester) => {
                         tracing::info!("OBS connected; starting broadcaster");
-                        source.set_ingester(ingester).await;
+                        source.publish_stream("default", ingester);
                     }
                     Err(e) => {
                         tracing::error!(?e, "SRT ingester setup failed");

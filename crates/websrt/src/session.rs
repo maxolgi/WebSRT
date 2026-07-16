@@ -118,7 +118,7 @@ impl BrowserSession {
     ///
     /// `viewer` is this session's private subscription to the ingester
     /// fanout; it is stored inside the returned entry so the centralized
-    /// ticker can drain it.
+    /// ticker can drain it. `None` for publish-only sessions.
     ///
     /// Returns `(entry, recv_pump_handle)`. The caller must insert `entry`
     /// into the [`crate::registry::SessionRegistry`] for the ticker to drive
@@ -127,7 +127,7 @@ impl BrowserSession {
     /// Notify is signaled; on exit it marks `entry.finished = true`.
     pub(crate) async fn create(
         conn: Connection,
-        viewer: ViewerRx,
+        viewer: Option<ViewerRx>,
         sim_loss: u8,
         sim_seed: u64,
         config: SrtConfig,
