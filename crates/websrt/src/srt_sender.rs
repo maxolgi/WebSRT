@@ -56,6 +56,8 @@ impl Default for SrtConfig {
 pub enum SenderAction {
     /// Send these bytes as a WT datagram to the browser.
     SendDatagram(Vec<u8>),
+    /// Upstream data received from the browser via the DuplexConnection's receiver half.
+    ReleaseData((std::time::Instant, bytes::Bytes)),
     /// Handshake completed; we are now in the data plane.
     HandshakeComplete,
     /// Connection is closed (peer rejected, errored, or shut down).
@@ -84,7 +86,7 @@ enum InitiatorState {
 }
 
 impl SrtInitiator {
-    pub fn new(local_addr: IpAddr, remote: SocketAddr, config: &SrtConfig) -> Self {
+    pub fn new(local_addr: IpAddr, remote: SocketAddr, config: &SrtConfig, streamid: Option<String>) -> Self {
         let mut settings = ConnInitSettings::default();
         settings.max_packet_size = srt_protocol::options::PacketSize(config.payload_size);
         settings.send_buffer_size = srt_protocol::options::PacketCount(config.send_buffer_size.into());
@@ -93,19 +95,20 @@ impl SrtInitiator {
         settings.send_latency = config.send_latency;
         settings.recv_latency = config.recv_latency;
         settings.too_late_packet_drop = true;
-        Self::new_with_settings(local_addr, remote, settings)
+        Self::new_with_settings(local_addr, remote, settings, streamid)
     }
 
     pub fn new_with_settings(
         local_addr: IpAddr,
         remote: SocketAddr,
         settings: ConnInitSettings,
+        streamid: Option<String>,
     ) -> Self {
         let connect = Connect::new(
             remote,
             local_addr,
             settings,
-            None,
+            streamid,
             SeqNumber::new(0).expect("seq 0"),
         );
         Self {
@@ -230,9 +233,8 @@ fn drain(
             Action::SendPacket((pkt, _addr)) => {
                 out.push(SenderAction::SendDatagram(serialize_packet(&pkt)));
             }
-            Action::ReleaseData((_ts, _bytes)) => {
-                // Receiver-side output — gateway sender shouldn't emit data to
-                // the browser. Drop.
+            Action::ReleaseData((ts, bytes)) => {
+                out.push(SenderAction::ReleaseData((ts, bytes)));
             }
             Action::UpdateStatistics(s) => { *stats = Some(s.clone()); continue; }
             Action::WaitForData(d) => return Some(d),

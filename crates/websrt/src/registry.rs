@@ -18,6 +18,7 @@
 //!   (initiator → loss) so there is no deadlock cycle.
 
 use crate::broadcaster::ViewerRx;
+use crate::ingest::TsMessage;
 use crate::session::{send_action, LossInjector};
 use crate::srt_sender::SrtInitiator;
 use std::collections::HashMap;
@@ -44,6 +45,9 @@ pub(crate) struct SessionEntry {
     pub finished: AtomicBool,
     /// TSBPD latency (ms) — used for aggregate WT-RTT warnings in the ticker.
     pub latency_ms: u64,
+    /// Channel for routing upstream data (browser→gateway) to a broadcaster.
+    /// None for viewer-only sessions.
+    pub publish_tx: Option<tokio::sync::mpsc::Sender<TsMessage>>,
 }
 
 /// Central registry of active sessions, polled once per ~2ms by a single
@@ -192,9 +196,18 @@ impl SessionRegistry {
             {
                 let mut loss = entry.loss.lock().await;
                 for action in actions {
-                    if matches!(action, crate::srt_sender::SenderAction::Close) {
-                        entry.finished.store(true, Ordering::Relaxed);
-                        entry.shutdown.notify_waiters();
+                    match &action {
+                        crate::srt_sender::SenderAction::ReleaseData((ts, bytes)) => {
+                            if let Some(tx) = &entry.publish_tx {
+                                let _ = tx.try_send((*ts, bytes.clone()));
+                            }
+                            continue;
+                        }
+                        crate::srt_sender::SenderAction::Close => {
+                            entry.finished.store(true, Ordering::Relaxed);
+                            entry.shutdown.notify_waiters();
+                        }
+                        _ => {}
                     }
                     let _ = send_action(&entry.conn, action, &mut loss);
                 }

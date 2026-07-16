@@ -45,6 +45,6 @@ pub mod srt_sender;
 pub use broadcaster::{Broadcaster, ViewerRx};
 pub use cert::{Cert, CertSource};
 pub use gateway::{Gateway, GatewayBuilder, GatewaySourceHandle};
-pub use ingest::{Ingester, TsMessage};
+pub use ingest::{ChannelIngester, Ingester, TsMessage};
 pub use session::BrowserSession;
 pub use srt_sender::{SenderAction, SrtConfig, SrtInitiator};

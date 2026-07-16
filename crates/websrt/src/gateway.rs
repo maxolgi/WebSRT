@@ -331,11 +331,13 @@ impl Gateway {
                     let (entry, handle) = BrowserSession::create(
                         connection, viewer,
                         self.sim_loss, self.sim_seed, self.srt_config.clone(),
+                        None, None,
                     ).await;
                     #[cfg(not(feature = "sim-loss"))]
                     let (entry, handle) = BrowserSession::create(
                         connection, viewer,
                         0, 0, self.srt_config.clone(),
+                        None, None,
                     ).await;
                     let session_shutdown = entry.shutdown.clone();
                     registry.insert(entry);

@@ -21,6 +21,7 @@
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
 use crate::broadcaster::ViewerRx;
+use crate::ingest::TsMessage;
 use crate::registry::SessionEntry;
 use crate::srt_sender::{SenderAction, SrtConfig, SrtInitiator};
 use std::net::{IpAddr, SocketAddr};
@@ -130,6 +131,8 @@ impl BrowserSession {
         sim_loss: u8,
         sim_seed: u64,
         config: SrtConfig,
+        publish_tx: Option<tokio::sync::mpsc::Sender<TsMessage>>,
+        streamid: Option<String>,
     ) -> (Arc<SessionEntry>, JoinHandle<()>) {
         let session_id = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
         let peer = conn.remote_address();
@@ -140,6 +143,7 @@ impl BrowserSession {
             Self::DUMMY_LOCAL_ADDR.ip(),
             Self::DUMMY_REMOTE_ADDR,
             &config,
+            streamid,
         )));
         let loss = Arc::new(Mutex::new(LossInjector::new(sim_loss, sim_seed)));
         let shutdown = Arc::new(Notify::new());
@@ -156,6 +160,7 @@ impl BrowserSession {
             shutdown: shutdown.clone(),
             finished: AtomicBool::new(false),
             latency_ms,
+            publish_tx,
         });
 
         // Kick off the handshake immediately so the INDUCTION packet leaves
@@ -218,8 +223,17 @@ impl BrowserSession {
             {
                 let mut l = entry.loss.lock().await;
                 for action in actions {
-                    if matches!(action, SenderAction::Close) {
-                        should_close = true;
+                    match &action {
+                        SenderAction::ReleaseData((ts, bytes)) => {
+                            if let Some(tx) = &entry.publish_tx {
+                                let _ = tx.try_send((*ts, bytes.clone()));
+                            }
+                            continue;
+                        }
+                        SenderAction::Close => {
+                            should_close = true;
+                        }
+                        _ => {}
                     }
                     send_action(&entry.conn, action, &mut l)?;
                 }
@@ -258,6 +272,9 @@ pub(crate) fn send_action(
         }
         SenderAction::HandshakeComplete => {
             tracing::info!("session: HandshakeComplete");
+        }
+        SenderAction::ReleaseData(_) => {
+            // Handled by caller before send_action is invoked.
         }
         SenderAction::Close => {
             tracing::info!("session: Close");

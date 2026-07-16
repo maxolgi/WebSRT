@@ -1,8 +1,11 @@
 //! Input ingest: produces `(std::time::Instant, bytes::Bytes)` TS messages.
 //! Implemented in Phase 4 (FileIngester) and Phase 8 (SrtIngester).
 
+pub mod channel;
 pub mod file;
 pub mod srt;
+
+pub use channel::ChannelIngester;
 
 use anyhow::Result;
 use async_trait::async_trait;
