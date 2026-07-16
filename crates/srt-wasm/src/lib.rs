@@ -254,6 +254,27 @@ impl SrtReceiver {
         out
     }
 
+    /// Feed upstream TS data into the SRT sender half of the DuplexConnection.
+    /// Returns actions (SendDatagram with data packets, etc.) that JS must process.
+    /// No-op if the handshake hasn't completed yet.
+    #[wasm_bindgen(js_name = sendMessage)]
+    pub fn send_message(&self, bytes: &[u8], now_us: f64) -> Vec<SrtAction> {
+        let now = now_from_us(self.epoch, now_us);
+        let mut state = self.state.borrow_mut();
+        match &mut *state {
+            State::Connected(duplex) => {
+                duplex.handle_data_input(now, Some((now, bytes::Bytes::copy_from_slice(bytes))));
+                let mut out: Vec<SrtAction> = Vec::new();
+                drain(duplex, now, &mut out, &self.ack_seen, &self.stats);
+                if !duplex.is_open() {
+                    *state = State::Closed;
+                }
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// Periodic tick. JS calls this every ~10ms (setTimeout) to advance the
     /// state machine even when no datagrams arrive.
     pub fn poll(&self, now_us: f64) -> Vec<SrtAction> {
