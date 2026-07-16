@@ -2,8 +2,7 @@ import init, { SrtReceiver, type SrtAction, type SrtStats } from '../wasm/srt-wa
 import { Demuxer } from './demux';
 
 export type WorkerCmd =
-  | { cmd: 'init'; latencyMs: number }
-  | { cmd: 'datagrams'; batch: Uint8Array[] }
+  | { cmd: 'init'; url: string; certHash: Uint8Array | null; latencyMs: number }
   | { cmd: 'visibility'; visible: boolean }
   | { cmd: 'stop' };
 
@@ -28,7 +27,8 @@ export type WorkerMsg =
   | { type: 'pmt'; videoPid: number; audioPid: number; audioStreamType: number }
   | { type: 'videoPes'; data: Uint8Array; pts: number | null; isKeyframe: boolean }
   | { type: 'audioPes'; data: Uint8Array; pts: number | null }
-  | { type: 'send'; data: Uint8Array }
+  | { type: 'wtReady' }
+  | { type: 'wtClosed'; error?: string }
   | { type: 'stats'; stats: StatsMsg }
   | { type: 'close' }
   | { type: 'batch'; msgs: WorkerMsg[] };
@@ -40,6 +40,10 @@ const ST_OPUS_FFMPEG = 0x06;
 
 let rx: SrtReceiver | null = null;
 let demux: Demuxer | null = null;
+let wt: WebTransport | null = null;
+let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
+let gen = 0;
 let epoch = 0;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let statsTimer: ReturnType<typeof setInterval> | null = null;
@@ -53,15 +57,7 @@ self.onmessage = async (e: MessageEvent) => {
   const cmd = e.data as WorkerCmd;
   switch (cmd.cmd) {
     case 'init':
-      await doInit(cmd.latencyMs);
-      break;
-    case 'datagrams':
-      if (!rx || !inited) return;
-      for (const data of cmd.batch) {
-        const nowUs = (performance.now() - epoch) * 1000;
-        const actions = rx.handle_datagram(data, nowUs);
-        processActions(actions);
-      }
+      await doInit(cmd.url, cmd.certHash, cmd.latencyMs);
       break;
     case 'visibility':
       if (cmd.visible) {
@@ -80,6 +76,7 @@ self.onmessage = async (e: MessageEvent) => {
       }
       break;
     case 'stop':
+      gen++;
       doStop();
       break;
   }
@@ -95,7 +92,7 @@ function flushOutgoing() {
   const transfer: ArrayBuffer[] = [];
   for (const m of outgoing) {
     if (
-      (m.type === 'videoPes' || m.type === 'audioPes' || m.type === 'send') &&
+      (m.type === 'videoPes' || m.type === 'audioPes') &&
       m.data?.buffer instanceof ArrayBuffer
     ) {
       transfer.push(m.data.buffer);
@@ -108,10 +105,12 @@ function flushOutgoing() {
   outgoing = [];
 }
 
-async function doInit(latencyMs: number) {
+async function doInit(url: string, certHash: Uint8Array | null, latencyMs: number) {
+  const myGen = ++gen;
   try {
     doStop();
     await init();
+    if (myGen !== gen) return;
     rx = SrtReceiver.newWithLatency(latencyMs);
     epoch = performance.now();
     videoPid = null;
@@ -152,6 +151,24 @@ async function doInit(latencyMs: number) {
 
     inited = true;
 
+    // WebTransport lives in the worker so the SRT control loop
+    // (datagram -> handle_datagram -> ACK write) never touches the main thread.
+    const opts: WebTransportOptions = {};
+    if (certHash) {
+      opts.serverCertificateHashes = [{ algorithm: 'sha-256', value: certHash as BufferSource }];
+    }
+    wt = new WebTransport(url, opts);
+    await wt.ready;
+    if (myGen !== gen) { try { wt.close({}); } catch {} return; }
+    reader = wt.datagrams.readable.getReader();
+    writer = wt.datagrams.writable.getWriter();
+    wt.closed
+      .then(() => { if (myGen === gen) { queue({ type: 'wtClosed' }); flushOutgoing(); } })
+      .catch((e) => { if (myGen === gen) { queue({ type: 'wtClosed', error: String(e) }); flushOutgoing(); } });
+    queue({ type: 'wtReady' });
+    flushOutgoing();
+    startReaderLoop(myGen);
+
     pollTimer = setInterval(() => {
       if (!rx || !inited) return;
       const nowUs = (performance.now() - epoch) * 1000;
@@ -168,17 +185,60 @@ async function doInit(latencyMs: number) {
       flushOutgoing();
     }, 1000);
   } catch (e) {
-    queue({ type: 'log', msg: `worker init failed: ${e}`, cls: 'err' });
-    flushOutgoing();
+    if (myGen === gen) {
+      doStop();
+      queue({ type: 'log', msg: `worker init failed: ${e}`, cls: 'err' });
+      queue({ type: 'wtClosed', error: String(e) });
+      flushOutgoing();
+    }
   }
 }
 
 function doStop() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+  const w = wt;
+  wt = null;
+  reader = null;
+  writer = null;
   rx = null;
   demux = null;
   inited = false;
+  if (w) { try { w.close({}); } catch {} }
+}
+
+function writeDatagram(bytes: Uint8Array) {
+  const w = writer;
+  if (!w) return;
+  try {
+    w.write(bytes).catch((e) => {
+      queue({ type: 'log', msg: `wt write: ${e}`, cls: 'err' });
+      flushOutgoing();
+    });
+  } catch (e) {
+    queue({ type: 'log', msg: `wt write: ${e}`, cls: 'err' });
+    flushOutgoing();
+  }
+}
+
+async function startReaderLoop(myGen: number) {
+  const r = reader;
+  if (!r) return;
+  for (;;) {
+    let value: Uint8Array | undefined;
+    try {
+      const res = await r.read();
+      if (res.done) break;
+      value = res.value;
+    } catch (e) {
+      if (myGen === gen) { queue({ type: 'log', msg: `wt read: ${e}`, cls: 'err' }); flushOutgoing(); }
+      break;
+    }
+    if (myGen !== gen || !rx || !inited) break;
+    const nowUs = (performance.now() - epoch) * 1000;
+    processActions(rx.handle_datagram(value, nowUs));
+    flushOutgoing();
+  }
 }
 
 function processActions(actions: SrtAction[]) {
@@ -186,7 +246,7 @@ function processActions(actions: SrtAction[]) {
     try {
       switch (a.kind) {
         case 0:
-          queue({ type: 'send', data: a.takeData() });
+          writeDatagram(a.takeData());
           break;
         case 1:
           demux?.feed(a.takeData());

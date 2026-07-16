@@ -68,8 +68,6 @@ function hexToBytes(hex: string): Uint8Array {
 }
 
 let worker: Worker | null = null;
-let wt: WebTransport | null = null;
-let datagramWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
 let video: VideoPipeline | null = null;
 let audio: OpusAudioPipeline | AacAudioPipeline | null = null;
 let renderer: CanvasRenderer | null = null;
@@ -139,15 +137,11 @@ function teardown() {
   cancelReconnect();
   stopDriftMonitor();
   setConnState('idle');
-  pendingSends = [];
   if (worker) {
     worker.postMessage({ cmd: 'stop' });
     worker.terminate();
     worker = null;
   }
-  try { wt?.close({}); } catch {}
-  wt = null;
-  datagramWriter = null;
   video = null;
   audio = null;
   renderer?.destroy();
@@ -268,37 +262,12 @@ async function doConnect() {
     ? `https://${wtHost}:${wtPort}/wt?token=${encodeURIComponent(authToken)}`
     : `https://${wtHost}:${wtPort}/wt`;
 
-  const wtOpts: WebTransportOptions = {};
-  if (hashHex) {
-    const hash = hexToBytes(hashHex);
-    wtOpts.serverCertificateHashes = [{ algorithm: 'sha-256', value: hash as BufferSource }];
-    log(`connecting to ${wtUrl} (self-signed, hash ${hashHex.slice(0, 8)}…) …`, 'info');
-  } else {
-    log(`connecting to ${wtUrl} (mkcert/PKI) …`, 'info');
-  }
-
   const latencyMs = +latencyNum.value;
   log(`TSBPD latency: ${formatLatency(latencyMs)}`, 'info');
 
-  try {
-    wt = new WebTransport(wtUrl, wtOpts);
-    await wt.ready;
-    log('WT ready ✓', 'ok');
-    setStatus('WT ready; awaiting SRT handshake');
-    setConnState('connected');
-  } catch (e) {
-    log(`connect failed: ${e}`, 'err');
-    try { wt?.close({}); } catch {}
-    wt = null;
-    if (!manualDisconnect) scheduleReconnect();
-    return;
-  }
-
-  datagramWriter = wt.datagrams.writable.getWriter();
-
-  wt.closed
-    .then(() => { log('WT closed', 'info'); if (!manualDisconnect) scheduleReconnect(); })
-    .catch((e) => { log(`WT closed (err): ${e}`, 'err'); if (!manualDisconnect) scheduleReconnect(); });
+  const certHash = hashHex ? hexToBytes(hashHex) : null;
+  const hashLabel = hashHex ? `self-signed, hash ${hashHex.slice(0, 8)}…` : 'mkcert/PKI';
+  log(`connecting to ${wtUrl} (${hashLabel}) …`, 'info');
 
   if (!worker) {
     worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
@@ -309,68 +278,12 @@ async function doConnect() {
     };
   }
 
-  worker.postMessage({ cmd: 'init', latencyMs });
+  worker.postMessage(
+    { cmd: 'init', url: wtUrl, certHash, latencyMs },
+    certHash ? [certHash.buffer as ArrayBuffer] : [],
+  );
 
   startDriftMonitor();
-
-  let dgramBatch: Uint8Array[] = [];
-  let flushPending = false;
-
-  const flushDgrams = () => {
-    flushPending = false;
-    if (dgramBatch.length > 0 && worker) {
-      const batch = dgramBatch;
-      dgramBatch = [];
-      worker.postMessage({ cmd: 'datagrams', batch });
-    }
-  };
-
-  (async () => {
-    const reader = wt.datagrams.readable.getReader();
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) {
-        flushDgrams();
-        log('datagram reader done', 'info');
-        return;
-      }
-      dgramBatch.push(value);
-      if (dgramBatch.length >= 16) {
-        flushDgrams();
-      } else if (!flushPending) {
-        flushPending = true;
-        setTimeout(flushDgrams, 0);
-      }
-    }
-  })();
-}
-
-const MAX_PENDING_SENDS = 256;
-let pendingSends: Uint8Array[] = [];
-let draining = false;
-
-function queueSend(data: Uint8Array) {
-  pendingSends.push(data);
-  if (pendingSends.length > MAX_PENDING_SENDS) {
-    const dropped = pendingSends.splice(0, pendingSends.length - MAX_PENDING_SENDS);
-    console.debug(`pendingSends overflow: dropped ${dropped.length} datagrams`);
-  }
-  if (!draining) drainSends();
-}
-
-async function drainSends() {
-  draining = true;
-  while (pendingSends.length > 0) {
-    if (!datagramWriter) break;
-    try { await datagramWriter.ready; } catch { break; }
-    if (!datagramWriter) break;
-    const data = pendingSends.shift()!;
-    datagramWriter.write(data).then(
-      () => {},
-      (e) => log(`wt write failed: ${e}`, 'err'),
-    );
-  }
-  draining = false;
 }
 
 function handleWorkerMsg(msg: WorkerMsg) {
@@ -402,8 +315,16 @@ function handleWorkerMsg(msg: WorkerMsg) {
     case 'audioPes':
       audio?.feed(msg.data, msg.pts);
       break;
-    case 'send':
-      queueSend(msg.data);
+    case 'wtReady':
+      log('WT ready ✓', 'ok');
+      setStatus('WT ready; awaiting SRT handshake');
+      setConnState('connected');
+      break;
+    case 'wtClosed':
+      if (msg.error) log(`WT closed (err): ${msg.error}`, 'err');
+      else log('WT closed', 'info');
+      setStatus('closed');
+      if (!manualDisconnect) scheduleReconnect();
       break;
     case 'stats':
       updateStats(msg.stats);
