@@ -25,7 +25,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve(__dirname, 'index.html'),
-        advanced: resolve(__dirname, 'advanced.html'),
+        simple: resolve(__dirname, 'simple.html'),
       },
     },
   },

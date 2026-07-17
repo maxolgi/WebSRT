@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>WebSRT — Simple</title>
+    <style>
+      body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #111; color: #ddd; margin: 1.5rem; }
+      h1 { font-size: 1.1rem; }
+      #log { white-space: pre-wrap; font-size: 12px; max-height: 60vh; overflow: auto; }
+      video, canvas { background: #000; display: block; }
+      #video-canvas { width: 100%; height: auto; }
+      #video-canvas:fullscreen { width: 100vw; height: 100vh; object-fit: contain; background: #000; }
+      .ok { color: #6f6; }
+      .err { color: #f66; }
+      .info { color: #6cf; }
+      input, button { font: inherit; padding: 4px; }
+      .layout { display: flex; gap: 16px; align-items: flex-start; }
+      .left-panel { flex: 2 1 0; min-width: 0; }
+      .right-panel { flex: 1 1 0; min-width: 0; }
+      .controls { margin-top: 8px; }
+    </style>
+  </head>
+  <body>
+    <a href="/index.html" style="display: inline-block; margin-bottom: 8px; text-decoration: none; color: #6cf;">← debug page</a>
+    <div class="layout">
+      <div class="left-panel">
+        <canvas id="video-canvas" width="640" height="360"></canvas>
+        <div class="controls">
+          <button id="connect">connect</button>
+          <label>latency: <input type="number" id="latency-num" min="20" max="8000" step="10" value="300" />ms</label>
+          <button id="mute" disabled>muted</button>
+          <button id="fullscreen">fullscreen</button>
+        </div>
+      </div>
+      <div class="right-panel">
+        <p id="status">idle</p>
+        <pre id="stats"></pre>
+        <pre id="log"></pre>
+      </div>
+    </div>
+    <script src="/cert-hash.js"></script>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
