@@ -297,9 +297,10 @@ async function doConnect() {
   const urlParams = new URLSearchParams(location.search);
   const wtPort = urlParams.get('port') || '4433';
   const authToken = urlParams.get('token');
-  const wtUrl = authToken
-    ? `https://${wtHost}:${wtPort}/wt?token=${encodeURIComponent(authToken)}`
-    : `https://${wtHost}:${wtPort}/wt`;
+  const streamName = urlParams.get('stream') || 'default';
+  const qp = new URLSearchParams({ stream: streamName });
+  if (authToken) qp.set('token', authToken);
+  const wtUrl = `https://${wtHost}:${wtPort}/wt?${qp}`;
 
   const latencyMs = +latencyNum.value;
   log(`TSBPD latency: ${formatLatency(latencyMs)}`, 'info');
