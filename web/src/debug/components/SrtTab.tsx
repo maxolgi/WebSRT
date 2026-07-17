@@ -2,6 +2,8 @@ import { useState, useEffect } from 'preact/hooks';
 import type { JSX } from 'preact';
 import type { DebugStore } from '../store';
 import { TimeSeriesChart } from './charts/TimeSeriesChart';
+import { FrameTimeline } from './charts/FrameTimeline';
+import { LossHeatmap } from './charts/LossHeatmap';
 
 interface Props {
   store: DebugStore;
@@ -111,6 +113,18 @@ export function SrtTab({ store }: Props): JSX.Element {
         ) : (
           <div id="srt-charts-area">No chart data yet</div>
         )}
+      </div>
+
+      <div class="debug-section">
+        <h3>Visualizers</h3>
+        <div style={{ marginBottom: '8px' }}>
+          <div style={{ color: '#999', fontSize: '11px', marginBottom: '2px' }}>Render Health</div>
+          <FrameTimeline store={store} height={80} />
+        </div>
+        <div>
+          <div style={{ color: '#999', fontSize: '11px', marginBottom: '2px' }}>Packet Loss Heatmap</div>
+          <LossHeatmap store={store} height={40} />
+        </div>
       </div>
     </>
   );
