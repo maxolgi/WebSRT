@@ -200,11 +200,15 @@ impl BrowserSession {
         loop {
             let d = tokio::select! {
                 biased;
-                _ = entry.shutdown.notified() => return Ok(()),
+                _ = entry.shutdown.notified() => {
+                    entry.conn.close(0u32.into(), b"shutdown");
+                    return Ok(());
+                }
                 res = entry.conn.receive_datagram() => match res {
                     Ok(d) => d,
                     Err(e) => {
                         tracing::info!(session_id, ?e, "session: recv datagram stream closed");
+                        entry.conn.close(0u32.into(), b"");
                         entry.finished.store(true, Ordering::Relaxed);
                         entry.shutdown.notify_waiters();
                         return Ok(());
@@ -240,6 +244,7 @@ impl BrowserSession {
             }
             if should_close {
                 tracing::info!(session_id, "session: initiator returned Close; recv loop exiting");
+                entry.conn.close(0u32.into(), b"close");
                 entry.finished.store(true, Ordering::Relaxed);
                 entry.shutdown.notify_waiters();
                 return Ok(());

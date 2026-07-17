@@ -113,6 +113,8 @@ impl Gateway {
         let config = ServerConfig::builder()
             .with_bind_address(self.bind_addr)
             .with_identity(self.identity)
+            .max_idle_timeout(Some(Duration::from_secs(10)))
+            .map_err(|e| anyhow::anyhow!("invalid idle timeout: {e}"))?
             .build();
 
         let server = Endpoint::server(config)?;
