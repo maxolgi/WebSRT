@@ -5,29 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" href="data:," />
     <title>WebSRT — Simple</title>
-    <script>
-      // UI switcher: redirect to the preferred UI before the app module
-      // loads (avoids a wasted connect). Preference is set by the
-      // switcher button in the controls bar.
-      (function () {
-        try {
-          var pref = localStorage.getItem('websrt-ui');
-          var isClassic = /simple\.html$/.test(location.pathname);
-          var q = location.search;
-          if (pref === 'classic' && !isClassic) { location.replace('/simple.html' + q); return; }
-          if (pref === 'advanced' && isClassic) { location.replace('/' + q); return; }
-          document.addEventListener('DOMContentLoaded', function () {
-            var b = document.getElementById('ui-switch');
-            if (!b) return;
-            b.addEventListener('click', function () {
-              var t = b.getAttribute('data-target');
-              try { localStorage.setItem('websrt-ui', t); } catch (e) {}
-              location.href = (t === 'classic' ? '/simple.html' : '/') + q;
-            });
-          });
-        } catch (e) {}
-      })();
-    </script>
     <style>
       body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #111; color: #ddd; margin: 1.5rem; }
       h1 { font-size: 1.1rem; }
@@ -46,6 +23,7 @@
     </style>
   </head>
   <body>
+    <a href="/index.html" style="display: inline-block; margin-bottom: 8px; text-decoration: none; color: #6cf;">← debug page</a>
     <div class="layout">
       <div class="left-panel">
         <canvas id="video-canvas" width="640" height="360"></canvas>
@@ -54,7 +32,6 @@
           <label>latency: <input type="number" id="latency-num" min="20" max="8000" step="10" value="300" />ms</label>
           <button id="mute" disabled>muted</button>
           <button id="fullscreen">fullscreen</button>
-          <button id="ui-switch" data-target="advanced" title="switch to the new ui">new ui</button>
         </div>
       </div>
       <div class="right-panel">
