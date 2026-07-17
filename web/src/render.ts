@@ -22,6 +22,8 @@ export class CanvasRenderer {
   private droppedLate = 0;
   private droppedOverflow = 0;
   private lastFpsTime = performance.now();
+  private lastFps = 0;
+  private lastRafDeltaMs = 16.67;
 
   constructor(canvas: HTMLCanvasElement, playoutDelayMs = 100) {
     this.canvas = canvas;
@@ -64,7 +66,11 @@ export class CanvasRenderer {
   }
 
   private startRafLoop() {
+    let lastRaf = performance.now();
     const loop = () => {
+      const now = performance.now();
+      this.lastRafDeltaMs = now - lastRaf;
+      lastRaf = now;
       this.presentDueFrames();
       this.rafId = requestAnimationFrame(loop);
     };
@@ -108,14 +114,27 @@ export class CanvasRenderer {
 
     this.frameCount++;
     if (this.frameCount % 30 === 0) {
-      const fps = (30 * 1000) / (nowMs - this.lastFpsTime);
+      this.lastFps = (30 * 1000) / (nowMs - this.lastFpsTime);
       this.lastFpsTime = nowMs;
       console.debug(
-        `render fps: ${fps.toFixed(1)} (frame ${this.frameCount}, ` +
+        `render fps: ${this.lastFps.toFixed(1)} (frame ${this.frameCount}, ` +
         `late ${this.droppedLate}, overflow ${this.droppedOverflow}, ` +
         `ring ${this.ring.length})`,
       );
     }
+  }
+
+  getStats(): import('./debug/types').RenderStats {
+    return {
+      frameCount: this.frameCount,
+      droppedLate: this.droppedLate,
+      droppedOverflow: this.droppedOverflow,
+      ringLength: this.ring.length,
+      ringCap: CanvasRenderer.RING_CAP,
+      currentPtsUs: this.currentPtsUs(),
+      fps: this.lastFps,
+      rafDeltaMs: this.lastRafDeltaMs,
+    };
   }
 
   destroy() {

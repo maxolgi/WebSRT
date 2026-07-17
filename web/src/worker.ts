@@ -1,11 +1,6 @@
 import init, { SrtReceiver, type SrtAction, type SrtStats } from '../wasm/srt-wasm/srt_wasm.js';
 import { Demuxer } from './demux';
 
-export type WorkerCmd =
-  | { cmd: 'init'; url: string; certHash: Uint8Array | null; latencyMs: number }
-  | { cmd: 'visibility'; visible: boolean }
-  | { cmd: 'stop' };
-
 export interface StatsMsg {
   elapsedMs: number;
   rttMs: number;
@@ -21,6 +16,21 @@ export interface StatsMsg {
   rxNak: number;
 }
 
+export interface DemuxStatsMsg {
+  pat: number;
+  pmt: number;
+  pes: number;
+  ra: number;
+  err: number;
+  raw: number;
+}
+
+export type WorkerCmd =
+  | { cmd: 'init'; url: string; certHash: Uint8Array | null; latencyMs: number }
+  | { cmd: 'visibility'; visible: boolean }
+  | { cmd: 'stop' }
+  | { cmd: 'debug-rate'; ms: number };
+
 export type WorkerMsg =
   | { type: 'log'; msg: string; cls?: string }
   | { type: 'handshakeComplete' }
@@ -29,7 +39,7 @@ export type WorkerMsg =
   | { type: 'audioPes'; data: Uint8Array; pts: number | null }
   | { type: 'wtReady' }
   | { type: 'wtClosed'; error?: string }
-  | { type: 'stats'; stats: StatsMsg }
+  | { type: 'stats'; stats: StatsMsg; demux?: DemuxStatsMsg }
   | { type: 'close' }
   | { type: 'batch'; msgs: WorkerMsg[] };
 
@@ -79,6 +89,20 @@ self.onmessage = async (e: MessageEvent) => {
       gen++;
       doStop();
       break;
+    case 'debug-rate': {
+      if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+      const rate = Math.max(100, cmd.ms);
+      if (rx && inited) {
+        statsTimer = setInterval(() => {
+          if (!rx || !inited) return;
+          const s = rx.getStats();
+          if (!s) return;
+          queue({ type: 'stats', stats: serializeStats(s), demux: getDemuxStats() });
+          flushOutgoing();
+        }, rate);
+      }
+      break;
+    }
   }
   flushOutgoing();
 };
@@ -181,7 +205,7 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
       if (!rx || !inited) return;
       const s = rx.getStats();
       if (!s) return;
-      queue({ type: 'stats', stats: serializeStats(s) });
+      queue({ type: 'stats', stats: serializeStats(s), demux: getDemuxStats() });
       flushOutgoing();
     }, 1000);
   } catch (e) {
@@ -287,4 +311,9 @@ function serializeStats(s: SrtStats): StatsMsg {
     rxAck: Number(s.rxAck),
     rxNak: Number(s.rxNak),
   };
+}
+
+function getDemuxStats(): DemuxStatsMsg {
+  const s = (globalThis as any).__demuxStats ?? { pat: 0, pmt: 0, pes: 0, ra: 0, err: 0, raw: 0 };
+  return { pat: s.pat, pmt: s.pmt, pes: s.pes, ra: s.ra, err: s.err, raw: s.raw };
 }

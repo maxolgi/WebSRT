@@ -444,6 +444,12 @@ export class VideoPipeline {
   private decodedCount = 0;
   private seenKeyframe = false;
   private droppedVideo = 0;
+  private lastCodecString: string | null = null;
+  private lastHwAccel: string | undefined = undefined;
+  private lastProfile = 0;
+  private lastLevel = 0;
+  private lastWidth = 0;
+  private lastHeight = 0;
 
   constructor(cb: DecoderCallbacks) {
     this.cb = cb;
@@ -577,8 +583,9 @@ export class VideoPipeline {
     });
 
     try {
+      const codecStr = 'avc1.' + toHex(info.profile) + toHex(info.constraint) + toHex(info.level);
       this.decoder.configure({
-        codec: 'avc1.' + toHex(info.profile) + toHex(info.constraint) + toHex(info.level),
+        codec: codecStr,
         description: avcc,
         codedWidth: info.width || undefined,
         codedHeight: info.height || undefined,
@@ -586,6 +593,12 @@ export class VideoPipeline {
       } as VideoDecoderConfig);
       this.configured = true;
       this.seenKeyframe = false;
+      this.lastCodecString = codecStr;
+      this.lastHwAccel = 'prefer-hardware';
+      this.lastProfile = info.profile;
+      this.lastLevel = info.level;
+      this.lastWidth = info.width;
+      this.lastHeight = info.height;
       this.cb.onConfigured({
         width: info.width,
         height: info.height,
@@ -623,6 +636,12 @@ export class VideoPipeline {
       } as VideoDecoderConfig);
       this.configured = true;
       this.seenKeyframe = false;
+      this.lastCodecString = codec;
+      this.lastHwAccel = 'prefer-hardware';
+      this.lastProfile = info?.profileIdc ?? 0;
+      this.lastLevel = info?.levelIdc ?? 0;
+      this.lastWidth = info?.width ?? 0;
+      this.lastHeight = info?.height ?? 0;
       this.cb.onConfigured({
         width: info?.width ?? 0,
         height: info?.height ?? 0,
@@ -633,6 +652,22 @@ export class VideoPipeline {
       this.cb.onError(e);
       this.decoder = null;
     }
+  }
+
+  getStats(): import('./debug/types').VideoStats {
+    return {
+      codec: this.codec,
+      codecString: this.lastCodecString ?? null,
+      decoderState: this.decoder?.state ?? 'unconfigured',
+      decodeQueueSize: this.decoder?.decodeQueueSize ?? 0,
+      decodedCount: this.decodedCount,
+      droppedFrames: this.droppedVideo,
+      hwAcceleration: this.lastHwAccel,
+      profile: this.lastProfile ?? 0,
+      level: this.lastLevel ?? 0,
+      codedWidth: this.lastWidth ?? 0,
+      codedHeight: this.lastHeight ?? 0,
+    };
   }
 
   reset() {
@@ -720,6 +755,7 @@ abstract class AudioPipelineBase {
   protected droppedAudio = 0;
   protected lastWrittenPtsUs: number | null = null;
   protected lastWrittenWallMs = 0;
+  protected codecString: string | null = null;
 
   constructor(cb: AudioDecoderCallbacks) {
     this.cb = cb;
@@ -829,6 +865,20 @@ abstract class AudioPipelineBase {
     // Audio hardware consumes samples at real-time rate from the write point.
     // This approximation assumes the hardware clock runs at exactly real-time.
     return this.lastWrittenPtsUs + (performance.now() - this.lastWrittenWallMs) * 1000;
+  }
+
+  getStats(): import('./debug/types').AudioStats {
+    const MTG = (typeof window !== 'undefined' && (window as any).MediaStreamTrackGenerator);
+    return {
+      codec: this.codecString ?? null,
+      decoderState: this.decoder?.state ?? 'unconfigured',
+      decodeQueueSize: this.decoder?.decodeQueueSize ?? 0,
+      packetsDecoded: this.packetsDecoded,
+      droppedPackets: this.droppedAudio,
+      sampleRate: this.sampleRate,
+      channels: this.channels,
+      outputMode: this.generator ? 'MediaStreamTrackGenerator' : (this.workletNode ? 'AudioWorklet' : null),
+    };
   }
 
   reset() {
@@ -956,6 +1006,7 @@ export class OpusAudioPipeline extends AudioPipelineBase {
         sampleRate: 48000,
         numberOfChannels: this.channels,
       } as AudioDecoderConfig);
+      this.codecString = 'opus';
       this.startInit();
     } catch (e) {
       this.cb.onError(e);
@@ -1025,6 +1076,7 @@ export class AacAudioPipeline extends AudioPipelineBase {
         numberOfChannels: this.channels,
         description: asc,
       } as AudioDecoderConfig);
+      this.codecString = codec;
       this.startInit();
     } catch (e) {
       this.cb.onError(e);
