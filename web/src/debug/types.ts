@@ -97,3 +97,9 @@ export interface DebugDiagnostics {
   history: TimeSeriesBucket[];
   consoleErrors: string[];
 }
+
+export interface TestActions {
+  resetDecoder: () => void;
+  reconnect: () => void;
+  cycleLatency: () => void;
+}

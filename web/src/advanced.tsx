@@ -323,6 +323,28 @@ async function doConnect() {
   startDriftMonitor();
 }
 
+// Register test actions for the debug panel's Test tab
+store.testActions.value = {
+  resetDecoder: () => {
+    video?.reset();
+    log('VideoDecoder reset — will re-sync on next keyframe', 'info');
+  },
+  reconnect: () => {
+    log('Manual reconnect triggered', 'info');
+    manualDisconnect = false;
+    teardown();
+    setTimeout(() => doConnect(), 100);
+  },
+  cycleLatency: () => {
+    const current = +latencyNum.value;
+    const next = current >= 2000 ? 120 : current >= 500 ? 2000 : 500;
+    latencyNum.value = String(next);
+    localStorage.setItem('latency', String(next));
+    store.latencyMs.value = next;
+    log(`Latency cycled to ${next}ms (reconnect to apply)`, 'info');
+  },
+};
+
 function handleWorkerMsg(msg: WorkerMsg) {
   if (msg.type === 'batch') {
     for (const m of msg.msgs) handleWorkerMsg(m);

@@ -12,6 +12,7 @@ import type {
   MediaCapResult,
   TimeSeriesBucket,
   DemuxStats,
+  TestActions,
 } from './types';
 import type { StatsMsg } from '../worker';
 
@@ -32,6 +33,7 @@ export class DebugStore {
   readonly certMode = signal('unknown');
   readonly consoleErrors = signal<string[]>([]);
   readonly activeTab = signal<string>('codec');
+  readonly testActions = signal<TestActions | null>(null);
 
   pushHistory(bucket: TimeSeriesBucket) {
     const h = this.history.value;

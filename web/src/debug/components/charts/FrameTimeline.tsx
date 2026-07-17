@@ -81,14 +81,9 @@ export function FrameTimeline({ store, height = 80 }: Props): JSX.Element {
   })
 
   return (
-    <div>
-      <div style={{ color: '#999', fontSize: '11px', marginBottom: '2px' }}>
-        Render Health (FPS over time)
-      </div>
-      <canvas
-        ref={canvasRef}
-        style={{ width: '100%', height: `${height}px`, display: 'block' }}
-      />
-    </div>
+    <canvas
+      ref={canvasRef}
+      style={{ width: '100%', height: `${height}px`, display: 'block' }}
+    />
   )
 }

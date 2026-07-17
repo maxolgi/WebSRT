@@ -10,6 +10,7 @@ import { GpuTab } from './GpuTab'
 import { SrtTab } from './SrtTab'
 import { DevToolsTab } from './DevToolsTab'
 import { ConsoleTab } from './ConsoleTab'
+import { TestTab } from './TestTab'
 
 interface Props {
   store: DebugStore
@@ -21,6 +22,7 @@ const TABS = [
   { id: 'srt', label: 'SRT' },
   { id: 'devtools', label: 'DevTools' },
   { id: 'console', label: 'Console' },
+  { id: 'test', label: 'Test' },
 ] as const
 
 export function DebugPanel({ store }: Props) {
@@ -59,6 +61,7 @@ export function DebugPanel({ store }: Props) {
         {activeTab === 'srt' && <SrtTab store={store} />}
         {activeTab === 'devtools' && <DevToolsTab />}
         {activeTab === 'console' && <ConsoleTab store={store} />}
+        {activeTab === 'test' && <TestTab store={store} />}
       </div>
     </>
   )
