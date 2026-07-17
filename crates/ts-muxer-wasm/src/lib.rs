@@ -16,6 +16,13 @@ const PMT_PID: u16 = 0x1000;
 const STREAM_TYPE_H264: u8 = 0x1B;
 const STREAM_TYPE_HEVC: u8 = 0x24;
 const STREAM_TYPE_OPUS: u8 = 0x06;
+const STREAM_TYPE_AV1: u8 = 0x06; // same value as OPUS; disambiguated by descriptor
+
+const AV1_DESCRIPTOR: &[u8] = &[0x05, 0x04, 0x41, 0x56, 0x30, 0x31]; // registration "AV01"
+const OPUS_DESCRIPTOR: &[u8] = &[
+    0x05, 0x04, 0x4F, 0x70, 0x75, 0x73, // registration "Opus"
+    0x7F, 0x02, 0x80, 0x02, // DVB extension: ext_tag=0x80, channel_config=2
+];
 
 const SYNC_BYTE: u8 = 0x47;
 
@@ -32,6 +39,8 @@ pub struct TsMuxer {
     output: Vec<u8>,
     pat_pmt_emitted: bool,
     last_was_keyframe: bool,
+    video_stream_type: u8,   // default STREAM_TYPE_H264
+    video_descriptor: Vec<u8>, // default empty
 }
 
 #[wasm_bindgen]
@@ -50,6 +59,26 @@ impl TsMuxer {
             output: Vec::new(),
             pat_pmt_emitted: false,
             last_was_keyframe: false,
+            video_stream_type: STREAM_TYPE_H264,
+            video_descriptor: Vec::new(),
+        }
+    }
+
+    #[wasm_bindgen(js_name = setVideoCodec)]
+    pub fn set_video_codec(&mut self, codec: &str) {
+        match codec {
+            "av1" => {
+                self.video_stream_type = STREAM_TYPE_AV1;
+                self.video_descriptor = AV1_DESCRIPTOR.to_vec();
+            }
+            "hevc" => {
+                self.video_stream_type = STREAM_TYPE_HEVC;
+                self.video_descriptor.clear();
+            }
+            _ => {
+                self.video_stream_type = STREAM_TYPE_H264;
+                self.video_descriptor.clear();
+            }
         }
     }
 
@@ -131,19 +160,36 @@ impl TsMuxer {
     }
 
     fn write_pmt(&mut self) {
-        let mut section: Vec<u8> = vec![
-            0x02,                       // table_id
-            0xB0, 0x17,                 // SSI + section_length = 23
-            0x00, 0x01,                 // program_number = 1
-            0xC1,                       // reserved(11) + version(0) + current_next(1)
-            0x00, 0x00,                 // section_number, last_section_number
-            0xE1, 0x00,                 // reserved(111) + PCR_PID = 0x100
-            0xF0, 0x00,                 // reserved(1111) + program_info_length = 0
-            STREAM_TYPE_H264,  0xE1, 0x00, 0xF0, 0x00, // video: PID 0x100 (H.264), ES_info_length 0
-            STREAM_TYPE_OPUS, 0xE1, 0x01, 0xF0, 0x00, // audio: PID 0x101, ES_info_length 0
-        ];
-        let crc = crc32(&section);
-        section.extend_from_slice(&crc.to_be_bytes());
+        let video_desc = &self.video_descriptor;
+        let audio_desc: &[u8] = OPUS_DESCRIPTOR;
+        let video_esil = video_desc.len() as u16;
+        let audio_esil = audio_desc.len() as u16;
+        let section_length: u16 = 23 + video_esil + audio_esil;
+
+        let mut s: Vec<u8> = Vec::with_capacity(64);
+        s.push(0x02); // table_id
+        s.push(0xB0 | ((section_length >> 8) as u8 & 0x0F)); // SSI + len hi
+        s.push((section_length & 0xFF) as u8); // len lo
+        s.extend_from_slice(&[0x00, 0x01]); // program_number
+        s.push(0xC1); // version/current
+        s.extend_from_slice(&[0x00, 0x00]); // section/last
+        s.extend_from_slice(&[0xE1, 0x00]); // PCR_PID = 0x100
+        s.extend_from_slice(&[0xF0, 0x00]); // program_info_length = 0
+        // video entry
+        s.push(self.video_stream_type);
+        s.extend_from_slice(&[0xE1, 0x00]); // video PID 0x100
+        s.push(0xF0 | ((video_esil >> 8) as u8 & 0x0F));
+        s.push((video_esil & 0xFF) as u8);
+        s.extend_from_slice(video_desc);
+        // audio entry
+        s.push(STREAM_TYPE_OPUS);
+        s.extend_from_slice(&[0xE1, 0x01]); // audio PID 0x101
+        s.push(0xF0 | ((audio_esil >> 8) as u8 & 0x0F));
+        s.push((audio_esil & 0xFF) as u8);
+        s.extend_from_slice(audio_desc);
+        // CRC over table_id..last-descriptor-byte, then append
+        let crc = crc32(&s);
+        s.extend_from_slice(&crc.to_be_bytes());
 
         let mut pkt = [0u8; TS_PACKET_SIZE];
         pkt[0] = SYNC_BYTE;
@@ -153,8 +199,8 @@ impl TsMuxer {
         self.pmt_cc = (self.pmt_cc + 1) & 0x0F;
 
         pkt[4] = 0x00; // pointer_field
-        pkt[5..5 + section.len()].copy_from_slice(&section);
-        for byte in &mut pkt[5 + section.len()..] {
+        pkt[5..5 + s.len()].copy_from_slice(&s);
+        for byte in &mut pkt[5 + s.len()..] {
             *byte = 0xFF;
         }
         self.output.extend_from_slice(&pkt);
@@ -313,5 +359,73 @@ fn us_to_90k(us: f64) -> u64 {
 impl Default for TsMuxer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Returns the PMT section bytes (table_id through CRC), section-relative offsets.
+    fn full_section(m: &mut TsMuxer) -> Vec<u8> {
+        m.push_video(&[0; 8], 0.0, 0.0, true);
+        let out = m.poll();
+        for chunk in out.chunks(TS_PACKET_SIZE) {
+            let pid = ((chunk[1] as u16 & 0x1F) << 8) | chunk[2] as u16;
+            if pid == PMT_PID {
+                // section_length covers bytes after the 3-byte header through CRC
+                let sl = (((chunk[6] as u16 & 0x0F) << 8) | chunk[7] as u16) as usize;
+                return chunk[5..5 + 3 + sl].to_vec();
+            }
+        }
+        unreachable!("no PMT");
+    }
+
+    #[test]
+    fn h264_default_has_opus_descriptor() {
+        let mut m = TsMuxer::new();
+        let s = full_section(&mut m);
+        assert_eq!(s[12], 0x1B); // video stream_type H.264
+        assert_eq!(&s[15..17], &[0xF0, 0x00]); // video ES_info_length 0
+        // audio entry immediately follows (no video descriptor)
+        assert_eq!(s[17], 0x06); // audio stream_type Opus
+        assert_eq!(&s[20..22], &[0xF0, 0x0A]); // audio ES_info_length 10
+        assert_eq!(
+            &s[22..28],
+            &[0x05, 0x04, 0x4F, 0x70, 0x75, 0x73]
+        ); // "Opus"
+        assert_eq!(&s[28..32], &[0x7F, 0x02, 0x80, 0x02]); // DVB ext
+        let sl = ((s[1] as u16 & 0x0F) << 8) | s[2] as u16;
+        assert_eq!(sl, 33); // 23 + 0 + 10
+    }
+
+    #[test]
+    fn av1_has_av01_and_opus_descriptors() {
+        let mut m = TsMuxer::new();
+        m.set_video_codec("av1");
+        let s = full_section(&mut m);
+        assert_eq!(s[12], 0x06); // video stream_type AV1
+        assert_eq!(&s[15..17], &[0xF0, 0x06]); // video ES_info_length 6
+        assert_eq!(
+            &s[17..23],
+            &[0x05, 0x04, 0x41, 0x56, 0x30, 0x31]
+        ); // "AV01"
+        assert_eq!(s[23], 0x06); // audio stream_type Opus
+        assert_eq!(&s[26..28], &[0xF0, 0x0A]); // audio ES_info_length 10
+        assert_eq!(
+            &s[28..34],
+            &[0x05, 0x04, 0x4F, 0x70, 0x75, 0x73]
+        ); // "Opus"
+        assert_eq!(&s[34..38], &[0x7F, 0x02, 0x80, 0x02]); // DVB ext
+        let sl = ((s[1] as u16 & 0x0F) << 8) | s[2] as u16;
+        assert_eq!(sl, 39); // 23 + 6 + 10
+    }
+
+    #[test]
+    fn unknown_codec_falls_back_to_h264() {
+        let mut m = TsMuxer::new();
+        m.set_video_codec("nonsense");
+        let s = full_section(&mut m);
+        assert_eq!(s[12], 0x1B);
     }
 }
