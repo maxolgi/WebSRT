@@ -7,17 +7,14 @@
 import { render } from 'preact';
 import { VideoPipeline, OpusAudioPipeline, AacAudioPipeline } from './decode';
 import { CanvasRenderer } from './render';
-import type { WorkerMsg, StatsMsg } from './worker';
+import type { WorkerMsg } from './worker';
 import { DebugStore } from './debug/store';
 import { DebugPanel } from './debug/components/Panel';
 import { startSampler, attachConsoleErrorCapture } from './debug/sampler';
 
-const logEl = document.getElementById('log') as HTMLPreElement;
-const statusEl = document.getElementById('status') as HTMLParagraphElement;
 const connectBtn = document.getElementById('connect') as HTMLButtonElement;
 const canvas = document.getElementById('video-canvas') as HTMLCanvasElement;
 const latencyNum = document.getElementById('latency-num') as HTMLInputElement;
-const statsEl = document.getElementById('stats') as HTMLPreElement;
 const muteBtn = document.getElementById('mute') as HTMLButtonElement;
 const debugToggle = document.getElementById('debug-toggle') as HTMLButtonElement;
 const debugRoot = document.getElementById('debug-root') as HTMLDivElement;
@@ -46,7 +43,6 @@ function setConnState(s: ConnectionState) {
 }
 
 function setStatus(s: string) {
-  statusEl.textContent = s;
   store.status.value = s;
 }
 
@@ -64,13 +60,6 @@ latencyNum.addEventListener('input', () => {
 store.latencyMs.value = +latencyNum.value;
 
 function log(msg: string, cls = '') {
-  const lines = logEl.children;
-  if (lines.length > 50) logEl.removeChild(lines[0]);
-  const span = document.createElement('span');
-  span.className = cls;
-  span.textContent = msg + '\n';
-  logEl.appendChild(span);
-  logEl.scrollTop = logEl.scrollHeight;
   store.pushLog(msg, cls);
 }
 
@@ -190,11 +179,9 @@ function teardown() {
   audioReady = false;
   muteBtn.disabled = true;
   muteBtn.textContent = 'muted';
-  statsEl.textContent = '';
 }
 
 let driftTimer: ReturnType<typeof setInterval> | null = null;
-let latestDriftMs: number | null = null;
 
 function startDriftMonitor() {
   if (driftTimer !== null) clearInterval(driftTimer);
@@ -202,14 +189,12 @@ function startDriftMonitor() {
     const videoPts = renderer?.currentPtsUs() ?? null;
     const audioPts = audio?.audioPlayheadUs() ?? null;
     if (videoPts === null || audioPts === null) {
-      latestDriftMs = null;
+      store.driftMs.value = null;
       return;
     }
     const driftMs = (videoPts - audioPts) / 1000;
-    latestDriftMs = driftMs;
     store.driftMs.value = driftMs;
-    const absDrift = Math.abs(driftMs);
-    if (absDrift > 40) {
+    if (Math.abs(driftMs) > 40) {
       const direction = driftMs > 0 ? 'ahead of' : 'behind';
       console.warn(`A/V drift: ${driftMs.toFixed(1)}ms (video ${direction} audio)`);
     }
@@ -221,7 +206,6 @@ function stopDriftMonitor() {
     clearInterval(driftTimer);
     driftTimer = null;
   }
-  latestDriftMs = null;
   store.driftMs.value = null;
 }
 
@@ -395,7 +379,6 @@ function handleWorkerMsg(msg: WorkerMsg) {
     case 'stats':
       store.srtStats.value = msg.stats;
       if (msg.demux) store.demuxStats.value = msg.demux;
-      updateStats(msg.stats);
       break;
     case 'close':
       log('SRT closed', 'err');
@@ -403,29 +386,6 @@ function handleWorkerMsg(msg: WorkerMsg) {
       if (!manualDisconnect) scheduleReconnect();
       break;
   }
-}
-
-function updateStats(s: StatsMsg) {
-  const lossRate = (s.rxData + s.rxLoss) > 0
-    ? ((s.rxLoss / (s.rxData + s.rxLoss)) * 100).toFixed(2)
-    : '0.00';
-  const mbps = (s.bandwidthBps / 1e6).toFixed(1);
-  const elapsed = (s.elapsedMs / 1000).toFixed(0);
-  statsEl.textContent =
-    `uptime   ${elapsed}s\n` +
-    `RTT      ${s.rttMs.toFixed(1)}ms\n` +
-    `bw       ${mbps} Mbps\n` +
-    `rx pkts  ${s.rxData}\n` +
-    `rx bytes ${(s.rxBytes / 1e6).toFixed(1)} MB\n` +
-    `loss     ${s.rxLoss} (${lossRate}%)\n` +
-    `re-xmit  ${s.rxRetransmit}\n` +
-    `dropped  ${s.rxDropped}\n` +
-    `belated  ${s.rxBelated}\n` +
-    `buf'd    ${s.rxBuffered}\n` +
-    `ACK/NAK  ${s.rxAck}/${s.rxNak}` +
-    (latestDriftMs !== null
-      ? `\ndrift    ${latestDriftMs >= 0 ? '+' : ''}${latestDriftMs.toFixed(0)}ms (video vs audio)`
-      : '');
 }
 
 document.addEventListener('visibilitychange', () => {

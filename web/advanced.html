@@ -28,11 +28,6 @@
       }
       button:hover { background: #333; }
       button:disabled { opacity: 0.5; }
-      .layout { display: flex; gap: 16px; align-items: flex-start; }
-      .left-panel { flex: 2 1 0; min-width: 0; }
-      .right-panel { flex: 1 1 0; min-width: 0; }
-      body.debug-open .right-panel { display: none; }
-      body.debug-open .left-panel { flex: 1; }
       .controls { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
       a { color: #6cf; }
       a.back { display: inline-block; margin-bottom: 8px; text-decoration: none; }
@@ -81,21 +76,14 @@
   </head>
   <body>
     <a href="/index.html" class="back">← simple page</a>
-    <div class="layout">
-      <div class="left-panel">
-        <canvas id="video-canvas" width="640" height="360"></canvas>
-        <div class="controls">
-          <button id="connect">connect</button>
-          <label>latency: <input type="number" id="latency-num" min="20" max="8000" step="10" value="300" />ms</label>
-          <button id="mute" disabled>muted</button>
-          <button id="fullscreen">fullscreen</button>
-          <button id="debug-toggle">🐛 debug</button>
-        </div>
-      </div>
-      <div class="right-panel">
-        <p id="status">idle</p>
-        <pre id="stats"></pre>
-        <pre id="log"></pre>
+    <div>
+      <canvas id="video-canvas" width="640" height="360"></canvas>
+      <div class="controls">
+        <button id="connect">connect</button>
+        <label>latency: <input type="number" id="latency-num" min="20" max="8000" step="10" value="300" />ms</label>
+        <button id="mute" disabled>muted</button>
+        <button id="fullscreen">fullscreen</button>
+        <button id="debug-toggle">🐛 debug</button>
       </div>
     </div>
     <div id="debug-root"></div>
