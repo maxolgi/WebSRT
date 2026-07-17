@@ -130,23 +130,31 @@ fullscreenBtn.addEventListener('click', () => {
 });
 
 // --- Debug panel toggle ---
-debugToggle.addEventListener('click', () => {
-  const visible = !store.panelVisible.value;
+function setPanelVisible(visible: boolean) {
   store.panelVisible.value = visible;
   debugRoot.classList.toggle('visible', visible);
   document.body.classList.toggle('debug-open', visible);
-  if (visible && !panelMounted) {
-    render(<DebugPanel store={store} />, debugRoot);
-    panelMounted = true;
-    samplerCleanup = startSampler(store, () => ({ video, audio, renderer }));
-    attachConsoleErrorCapture(store);
-    worker?.postMessage({ cmd: 'debug-rate', ms: 250 });
+  if (visible) {
+    localStorage.setItem('websrt-debug-open', '1');
+    if (!panelMounted) {
+      render(<DebugPanel store={store} />, debugRoot);
+      panelMounted = true;
+      samplerCleanup = startSampler(store, () => ({ video, audio, renderer }));
+      attachConsoleErrorCapture(store);
+      worker?.postMessage({ cmd: 'debug-rate', ms: 250 });
+    }
+  } else {
+    localStorage.removeItem('websrt-debug-open');
+    if (samplerCleanup) {
+      samplerCleanup();
+      samplerCleanup = null;
+      worker?.postMessage({ cmd: 'debug-rate', ms: 1000 });
+    }
   }
-  if (!visible && samplerCleanup) {
-    samplerCleanup();
-    samplerCleanup = null;
-    worker?.postMessage({ cmd: 'debug-rate', ms: 1000 });
-  }
+}
+
+debugToggle.addEventListener('click', () => {
+  setPanelVisible(!store.panelVisible.value);
 });
 
 function scheduleReconnect() {
@@ -405,4 +413,8 @@ if ((window as any).CERT_HASH !== undefined) {
   doConnect();
 } else {
   log('No cert-hash.js. Start the gateway first, then reload.', 'info');
+}
+
+if (localStorage.getItem('websrt-debug-open') === '1') {
+  setPanelVisible(true);
 }

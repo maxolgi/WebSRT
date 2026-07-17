@@ -36,6 +36,7 @@ export function DebugPanel({ store }: Props) {
     store.panelVisible.value = false
     document.getElementById('debug-root')?.classList.remove('visible')
     document.body.classList.remove('debug-open')
+    localStorage.removeItem('websrt-debug-open')
   }
 
   return (
