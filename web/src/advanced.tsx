@@ -51,11 +51,18 @@ function formatLatency(ms: number): string {
 }
 const savedLatency = localStorage.getItem('latency');
 if (savedLatency) latencyNum.value = savedLatency;
-latencyNum.addEventListener('input', () => {
+latencyNum.addEventListener('change', () => {
   const v = Math.max(20, Math.min(8000, +latencyNum.value || 120));
   latencyNum.value = String(v);
   localStorage.setItem('latency', String(v));
+  const prev = store.latencyMs.value;
   store.latencyMs.value = v;
+  if (v !== prev && connState !== 'idle') {
+    log(`Latency changed to ${v}ms — reconnecting…`, 'info');
+    manualDisconnect = false;
+    teardown();
+    setTimeout(() => doConnect(), 100);
+  }
 });
 store.latencyMs.value = +latencyNum.value;
 
