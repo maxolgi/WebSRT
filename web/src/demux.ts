@@ -11,7 +11,7 @@ export async function ensureMpeg2tsWasm(): Promise<void> {
 
 export interface DemuxCallbacks {
   onPat?: (programNum: number, pmtPid: number) => void;
-  onPmt?: (entries: { pid: number; streamType: number }[]) => void;
+  onPmt?: (entries: { pid: number; streamType: number; formatId: string | null }[]) => void;
   onPes?: (pid: number, pts: number | null, dts: number | null, bytes: Uint8Array, randomAccess: boolean) => void;
   onRandomAccess?: (pid: number) => void;
   onError?: (msg: string) => void;
@@ -49,9 +49,15 @@ export class Demuxer {
         s.pmt++;
         {
           const flat = e.pmtEntries();
-          const entries: { pid: number; streamType: number }[] = [];
+          const formatIds = e.pmtFormatIds();
+          const entries: { pid: number; streamType: number; formatId: string | null }[] = [];
           for (let i = 0; i + 1 < flat.length; i += 2) {
-            entries.push({ pid: flat[i], streamType: flat[i + 1] });
+            const fmt = formatIds[i / 2];
+            entries.push({
+              pid: flat[i],
+              streamType: flat[i + 1],
+              formatId: fmt && fmt.length > 0 ? fmt : null,
+            });
           }
           this.cb.onPmt?.(entries);
         }

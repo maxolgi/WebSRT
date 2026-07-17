@@ -34,7 +34,7 @@ export type WorkerCmd =
 export type WorkerMsg =
   | { type: 'log'; msg: string; cls?: string }
   | { type: 'handshakeComplete' }
-  | { type: 'pmt'; videoPid: number; audioPid: number; audioStreamType: number }
+  | { type: 'pmt'; videoPid: number; audioPid: number; audioStreamType: number; videoCodec: 'av1' | 'h264' | 'hevc' | null }
   | { type: 'videoPes'; data: Uint8Array; pts: number | null; isKeyframe: boolean }
   | { type: 'audioPes'; data: Uint8Array; pts: number | null }
   | { type: 'wtReady' }
@@ -46,7 +46,7 @@ export type WorkerMsg =
 const ST_H264 = 0x1b;
 const ST_HEVC = 0x24;
 const ST_AAC = 0x0f;
-const ST_OPUS_FFMPEG = 0x06;
+const ST_PRIVATE = 0x06;
 
 const VERBOSE = typeof localStorage !== 'undefined' && localStorage.getItem('websrt-debug') === '1';
 
@@ -60,8 +60,12 @@ let epoch = 0;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let statsTimer: ReturnType<typeof setInterval> | null = null;
 let videoPid: number | null = null;
+let videoCodecResolved: 'av1' | 'h264' | 'hevc' | null = null;
 let audioPid: number | null = null;
 let audioStreamType: number | null = null;
+// 0x06 PIDs with no registration descriptor (ffmpeg/OBS AV1 + Opus) awaiting
+// content-probe on their first PES before being pinned as video or audio.
+const probePids: Set<number> = new Set();
 let inited = false;
 let outgoing: WorkerMsg[] = [];
 
@@ -141,32 +145,71 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
     rx = SrtReceiver.newWithLatency(latencyMs);
     epoch = performance.now();
     videoPid = null;
+    videoCodecResolved = null;
     audioPid = null;
     audioStreamType = null;
+    probePids.clear();
 
     demux = await Demuxer.create({
       onPmt: (entries) => {
-        let changed = false;
         for (const e of entries) {
-          if ((e.streamType === ST_H264 || e.streamType === ST_HEVC) && videoPid !== e.pid) {
+          if (e.streamType === ST_H264) {
             videoPid = e.pid;
-            changed = true;
-          } else if ((e.streamType === ST_AAC || e.streamType === ST_OPUS_FFMPEG) && audioPid !== e.pid) {
+            videoCodecResolved = 'h264';
+          } else if (e.streamType === ST_HEVC) {
+            videoPid = e.pid;
+            videoCodecResolved = 'hevc';
+          } else if (e.streamType === ST_AAC) {
             audioPid = e.pid;
             audioStreamType = e.streamType;
-            changed = true;
+          } else if (e.streamType === ST_PRIVATE) {
+            // Disambiguate by registration-descriptor format ID. ffmpeg/OBS
+            // emit AV1 here with NO descriptor → defer to content-probe.
+            if (e.formatId === 'AV01') {
+              videoPid = e.pid;
+              videoCodecResolved = 'av1';
+            } else if (e.formatId === 'Opus') {
+              audioPid = e.pid;
+              audioStreamType = e.streamType;
+            } else {
+              probePids.add(e.pid);
+            }
           }
         }
-        if (changed) {
+        // Emit PMT once video or audio is resolved. Probe-pending-only PMTs
+        // wait until the probe completes (first PES on the probe PID).
+        if (videoPid !== null || audioPid !== null) {
           queue({
             type: 'pmt',
             videoPid: videoPid ?? -1,
             audioPid: audioPid ?? -1,
             audioStreamType: audioStreamType ?? -1,
+            videoCodec: videoCodecResolved,
           });
         }
       },
       onPes: (pid, pts, _dts, bytes, ra) => {
+        if (probePids.has(pid)) {
+          // Content-probe: distinguish AV1 video from Opus audio by sniffing
+          // the first OBU header. Runs once per PID, then pins the decision.
+          probePids.delete(pid);
+          if (looksLikeAv1(bytes)) {
+            videoPid = pid;
+            videoCodecResolved = 'av1';
+          } else {
+            audioPid = pid;
+            audioStreamType = ST_PRIVATE;
+          }
+          // PMT reaches main.ts (sets the codec hint) before the video/audio
+          // Pes queued immediately after, since both land in the same batch.
+          queue({
+            type: 'pmt',
+            videoPid: videoPid ?? -1,
+            audioPid: audioPid ?? -1,
+            audioStreamType: audioStreamType ?? -1,
+            videoCodec: videoCodecResolved,
+          });
+        }
         if (pid === videoPid) {
           queue({ type: 'videoPes', data: bytes, pts, isKeyframe: ra });
         } else if (pid === audioPid) {
@@ -300,6 +343,36 @@ function processActions(actions: SrtAction[]) {
       a.free();
     }
   }
+}
+
+/**
+ * Content-probe: does this PES payload look like an AV1 low-overhead OBU
+ * stream? Used to disambiguate descriptor-less 0x06 PIDs (ffmpeg/OBS emit
+ * AV1 with no registration descriptor). Validates the first OBU header
+ * (forbidden=0, reserved=0, type ∈ {SH=1, TD=2, Frame=6}, has_size=1) and
+ * that its LEB128 size fits the payload. Opus TOC bytes won't pass.
+ */
+function looksLikeAv1(payload: Uint8Array): boolean {
+  if (payload.length < 2) return false;
+  const b = payload[0];
+  if ((b & 0x80) !== 0) return false; // forbidden bit
+  if ((b & 0x01) !== 0) return false; // reserved bit
+  const type = (b >> 3) & 0x0f;
+  if (type !== 1 && type !== 2 && type !== 6) return false;
+  const hasSize = (b >> 1) & 0x01;
+  if (hasSize === 0) return false; // low-overhead OBUs always carry size
+  const extFlag = (b >> 2) & 0x01;
+  let p = 1 + extFlag;
+  let size = 0;
+  let shift = 0;
+  while (p < payload.length) {
+    const byte = payload[p++];
+    size |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) break;
+    shift += 7;
+    if (shift > 28) return false;
+  }
+  return p + size <= payload.length;
 }
 
 function serializeStats(s: SrtStats): StatsMsg {

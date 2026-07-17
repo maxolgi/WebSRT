@@ -96,6 +96,9 @@ pub struct TsEvent {
     text: String,
     program_num: u16,
     random_access: bool,
+    // PMT events: per-entry registration-descriptor format identifier
+    // (4-char ASCII e.g. "AV01"/"Opus"/"HEVC"), or empty string when absent.
+    pmt_format_ids: Vec<String>,
 }
 
 #[wasm_bindgen]
@@ -138,6 +141,14 @@ impl TsEvent {
         }
         out
     }
+
+    /// For PMT events: per-entry registration-descriptor format identifier
+    /// (4-char ASCII, e.g. "AV01"/"Opus"/"HEVC"). Empty string when the entry
+    /// had no registration descriptor (ffmpeg/OBS AV1 + most private streams).
+    #[wasm_bindgen(js_name = pmtFormatIds)]
+    pub fn pmt_format_ids(&self) -> Vec<String> {
+        self.pmt_format_ids.clone()
+    }
 }
 
 impl TsEvent {
@@ -145,10 +156,10 @@ impl TsEvent {
         Self {
             kind: 0, pid: pmt_pid, pts: -1, dts: -1, stream_type: 0,
             data: Vec::new(), text: String::new(),
-            program_num, random_access: false,
+            program_num, random_access: false, pmt_format_ids: Vec::new(),
         }
     }
-    fn pmt(entries: &[(Pid, StreamType)]) -> Self {
+    fn pmt(entries: &[(Pid, StreamType)], format_ids: &[String]) -> Self {
         let mut data = Vec::with_capacity(entries.len() * 4);
         for (pid, st) in entries {
             data.extend_from_slice(&pid.as_u16().to_le_bytes());
@@ -158,6 +169,7 @@ impl TsEvent {
             kind: 1, pid: 0, pts: -1, dts: -1, stream_type: 0,
             data, text: String::new(),
             program_num: 0, random_access: false,
+            pmt_format_ids: format_ids.to_vec(),
         }
     }
     fn pes(pid: Pid, header: &PesHeader, payload: Vec<u8>, random_access: bool) -> Self {
@@ -166,21 +178,21 @@ impl TsEvent {
         Self {
             kind: 2, pid: pid.as_u16(), pts, dts, stream_type: 0,
             data: payload, text: String::new(),
-            program_num: 0, random_access,
+            program_num: 0, random_access, pmt_format_ids: Vec::new(),
         }
     }
     fn random_access(pid: Pid) -> Self {
         Self {
             kind: 3, pid: pid.as_u16(), pts: -1, dts: -1, stream_type: 0,
             data: Vec::new(), text: String::new(),
-            program_num: 0, random_access: true,
+            program_num: 0, random_access: true, pmt_format_ids: Vec::new(),
         }
     }
     fn error(s: impl Into<String>) -> Self {
         Self {
             kind: 4, pid: 0, pts: -1, dts: -1, stream_type: 0,
             data: Vec::new(), text: s.into(),
-            program_num: 0, random_access: false,
+            program_num: 0, random_access: false, pmt_format_ids: Vec::new(),
         }
     }
 }
@@ -190,6 +202,11 @@ struct PartialPes {
     header: Option<PesHeader>,
     declared_len: Option<usize>,
     buf: Vec<u8>,
+    // Keyframe hint: true if the adaptation_field.random_access_indicator was
+    // set on the TS packet containing this PES's PesStart. Captured at start
+    // time (not read at flush) so a keyframe's RA flag isn't mistakenly
+    // attached to the preceding delta PES flushed at the same PesStart.
+    ra: bool,
 }
 
 /// Browser-facing demuxer.
@@ -198,6 +215,11 @@ pub struct TsDemuxer {
     feed: SharedFeedBuf,
     reader: TsPacketReader<SharedFeedBuf>,
     partials: HashMap<Pid, PartialPes>,
+    // Most recent adaptation_field.random_access_indicator seen per PID.
+    // Consumed (reset to false) when the next PES event for that PID is
+    // emitted, so the keyframe hint reaches the pipeline instead of being
+    // dropped as a separate kind-3 event.
+    last_ra: HashMap<Pid, bool>,
 }
 
 #[wasm_bindgen]
@@ -210,6 +232,7 @@ impl TsDemuxer {
             feed,
             reader,
             partials: HashMap::new(),
+            last_ra: HashMap::new(),
         }
     }
 
@@ -234,6 +257,12 @@ impl TsDemuxer {
 
         if let Some(af) = &packet.adaptation_field {
             if af.random_access_indicator {
+                // The RA indicator belongs to the PES starting in THIS packet
+                // (the next PesStart for this PID). Stash it as a pending flag;
+                // PesStart consumes it into the new partial's `ra` field so it
+                // isn't mistakenly attached to the preceding delta PES flushed
+                // at the same PesStart.
+                self.last_ra.insert(pid, true);
                 events.push(TsEvent::random_access(pid));
             }
         }
@@ -255,14 +284,34 @@ impl TsDemuxer {
                     .iter()
                     .map(|e| (e.elementary_pid, e.stream_type.clone()))
                     .collect();
-                events.push(TsEvent::pmt(&entries));
+                // Surface registration-descriptor format IDs (tag 0x05,
+                // 4-byte ASCII) so JS can disambiguate 0x06 streams
+                // (AV01 → video, Opus → audio). Empty when absent.
+                let format_ids: Vec<String> = pmt
+                    .es_info
+                    .iter()
+                    .map(|e| {
+                        for d in &e.descriptors {
+                            if d.tag == 0x05 && d.data.len() >= 4 {
+                                if let Ok(s) = std::str::from_utf8(&d.data[..4]) {
+                                    return s.to_string();
+                                }
+                            }
+                        }
+                        String::new()
+                    })
+                    .collect();
+                events.push(TsEvent::pmt(&entries, &format_ids));
             }
             TsPayload::PesStart(pes) => {
                 let entry = self.partials.entry(pid).or_default();
                 if entry.header.is_some() && !entry.buf.is_empty() {
                     let hdr = entry.header.take().unwrap();
                     let payload = std::mem::take(&mut entry.buf);
-                    events.push(TsEvent::pes(pid, &hdr, payload, false));
+                    // The flushed partial carries the RA flag captured when IT
+                    // started, not the one set by this packet.
+                    let ra = std::mem::take(&mut entry.ra);
+                    events.push(TsEvent::pes(pid, &hdr, payload, ra));
                 }
                 entry.declared_len = if pes.pes_packet_len > 0 {
                     Some(pes.pes_packet_len as usize)
@@ -270,6 +319,10 @@ impl TsDemuxer {
                     None
                 };
                 entry.header = Some(pes.header.clone());
+                // Attach this packet's pending RA flag to the NEW partial, then
+                // consume it so it doesn't leak onto a later PES.
+                entry.ra = self.last_ra.get(&pid).copied().unwrap_or(false);
+                self.last_ra.insert(pid, false);
                 entry.buf.extend_from_slice(&pes.data);
                 self.maybe_flush(pid, events);
             }
@@ -307,7 +360,8 @@ impl TsDemuxer {
             });
             let payload = std::mem::take(&mut p.buf);
             p.declared_len = None;
-            events.push(TsEvent::pes(pid, &hdr, payload, false));
+            let ra = std::mem::take(&mut p.ra);
+            events.push(TsEvent::pes(pid, &hdr, payload, ra));
         }
     }
 }

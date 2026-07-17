@@ -301,6 +301,11 @@ function handleWorkerMsg(msg: WorkerMsg) {
       setStatus('SRT connected; awaiting video stream');
       break;
     case 'pmt':
+      // PMT always precedes PES — set the codec hint before any videoPes
+      // arrives so VideoPipeline routes AV1 OBU payloads correctly.
+      if (msg.videoPid >= 0) {
+        video?.setCodecHint(msg.videoCodec);
+      }
       if (msg.audioPid >= 0 && msg.audioStreamType >= 0 && !audio) {
         const isOpus = msg.audioStreamType === 0x06;
         log(`audio PID ${msg.audioPid}: ${isOpus ? 'Opus' : 'AAC'} (stream type 0x${msg.audioStreamType.toString(16)})`, 'info');

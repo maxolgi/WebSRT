@@ -426,19 +426,187 @@ function bytesEqual(a: Uint8Array | null, b: Uint8Array | null): boolean {
   return true;
 }
 
-type VideoCodec = 'h264' | 'hevc';
+// ---------------------------------------------------------------------------
+// AV1 OBU parsing (low-overhead bitstream format as emitted by libsvtav1/
+// libaom/WebCodecs VideoEncoder). PES payload = concatenated length-delimited
+// OBUs. A keyframe access unit typically begins TD(2) → SH(1) → Frame(6).
+
+const OBU_SEQUENCE_HEADER = 1;
+const OBU_TEMPORAL_DELIMITER = 2;
+const OBU_FRAME_HEADER = 3;
+const OBU_TILE_GROUP = 4;
+const OBU_METADATA = 5;
+const OBU_FRAME = 6;
+
+interface Av1Obu {
+  type: number;
+  /** Full raw OBU bytes (header + optional ext + LEB128 size + payload). */
+  raw: Uint8Array;
+  /** OBU payload (after header + optional ext + LEB128 size). */
+  data: Uint8Array;
+}
+
+/** Parse a low-overhead AV1 OBU stream into individual OBUs. */
+function parseObus(payload: Uint8Array): Av1Obu[] {
+  const out: Av1Obu[] = [];
+  let p = 0;
+  while (p < payload.length) {
+    const start = p;
+    const b = payload[p];
+    if ((b & 0x80) !== 0) break; // forbidden_bit set → malformed
+    const type = (b >> 3) & 0x0f;
+    const extFlag = (b >> 2) & 0x01;
+    const hasSize = (b >> 1) & 0x01;
+    let q = p + 1 + extFlag;
+    let size: number;
+    if (hasSize) {
+      size = 0;
+      let shift = 0;
+      while (q < payload.length) {
+        const byte = payload[q++];
+        size |= (byte & 0x7f) << shift;
+        if ((byte & 0x80) === 0) break;
+        shift += 7;
+        if (shift > 35) break;
+      }
+    } else {
+      size = payload.length - q;
+    }
+    const dataEnd = Math.min(payload.length, q + size);
+    out.push({
+      type,
+      raw: payload.subarray(start, dataEnd),
+      data: payload.subarray(q, dataEnd),
+    });
+    if (!hasSize) break;
+    p = dataEnd;
+  }
+  return out;
+}
+
+interface Av1SeqInfo {
+  profile: number;
+  levelIdx: number;
+  tier: number;
+  bitDepth: number;
+  width: number;
+  height: number;
+  monoChrome: number;
+}
+
+/**
+ * Parse an AV1 Sequence Header OBU payload (the bytes AFTER the OBU header +
+ * LEB128 size) for the fields needed to build a codec string + decoder config.
+ * Implements AV1 spec §5.5.2 up through color_config(). Best-effort for the
+ * rare timing_info/decoder_model paths; returns null on desync so the caller
+ * can fall back to a generic codec string.
+ */
+function parseAv1SeqHeader(sh: Uint8Array): Av1SeqInfo | null {
+  if (sh.length === 0) return null;
+  const r = new BitReader(sh, 0);
+  const profile = r.readBits(3);
+  r.readBit(); // still_picture
+  const reduced = r.readBit();
+  let levelIdx = 0;
+  let tier = 0;
+  if (reduced) {
+    levelIdx = r.readBits(5);
+  } else {
+    const timingPresent = r.readBit();
+    if (timingPresent) {
+      r.readBits(32); // num_units_in_display_tick
+      r.readBits(32); // time_scale
+      if (r.readBit()) r.readUe(); // equal_picture_interval → delta_frame_id
+      const decoderModelPresent = r.readBit();
+      if (decoderModelPresent) {
+        // decoder_model_info: 5 + 32 + 5 + 5 bits
+        r.readBits(5);
+        r.readBits(32);
+        r.readBits(5);
+        r.readBits(5);
+      }
+    }
+    const initialDisplayPresent = r.readBit();
+    const opCntMinus1 = r.readBits(5);
+    for (let i = 0; i <= opCntMinus1; i++) {
+      r.readBits(12); // operating_point_idc
+      const lvl = r.readBits(5);
+      if (i === 0) levelIdx = lvl;
+      const t = lvl > 7 ? r.readBit() : 0;
+      if (i === 0) tier = t;
+      // NOTE: operating_parameters_info (per-op decoder model) is not parsed;
+      // live encoders (libsvtav1/libaom) don't emit it. If present and skipped,
+      // the parse desyncs and later fields are wrong → caller falls back.
+      if (initialDisplayPresent) {
+        if (r.readBit()) r.readBits(4); // initial_display_delay
+      }
+    }
+  }
+  const widthBits = r.readBits(4);
+  const heightBits = r.readBits(4);
+  const width = r.readBits(widthBits + 1) + 1;
+  const height = r.readBits(heightBits + 1) + 1;
+  if (!reduced) r.readBit(); // frame_id_numbers_present_flag
+  r.readBit(); // use_128x128_superblock
+  r.readBit(); // enable_filter_intra
+  r.readBit(); // enable_intra_edge_filter
+  if (!reduced) {
+    r.readBit(); // enable_interintra_compound
+    r.readBit(); // enable_masked_compound
+    r.readBit(); // enable_warped_motion
+    r.readBit(); // enable_dual_filter
+    const enableOrderHint = r.readBit();
+    if (enableOrderHint) {
+      r.readBit(); // enable_jnt_comp
+      r.readBit(); // enable_ref_frame_mvs
+    }
+    const chooseScreen = r.readBit();
+    let forceScreen = 2; // SELECT_SCREEN_CONTENT_TOOLS
+    if (!chooseScreen) forceScreen = r.readBit();
+    if (forceScreen > 0) {
+      const chooseMv = r.readBit();
+      if (!chooseMv) r.readBit();
+    }
+    if (enableOrderHint) r.readBits(3); // order_hint_bits_minus_1
+  }
+  r.readBit(); // enable_superres
+  r.readBit(); // enable_cdef
+  r.readBit(); // enable_restoration
+  const highBitdepth = r.readBit();
+  let twelveBit = 0;
+  if (profile === 2 && highBitdepth) twelveBit = r.readBit();
+  const bitDepth = twelveBit ? 12 : highBitdepth ? 10 : 8;
+  let monoChrome = 0;
+  if (profile !== 1) monoChrome = r.readBit();
+  return { profile, levelIdx, tier, bitDepth, width, height, monoChrome };
+}
+
+/** Build a WebCodecs AV1 codec string: `av01.<profile>.<LL><tier>.<DD>`. */
+function buildAv1CodecString(info: Av1SeqInfo): string {
+  const ll = info.levelIdx.toString(16).padStart(2, '0');
+  const tierCh = info.tier === 0 ? 'M' : 'H';
+  const dd = info.bitDepth.toString(16).padStart(2, '0');
+  return `av01.${info.profile}.${ll}${tierCh}.${dd}`;
+}
+
+type VideoCodec = 'h264' | 'hevc' | 'av1';
 
 export class VideoPipeline {
   private decoder: VideoDecoder | null = null;
   private codec: VideoCodec | null = null;
+  private codecHint: VideoCodec | null = null;
   private sps: Uint8Array | null = null;
   private pps: Uint8Array | null = null;
   private vps: Uint8Array | null = null; // HEVC only
+  private av1ShRaw: Uint8Array | null = null; // AV1: raw Sequence Header OBU
+  private av1ShInfo: Av1SeqInfo | null = null; // AV1: parsed SH fields
   private cb: DecoderCallbacks;
   // Pending NALU batches seen between SPS/PPS arrival and decoder.configure().
   // Each batch retains its original PTS so flushed chunks don't get stamped
   // with the wrong timestamp.
   private pendingNalus: { nalus: NalUnit[]; pts: number | null; isKeyframe: boolean }[] = [];
+  // Pending AV1 access units seen between SH capture and decoder.configure().
+  private pendingAv1: { payload: Uint8Array; pts: number | null; isKey: boolean }[] = [];
   private static readonly PENDING_CAP = 30;
   private configured = false;
   private decodedCount = 0;
@@ -455,8 +623,29 @@ export class VideoPipeline {
     this.cb = cb;
   }
 
-  /** Feed a PES payload from the demuxer (Annex-B byte stream). */
+  /**
+   * Set the expected video codec from the PMT (viewer-side routing decision).
+   * When set to 'av1', feed() routes payloads to the OBU path instead of the
+   * Annex-B NAL path. Must be called before the first videoPes arrives (PMT
+   * always precedes PES). Changing the hint resets any in-progress decode.
+   */
+  setCodecHint(codec: VideoCodec | null) {
+    if (this.codecHint === codec) return;
+    if (codec !== null && this.codec !== null && this.codec !== codec) {
+      this.reset();
+    }
+    this.codecHint = codec;
+  }
+
+  /** Feed a PES payload from the demuxer (Annex-B byte stream, or AV1 OBUs). */
   feed(payload: Uint8Array, pts: number | null, isKeyframe: boolean) {
+    // AV1 path: low-overhead OBU bitstream, not Annex B. Honor an explicit
+    // PMT hint, or a previously-pinned av1 detection.
+    if (this.codecHint === 'av1' || this.codec === 'av1') {
+      this.feedAv1(payload, pts, isKeyframe);
+      return;
+    }
+
     const nalus = parseAnnexB(payload);
 
     // Auto-detect codec on first recognizable NAL.
@@ -471,7 +660,14 @@ export class VideoPipeline {
           break;
         }
       }
-      if (this.codec === null) return;
+      if (this.codec === null) {
+        // No NAL recognized — try AV1 OBU sniff (fallback when no PMT hint).
+        if (this.sniffAv1(payload)) {
+          this.codec = 'av1';
+          this.feedAv1(payload, pts, isKeyframe);
+        }
+        return;
+      }
     }
 
     const isHevc = this.codec === 'hevc';
@@ -555,9 +751,171 @@ export class VideoPipeline {
   private configure() {
     if (this.codec === 'hevc') {
       this.configureHevc();
+    } else if (this.codec === 'av1') {
+      this.configureAv1();
     } else {
       this.configureAvc();
     }
+  }
+
+  /** Quick structural sniff: does this payload begin with a valid AV1 OBU? */
+  private sniffAv1(payload: Uint8Array): boolean {
+    if (payload.length < 2) return false;
+    const b = payload[0];
+    if ((b & 0x80) !== 0) return false; // forbidden
+    if ((b & 0x01) !== 0) return false; // reserved
+    const type = (b >> 3) & 0x0f;
+    if (type !== OBU_SEQUENCE_HEADER && type !== OBU_TEMPORAL_DELIMITER && type !== OBU_FRAME) return false;
+    return ((b >> 1) & 0x01) === 1; // has_size (low-overhead format)
+  }
+
+  /** AV1 feed: parse OBUs, (re)configure on Sequence Header, emit access units. */
+  private feedAv1(payload: Uint8Array, pts: number | null, isKey: boolean) {
+    if (this.codec === null) this.codec = 'av1';
+    const obus = parseObus(payload);
+    // Capture Sequence Header. SH rides inside keyframes; refresh config when
+    // it changes (new spatial/SNR layer, resolution change, etc.).
+    for (const o of obus) {
+      if (o.type === OBU_SEQUENCE_HEADER) {
+        if (!bytesEqual(this.av1ShRaw, o.raw)) {
+          this.av1ShRaw = o.raw;
+          this.av1ShInfo = parseAv1SeqHeader(o.data);
+          this.configured = false;
+        }
+      }
+    }
+
+    if (!this.configured) {
+      if (this.av1ShRaw) this.configureAv1();
+      this.pendingAv1.push({ payload, pts, isKey });
+      if (this.pendingAv1.length > VideoPipeline.PENDING_CAP) {
+        this.pendingAv1.splice(0, this.pendingAv1.length - VideoPipeline.PENDING_CAP);
+      }
+      return;
+    }
+
+    if (!this.decoder || this.decoder.state !== 'configured') {
+      this.pendingAv1.push({ payload, pts, isKey });
+      if (this.pendingAv1.length > VideoPipeline.PENDING_CAP) {
+        this.pendingAv1.splice(0, this.pendingAv1.length - VideoPipeline.PENDING_CAP);
+      }
+      return;
+    }
+
+    // Flush pending access units with their original PTS, then the current one.
+    const batches = this.pendingAv1;
+    this.pendingAv1 = [];
+    for (const b of batches) this.emitAv1(b.payload, b.pts, b.isKey);
+    this.emitAv1(payload, pts, isKey);
+  }
+
+  private emitAv1(payload: Uint8Array, pts: number | null, isKey: boolean) {
+    if (!this.decoder || this.decoder.state !== 'configured') return;
+    if (!this.seenKeyframe && !isKey) return;
+    if (isKey) this.seenKeyframe = true;
+    const qDepth = this.decoder.decodeQueueSize;
+    if (!isKey && qDepth > 8) {
+      this.droppedVideo++;
+      if (this.droppedVideo % 30 === 0) {
+        console.debug(`VideoPipeline: dropped ${this.droppedVideo} AV1 frames (queue full, qDepth=${qDepth})`);
+      }
+      return;
+    }
+    const tsUs = pts != null ? Math.floor(pts / 90) : undefined;
+    const chunk = new EncodedVideoChunk({
+      type: isKey ? 'key' : 'delta',
+      timestamp: tsUs ?? 0,
+      data: payload,
+    });
+    try {
+      this.decoder.decode(chunk);
+    } catch (e) {
+      this.cb.onError(e);
+      this.reset();
+    }
+  }
+
+  private configureAv1() {
+    if (!this.av1ShRaw) return;
+    const info = this.av1ShInfo;
+    // Chrome accepts the raw Sequence Header OBU (header + size + payload) as
+    // the decoder `description`; it parses bitdepth/chroma/subsampling from it.
+    const description = this.av1ShRaw;
+
+    // Validate the parsed SH: AV1 profiles are 0/1/2, bitdepths 8/10/12. If the
+    // parse desynced (e.g. a misaligned OBU captured as type-1, or an SH with
+    // features we don't fully parse), don't trust the extracted fields — pass
+    // only the raw `description` + a generic codec string and let Chrome parse
+    // the authoritative values from the SH OBU itself.
+    const infoValid = info !== null
+      && (info.profile === 0 || info.profile === 1 || info.profile === 2)
+      && (info.bitDepth === 8 || info.bitDepth === 10 || info.bitDepth === 12)
+      && info.width > 0 && info.height > 0;
+    const codec = infoValid ? buildAv1CodecString(info!) : null;
+    const codedWidth = infoValid ? info!.width : undefined;
+    const codedHeight = infoValid ? info!.height : undefined;
+
+    if (this.decoder) {
+      try { this.decoder.close(); } catch {}
+    }
+    this.decoder = new VideoDecoder({
+      output: (frame) => {
+        this.decodedCount++;
+        this.cb.onFrame(frame);
+      },
+      // On an async decode error Chrome closes the decoder. Drop configured
+      // so the next keyframe (which carries a fresh SH) reconfigures a new
+      // decoder instead of feeding chunks into a dead one forever.
+      error: (e) => {
+        this.configured = false;
+        this.seenKeyframe = false;
+        this.cb.onError(e);
+      },
+    });
+
+    const tryConfigure = (codecStr: string): boolean => {
+      try {
+        this.decoder!.configure({
+          codec: codecStr,
+          description,
+          codedWidth,
+          codedHeight,
+          hardwareAcceleration: 'prefer-hardware',
+        } as VideoDecoderConfig);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    let chosen = codec;
+    if (!chosen || !tryConfigure(chosen)) {
+      // Fallback: generic Main/level-4.0/8-bit string; the SH `description`
+      // carries the authoritative config to Chrome.
+      if (!chosen) console.warn('VideoPipeline AV1: SH parse invalid or incomplete; falling back to av01.0.08M.08 + raw description');
+      else console.warn(`VideoPipeline AV1: configure(${chosen}) failed; falling back to av01.0.08M.08`);
+      chosen = 'av01.0.08M.08';
+      if (!tryConfigure(chosen)) {
+        this.cb.onError(new Error(`AV1 VideoDecoder.configure failed for ${codec ?? '(no string)'} and fallback`));
+        this.decoder = null;
+        return;
+      }
+    }
+
+    this.configured = true;
+    this.seenKeyframe = false;
+    this.lastCodecString = chosen;
+    this.lastHwAccel = 'prefer-hardware';
+    this.lastProfile = infoValid ? info!.profile : 0;
+    this.lastLevel = infoValid ? info!.levelIdx : 0;
+    this.lastWidth = infoValid ? info!.width : 0;
+    this.lastHeight = infoValid ? info!.height : 0;
+    this.cb.onConfigured({
+      width: infoValid ? info!.width : 0,
+      height: infoValid ? info!.height : 0,
+      profile: infoValid ? info!.profile : 0,
+      level: infoValid ? info!.levelIdx : 0,
+    });
   }
 
   private configureAvc() {
@@ -676,7 +1034,10 @@ export class VideoPipeline {
     this.sps = null;
     this.pps = null;
     this.vps = null;
+    this.av1ShRaw = null;
+    this.av1ShInfo = null;
     this.pendingNalus = [];
+    this.pendingAv1 = [];
     if (this.decoder) {
       try { this.decoder.close(); } catch {}
       this.decoder = null;

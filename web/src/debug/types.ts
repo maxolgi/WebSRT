@@ -3,7 +3,7 @@
 // consumers (sampler, components, diagnostics export).
 
 export interface VideoStats {
-  codec: 'h264' | 'hevc' | null;
+  codec: 'h264' | 'hevc' | 'av1' | null;
   codecString: string | null;
   decoderState: string;
   decodeQueueSize: number;
