@@ -12,6 +12,10 @@
         color: #ddd;
         margin: 0;
         padding: 1.5rem;
+        transition: padding 0.2s ease;
+      }
+      body.debug-open {
+        padding-right: 496px;
       }
       h1 { font-size: 1.1rem; }
       video, canvas { background: #000; display: block; }
@@ -75,7 +79,6 @@
     </style>
   </head>
   <body>
-    <a href="/index.html" class="back">← simple page</a>
     <div>
       <canvas id="video-canvas" width="640" height="360"></canvas>
       <div class="controls">
