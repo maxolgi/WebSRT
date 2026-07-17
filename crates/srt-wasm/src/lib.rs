@@ -97,22 +97,35 @@ pub struct SrtStats {
     bandwidth_bps: u64,
     rx_buffered: u64,
     rx_belated: u64,
+    tx_data: u64,
+    tx_bytes: u64,
+    tx_retransmit: u64,
+    tx_loss: u64,
+    tx_buffered: u64,
 }
 
 #[wasm_bindgen]
 impl SrtStats {
+    // All numeric getters return f64 so JS sees plain Numbers, never BigInt.
+    // (u64 getters surface as BigInt in wasm-bindgen, which throws on
+    // `bigint / number` — the latent bandwidthBps bug.)
     #[wasm_bindgen(getter)] pub fn elapsedMs(&self) -> f64 { self.elapsed_ms }
-    #[wasm_bindgen(getter)] pub fn rxData(&self) -> u64 { self.rx_data }
-    #[wasm_bindgen(getter)] pub fn rxBytes(&self) -> u64 { self.rx_bytes }
-    #[wasm_bindgen(getter)] pub fn rxLoss(&self) -> u64 { self.rx_loss }
-    #[wasm_bindgen(getter)] pub fn rxRetransmit(&self) -> u64 { self.rx_retransmit }
-    #[wasm_bindgen(getter)] pub fn rxDropped(&self) -> u64 { self.rx_dropped }
-    #[wasm_bindgen(getter)] pub fn rxAck(&self) -> u64 { self.rx_ack }
-    #[wasm_bindgen(getter)] pub fn rxNak(&self) -> u64 { self.rx_nak }
+    #[wasm_bindgen(getter)] pub fn rxData(&self) -> f64 { self.rx_data as f64 }
+    #[wasm_bindgen(getter)] pub fn rxBytes(&self) -> f64 { self.rx_bytes as f64 }
+    #[wasm_bindgen(getter)] pub fn rxLoss(&self) -> f64 { self.rx_loss as f64 }
+    #[wasm_bindgen(getter)] pub fn rxRetransmit(&self) -> f64 { self.rx_retransmit as f64 }
+    #[wasm_bindgen(getter)] pub fn rxDropped(&self) -> f64 { self.rx_dropped as f64 }
+    #[wasm_bindgen(getter)] pub fn rxAck(&self) -> f64 { self.rx_ack as f64 }
+    #[wasm_bindgen(getter)] pub fn rxNak(&self) -> f64 { self.rx_nak as f64 }
     #[wasm_bindgen(getter)] pub fn rttMs(&self) -> f64 { self.rtt_ms }
-    #[wasm_bindgen(getter)] pub fn bandwidthBps(&self) -> u64 { self.bandwidth_bps }
-    #[wasm_bindgen(getter)] pub fn rxBuffered(&self) -> u64 { self.rx_buffered }
-    #[wasm_bindgen(getter)] pub fn rxBelated(&self) -> u64 { self.rx_belated }
+    #[wasm_bindgen(getter)] pub fn bandwidthBps(&self) -> f64 { self.bandwidth_bps as f64 }
+    #[wasm_bindgen(getter)] pub fn rxBuffered(&self) -> f64 { self.rx_buffered as f64 }
+    #[wasm_bindgen(getter)] pub fn rxBelated(&self) -> f64 { self.rx_belated as f64 }
+    #[wasm_bindgen(getter)] pub fn txData(&self) -> f64 { self.tx_data as f64 }
+    #[wasm_bindgen(getter)] pub fn txBytes(&self) -> f64 { self.tx_bytes as f64 }
+    #[wasm_bindgen(getter)] pub fn txRetransmit(&self) -> f64 { self.tx_retransmit as f64 }
+    #[wasm_bindgen(getter)] pub fn txLoss(&self) -> f64 { self.tx_loss as f64 }
+    #[wasm_bindgen(getter)] pub fn txBuffered(&self) -> f64 { self.tx_buffered as f64 }
 }
 
 enum State {
@@ -134,6 +147,11 @@ pub struct SrtReceiver {
     remote: SocketAddr,
     ack_seen: Cell<bool>,
     stats: RefCell<SocketStatistics>,
+    // For computing send bandwidth from the tx_bytes delta between
+    // getStats() calls. srt-protocol populates rx_bandwidth but never
+    // tx_bandwidth, so a publishing session (sender) would read 0.
+    prev_tx_bytes: Cell<u64>,
+    prev_stats_time: Cell<web_time::Instant>,
 }
 
 fn now_from_us(epoch: web_time::Instant, now_us: f64) -> web_time::Instant {
@@ -163,12 +181,15 @@ impl SrtReceiver {
         init.recv_latency = std::time::Duration::from_millis(latency_ms as u64);
         init.too_late_packet_drop = true;
         let listen = Listen::new(init, false);
+        let now = web_time::Instant::now();
         SrtReceiver {
             state: RefCell::new(State::Handshaking(listen)),
-            epoch: web_time::Instant::now(),
+            epoch: now,
             remote: SocketAddr::from_str(PEER).expect("hardcoded addr"),
             ack_seen: Cell::new(false),
             stats: RefCell::new(SocketStatistics::new()),
+            prev_tx_bytes: Cell::new(0),
+            prev_stats_time: Cell::new(now),
         }
     }
 
@@ -312,6 +333,23 @@ impl SrtReceiver {
     #[wasm_bindgen(js_name = getStats)]
     pub fn get_stats(&self) -> SrtStats {
         let s = self.stats.borrow();
+        // srt-protocol computes rx_bandwidth but never tx_bandwidth. Derive
+        // the send rate from the tx_bytes delta since the last getStats()
+        // call so a publishing session reports real throughput.
+        let now = web_time::Instant::now();
+        let prev_bytes = self.prev_tx_bytes.get();
+        let prev_time = self.prev_stats_time.get();
+        let tx_bw = {
+            let dt = (now - prev_time).as_secs_f64();
+            if dt > 0.0 {
+                let delta = s.tx_bytes.saturating_sub(prev_bytes);
+                (delta as f64 * 8.0 / dt) as u64
+            } else {
+                0
+            }
+        };
+        self.prev_tx_bytes.set(s.tx_bytes);
+        self.prev_stats_time.set(now);
         SrtStats {
             elapsed_ms: s.elapsed_time.as_secs_f64() * 1000.0,
             rx_data: s.rx_data,
@@ -322,9 +360,14 @@ impl SrtReceiver {
             rx_ack: s.rx_ack,
             rx_nak: s.rx_nak,
             rtt_ms: s.rx_average_rtt.as_secs_f64() * 1000.0,
-            bandwidth_bps: s.rx_bandwidth,
+            bandwidth_bps: s.rx_bandwidth.max(tx_bw),
             rx_buffered: s.rx_acknowledged_data,
             rx_belated: s.rx_belated_data,
+            tx_data: s.tx_data,
+            tx_bytes: s.tx_bytes,
+            tx_retransmit: s.tx_retransmit_data,
+            tx_loss: s.tx_loss_data,
+            tx_buffered: s.tx_buffered_data,
         }
     }
 }

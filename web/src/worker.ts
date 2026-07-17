@@ -14,6 +14,11 @@ export interface StatsMsg {
   rxBuffered: number;
   rxAck: number;
   rxNak: number;
+  txData: number;
+  txBytes: number;
+  txRetransmit: number;
+  txLoss: number;
+  txBuffered: number;
 }
 
 export interface DemuxStatsMsg {
@@ -379,16 +384,21 @@ function serializeStats(s: SrtStats): StatsMsg {
   return {
     elapsedMs: s.elapsedMs,
     rttMs: s.rttMs,
-    bandwidthBps: Number(s.bandwidthBps),
-    rxData: Number(s.rxData),
-    rxBytes: Number(s.rxBytes),
-    rxLoss: Number(s.rxLoss),
-    rxRetransmit: Number(s.rxRetransmit),
-    rxDropped: Number(s.rxDropped),
-    rxBelated: Number(s.rxBelated),
-    rxBuffered: Number(s.rxBuffered),
-    rxAck: Number(s.rxAck),
-    rxNak: Number(s.rxNak),
+    bandwidthBps: s.bandwidthBps,
+    rxData: s.rxData,
+    rxBytes: s.rxBytes,
+    rxLoss: s.rxLoss,
+    rxRetransmit: s.rxRetransmit,
+    rxDropped: s.rxDropped,
+    rxBelated: s.rxBelated,
+    rxBuffered: s.rxBuffered,
+    rxAck: s.rxAck,
+    rxNak: s.rxNak,
+    txData: s.txData,
+    txBytes: s.txBytes,
+    txRetransmit: s.txRetransmit,
+    txLoss: s.txLoss,
+    txBuffered: s.txBuffered,
   };
 }
 
