@@ -33,16 +33,12 @@ const MATRIX_RESOLUTIONS = [
 
 export async function probeCodec(config: ProbeConfig): Promise<MediaCapResult> {
   const bitrate = config.bitrate ?? DEFAULT_BITRATE
-  // hwAcceleration is in the MediaCapabilities spec but not in this TS lib's
-  // VideoConfiguration type; building it as an inferred variable and passing
-  // that avoids the excess property check while still querying it.
-  const videoConfig = {
+  const videoConfig: VideoConfiguration = {
     contentType: config.codec,
     width: config.width,
     height: config.height,
     bitrate,
     framerate: config.framerate,
-    hwAcceleration: config.hwAcceleration,
   }
   const result = await navigator.mediaCapabilities.decodingInfo({
     type: 'file',

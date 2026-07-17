@@ -1,12 +1,17 @@
-// Root debug panel: tab bar + lazy-loaded content per tab.
-// Each tab component is dynamically imported on first activation to keep
-// the initial bundle small.
+// Root debug panel: tab bar + content per tab.
+// Tab components are imported eagerly (they're small). Chart.js and Eruda
+// are lazy-loaded from within their respective tabs.
 
-import { useEffect, useState, useCallback } from 'preact/hooks';
-import type { DebugStore } from '../store';
+import { useCallback } from 'preact/hooks'
+import type { DebugStore } from '../store'
+import { CodecTab } from './CodecTab'
+import { GpuTab } from './GpuTab'
+import { SrtTab } from './SrtTab'
+import { DevToolsTab } from './DevToolsTab'
+import { ConsoleTab } from './ConsoleTab'
 
 interface Props {
-  store: DebugStore;
+  store: DebugStore
 }
 
 const TABS = [
@@ -15,15 +20,15 @@ const TABS = [
   { id: 'srt', label: 'SRT' },
   { id: 'devtools', label: 'DevTools' },
   { id: 'console', label: 'Console' },
-] as const;
+] as const
 
 export function DebugPanel({ store }: Props) {
-  const activeTab = store.activeTab.value;
+  const activeTab = store.activeTab.value
 
   const close = useCallback(() => {
-    store.panelVisible.value = false;
-    document.getElementById('debug-root')?.classList.remove('visible');
-  }, [store]);
+    store.panelVisible.value = false
+    document.getElementById('debug-root')?.classList.remove('visible')
+  }, [store])
 
   return (
     <>
@@ -38,31 +43,31 @@ export function DebugPanel({ store }: Props) {
         {TABS.map((t) => (
           <button
             class={`debug-tab ${activeTab === t.id ? 'active' : ''}`}
-            onClick={() => { store.activeTab.value = t.id; }}
+            onClick={() => { store.activeTab.value = t.id }}
           >
             {t.label}
           </button>
         ))}
       </div>
       <div class="debug-content">
-        {activeTab === 'codec' && <div>Codec tab — loading…</div>}
-        {activeTab === 'gpu' && <div>GPU tab — loading…</div>}
-        {activeTab === 'srt' && <div>SRT tab — loading…</div>}
-        {activeTab === 'devtools' && <div>DevTools tab — loading…</div>}
-        {activeTab === 'console' && <div>Console tab — loading…</div>}
+        {activeTab === 'codec' && <CodecTab store={store} />}
+        {activeTab === 'gpu' && <GpuTab store={store} />}
+        {activeTab === 'srt' && <SrtTab store={store} />}
+        {activeTab === 'devtools' && <DevToolsTab />}
+        {activeTab === 'console' && <ConsoleTab store={store} />}
       </div>
     </>
-  );
+  )
 }
 
 async function copyDiagnostics(store: DebugStore) {
   try {
-    const { buildDiagnostics } = await import('../diagnostics');
-    const diag = await buildDiagnostics(store);
-    const json = JSON.stringify(diag, null, 2);
-    await navigator.clipboard.writeText(json);
-    console.info('Debug diagnostics copied to clipboard');
+    const { buildDiagnostics } = await import('../diagnostics')
+    const diag = await buildDiagnostics(store)
+    const json = JSON.stringify(diag, null, 2)
+    await navigator.clipboard.writeText(json)
+    console.info('Debug diagnostics copied to clipboard')
   } catch (e) {
-    console.error('Failed to copy diagnostics:', e);
+    console.error('Failed to copy diagnostics:', e)
   }
 }
