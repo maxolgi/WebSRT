@@ -31,6 +31,8 @@
       .layout { display: flex; gap: 16px; align-items: flex-start; }
       .left-panel { flex: 2 1 0; min-width: 0; }
       .right-panel { flex: 1 1 0; min-width: 0; }
+      body.debug-open .right-panel { display: none; }
+      body.debug-open .left-panel { flex: 1; }
       .controls { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
       a { color: #6cf; }
       a.back { display: inline-block; margin-bottom: 8px; text-decoration: none; }

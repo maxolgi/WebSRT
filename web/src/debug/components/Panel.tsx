@@ -1,10 +1,7 @@
-// Root debug panel: tab bar + content per tab.
-// Tab components are imported eagerly (they're small). Chart.js and Eruda
-// are lazy-loaded from within their respective tabs.
-
-import { useCallback } from 'preact/hooks'
+import { useEffect, useState } from 'preact/hooks'
 import type { DebugStore } from '../store'
 import { downloadDiagnostics } from '../diagnostics'
+import { StreamTab } from './StreamTab'
 import { CodecTab } from './CodecTab'
 import { GpuTab } from './GpuTab'
 import { SrtTab } from './SrtTab'
@@ -17,6 +14,7 @@ interface Props {
 }
 
 const TABS = [
+  { id: 'stream', label: 'Stream' },
   { id: 'codec', label: 'Codec' },
   { id: 'gpu', label: 'GPU' },
   { id: 'srt', label: 'SRT' },
@@ -26,12 +24,19 @@ const TABS = [
 ] as const
 
 export function DebugPanel({ store }: Props) {
+  const [, forceRender] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => forceRender((n) => n + 1), 200)
+    return () => clearInterval(id)
+  }, [])
+
   const activeTab = store.activeTab.value
 
-  const close = useCallback(() => {
+  const close = () => {
     store.panelVisible.value = false
     document.getElementById('debug-root')?.classList.remove('visible')
-  }, [store])
+    document.body.classList.remove('debug-open')
+  }
 
   return (
     <>
@@ -56,6 +61,7 @@ export function DebugPanel({ store }: Props) {
         ))}
       </div>
       <div class="debug-content">
+        {activeTab === 'stream' && <StreamTab store={store} />}
         {activeTab === 'codec' && <CodecTab store={store} />}
         {activeTab === 'gpu' && <GpuTab store={store} />}
         {activeTab === 'srt' && <SrtTab store={store} />}

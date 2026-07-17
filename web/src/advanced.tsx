@@ -45,7 +45,10 @@ function setConnState(s: ConnectionState) {
   else connectBtn.textContent = 'connect';
 }
 
-function setStatus(s: string) { statusEl.textContent = s; }
+function setStatus(s: string) {
+  statusEl.textContent = s;
+  store.status.value = s;
+}
 
 function formatLatency(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 1)}s` : `${ms}ms`;
@@ -68,6 +71,7 @@ function log(msg: string, cls = '') {
   span.textContent = msg + '\n';
   logEl.appendChild(span);
   logEl.scrollTop = logEl.scrollHeight;
+  store.pushLog(msg, cls);
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -134,6 +138,7 @@ debugToggle.addEventListener('click', () => {
   const visible = !store.panelVisible.value;
   store.panelVisible.value = visible;
   debugRoot.classList.toggle('visible', visible);
+  document.body.classList.toggle('debug-open', visible);
   if (visible && !panelMounted) {
     render(<DebugPanel store={store} />, debugRoot);
     panelMounted = true;
@@ -202,6 +207,7 @@ function startDriftMonitor() {
     }
     const driftMs = (videoPts - audioPts) / 1000;
     latestDriftMs = driftMs;
+    store.driftMs.value = driftMs;
     const absDrift = Math.abs(driftMs);
     if (absDrift > 40) {
       const direction = driftMs > 0 ? 'ahead of' : 'behind';
@@ -216,6 +222,7 @@ function stopDriftMonitor() {
     driftTimer = null;
   }
   latestDriftMs = null;
+  store.driftMs.value = null;
 }
 
 function wireAudio() {

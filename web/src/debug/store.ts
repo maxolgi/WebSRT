@@ -18,6 +18,11 @@ import type { StatsMsg } from '../worker';
 
 const HISTORY_CAP = 300;
 
+export interface LogEntry {
+  msg: string;
+  cls: string;
+}
+
 export class DebugStore {
   readonly srtStats = signal<StatsMsg | null>(null);
   readonly demuxStats = signal<DemuxStats | null>(null);
@@ -32,8 +37,11 @@ export class DebugStore {
   readonly latencyMs = signal(300);
   readonly certMode = signal('unknown');
   readonly consoleErrors = signal<string[]>([]);
-  readonly activeTab = signal<string>('codec');
+  readonly activeTab = signal<string>('stream');
   readonly testActions = signal<TestActions | null>(null);
+  readonly status = signal('idle');
+  readonly logEntries = signal<LogEntry[]>([]);
+  readonly driftMs = signal<number | null>(null);
 
   pushHistory(bucket: TimeSeriesBucket) {
     const h = this.history.value;
@@ -46,8 +54,14 @@ export class DebugStore {
     this.consoleErrors.value = [...errs.slice(-49), msg];
   }
 
+  pushLog(msg: string, cls = '') {
+    const entries = this.logEntries.value;
+    this.logEntries.value = [...entries.slice(-49), { msg, cls }];
+  }
+
   reset() {
     this.history.value = [];
     this.consoleErrors.value = [];
+    this.logEntries.value = [];
   }
 }
