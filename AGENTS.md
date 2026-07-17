@@ -20,8 +20,8 @@ cd web && npm run dev
 # TypeScript typecheck (no emit)
 cd web && npx tsc --noEmit
 
-# Fixture generator (needs ffmpeg)
-./fixtures/make-fixture.sh
+# Live test publisher (needs ffmpeg; h264 uses NVENC, av1 uses VAAPI)
+./fixtures/stream.sh h264|av1
 
 ## Critical build order
 

@@ -20,8 +20,7 @@ certs/*.key
 # runtime-generated cert hash (written by gateway on boot)
 web/public/cert-hash.js
 
-# fixtures can be large; keep make-fixture.sh, gitignore the .ts
-# (test.ts committed per plan, so don't ignore it)
+fixtures/*.ts
 
 # logs and tmp
 logs/
