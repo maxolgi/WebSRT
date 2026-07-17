@@ -25,7 +25,7 @@ let reconnectTimer: number | null = null;
 let reconnectAttempts = 0;
 let manualDisconnect = false;
 const MAX_RECONNECT_DELAY_MS = 30000;
-const BASE_RECONNECT_DELAY_MS = 2000;
+const BASE_RECONNECT_DELAY_MS = 500;
 
 type ConnectionState = 'idle' | 'connecting' | 'connected';
 let connState: ConnectionState = 'idle';
@@ -410,7 +410,7 @@ document.addEventListener('visibilitychange', () => {
 if ((window as any).CERT_HASH !== undefined) {
   log((window as any).CERT_HASH ? 'Cert hash loaded — auto-connecting…' : 'mkcert mode — auto-connecting…', 'info');
   store.certMode.value = (window as any).CERT_HASH ? 'self' : 'mkcert';
-  doConnect();
+  setTimeout(() => doConnect(), 500);
 } else {
   log('No cert-hash.js. Start the gateway first, then reload.', 'info');
 }
