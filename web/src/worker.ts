@@ -48,6 +48,8 @@ const ST_HEVC = 0x24;
 const ST_AAC = 0x0f;
 const ST_OPUS_FFMPEG = 0x06;
 
+const VERBOSE = typeof localStorage !== 'undefined' && localStorage.getItem('websrt-debug') === '1';
+
 let rx: SrtReceiver | null = null;
 let demux: Demuxer | null = null;
 let wt: WebTransport | null = null;
@@ -97,6 +99,7 @@ self.onmessage = async (e: MessageEvent) => {
           if (!rx || !inited) return;
           const s = rx.getStats();
           if (!s) return;
+          if (VERBOSE) console.debug('srt stats', serializeStats(s));
           queue({ type: 'stats', stats: serializeStats(s), demux: getDemuxStats() });
           flushOutgoing();
         }, rate);
@@ -205,6 +208,7 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
       if (!rx || !inited) return;
       const s = rx.getStats();
       if (!s) return;
+      if (VERBOSE) console.debug('srt stats', serializeStats(s));
       queue({ type: 'stats', stats: serializeStats(s), demux: getDemuxStats() });
       flushOutgoing();
     }, 1000);
@@ -259,6 +263,7 @@ async function startReaderLoop(myGen: number) {
       break;
     }
     if (myGen !== gen || !rx || !inited) break;
+    if (VERBOSE) console.debug('wt datagram', value.byteLength, 'bytes');
     const nowUs = (performance.now() - epoch) * 1000;
     processActions(rx.handle_datagram(value, nowUs));
     flushOutgoing();
@@ -267,6 +272,7 @@ async function startReaderLoop(myGen: number) {
 
 function processActions(actions: SrtAction[]) {
   for (const a of actions) {
+    if (VERBOSE) console.debug('srt action', a.kind, 'bytes', a.data.length);
     try {
       switch (a.kind) {
         case 0:

@@ -4,6 +4,7 @@
 
 import { useCallback } from 'preact/hooks'
 import type { DebugStore } from '../store'
+import { downloadDiagnostics } from '../diagnostics'
 import { CodecTab } from './CodecTab'
 import { GpuTab } from './GpuTab'
 import { SrtTab } from './SrtTab'
@@ -36,6 +37,9 @@ export function DebugPanel({ store }: Props) {
         <strong style={{ flex: 1 }}>Debug Panel</strong>
         <button onClick={() => copyDiagnostics(store)} title="Copy debug info to clipboard">
           Copy Info
+        </button>
+        <button onClick={() => downloadDiagnostics(store)} title="Download debug info as JSON file">
+          Download
         </button>
         <button onClick={close}>✕</button>
       </div>

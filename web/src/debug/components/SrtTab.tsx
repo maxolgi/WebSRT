@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'preact/hooks';
 import type { JSX } from 'preact';
 import type { DebugStore } from '../store';
+import { TimeSeriesChart } from './charts/TimeSeriesChart';
 
 interface Props {
   store: DebugStore;
@@ -74,7 +75,42 @@ export function SrtTab({ store }: Props): JSX.Element {
 
       <div class="debug-section">
         <h3>Charts</h3>
-        <div id="srt-charts-area">Charts will load here</div>
+        {store.history.value.length > 0 ? (
+          <>
+            <TimeSeriesChart
+              store={store}
+              field="rttMs"
+              label="RTT (ms)"
+              color="#6cf"
+              height={100}
+            />
+            <TimeSeriesChart
+              store={store}
+              field="bandwidthMbps"
+              label="Bandwidth (Mbps)"
+              color="#6f6"
+              height={100}
+            />
+            <TimeSeriesChart
+              store={store}
+              field="lossRate"
+              label="Loss Rate (%)"
+              color="#f66"
+              height={100}
+              transform={(v) => v * 100}
+              yFormat={(v) => `${v.toFixed(2)}%`}
+            />
+            <TimeSeriesChart
+              store={store}
+              field="videoQueueDepth"
+              label="Decode Queue Depth"
+              color="#fc6"
+              height={100}
+            />
+          </>
+        ) : (
+          <div id="srt-charts-area">No chart data yet</div>
+        )}
       </div>
     </>
   );

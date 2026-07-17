@@ -1,11 +1,17 @@
 // Diagnostics export: collects all debug data into a JSON object for
-// GitHub issue reports. Called from the "Copy Info" button.
+// GitHub issue reports. Called from the "Copy Info" and "Download" buttons.
 
 import type { DebugStore } from './store';
 import type { DebugDiagnostics } from './types';
 
 export async function buildDiagnostics(store: DebugStore): Promise<DebugDiagnostics> {
   const nav = navigator as any;
+  if (!store.gpuInfo.value) {
+    try {
+      const { getGpuInfo } = await import('./gpu-info');
+      store.gpuInfo.value = getGpuInfo();
+    } catch {}
+  }
   return {
     timestamp: new Date().toISOString(),
     browser: {
@@ -27,4 +33,29 @@ export async function buildDiagnostics(store: DebugStore): Promise<DebugDiagnost
     history: store.history.value,
     consoleErrors: store.consoleErrors.value,
   };
+}
+
+export async function downloadDiagnostics(store: DebugStore): Promise<void> {
+  try {
+    const diag = await buildDiagnostics(store);
+    const json = JSON.stringify(diag, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `websrt-debug-${formatStamp()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    console.error('Failed to download diagnostics:', e);
+  }
+}
+
+function formatStamp(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    `-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
