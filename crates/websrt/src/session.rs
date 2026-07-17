@@ -218,12 +218,23 @@ impl BrowserSession {
             let payload = d.payload();
             let now = Instant::now();
             let mut should_close = false;
-            let actions = {
+            let (actions, wait) = {
                 let mut init = entry.initiator.lock().await;
-                // Duration is ignored here — the centralized ticker schedules
-                // the next tick; recv_pump is purely reactive.
-                init.handle_datagram(&payload, now).0
+                init.handle_datagram(&payload, now)
             };
+            // Pull in the next deadline so the ticker runs this session's
+            // Timer-driven logic (ACK/NAK/EXP/TSBPD release) promptly.
+            // Without this, publish-only sessions are only ticked at the
+            // periodic interval returned by the last tick(); incoming data
+            // never reschedules it, so the SRT receiver starves and packets
+            // stall then drain in bursts.
+            {
+                let mut nd = entry.next_deadline.lock().unwrap();
+                let candidate = now + wait;
+                if candidate < *nd {
+                    *nd = candidate;
+                }
+            }
             {
                 let mut l = entry.loss.lock().await;
                 for action in actions {
