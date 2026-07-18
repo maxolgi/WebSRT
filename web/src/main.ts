@@ -1,6 +1,6 @@
 import { VideoPipeline, OpusAudioPipeline, AacAudioPipeline } from './decode';
 import { CanvasRenderer } from './render';
-import type { WorkerMsg, StatsMsg } from './worker';
+import type { WorkerMsg, StatsMsg, DemuxStatsMsg } from './worker';
 
 const logEl = document.getElementById('log') as HTMLPreElement;
 const statusEl = document.getElementById('status') as HTMLParagraphElement;
@@ -333,7 +333,7 @@ function handleWorkerMsg(msg: WorkerMsg) {
       if (!manualDisconnect) scheduleReconnect();
       break;
     case 'stats':
-      updateStats(msg.stats);
+      updateStats(msg.stats, msg.demux ?? null);
       break;
     case 'close':
       log('SRT closed', 'err');
@@ -343,12 +343,13 @@ function handleWorkerMsg(msg: WorkerMsg) {
   }
 }
 
-function updateStats(s: StatsMsg) {
+function updateStats(s: StatsMsg, demux: DemuxStatsMsg | null) {
   const lossRate = (s.rxData + s.rxLoss) > 0
     ? ((s.rxLoss / (s.rxData + s.rxLoss)) * 100).toFixed(2)
     : '0.00';
   const mbps = (s.bandwidthBps / 1e6).toFixed(1);
   const elapsed = (s.elapsedMs / 1000).toFixed(0);
+  const dmx = formatDemuxLine(demux);
   statsEl.textContent =
     `uptime   ${elapsed}s\n` +
     `RTT      ${s.rttMs.toFixed(1)}ms\n` +
@@ -361,9 +362,42 @@ function updateStats(s: StatsMsg) {
     `belated  ${s.rxBelated}\n` +
     `buf'd    ${s.rxBuffered}\n` +
     `ACK/NAK  ${s.rxAck}/${s.rxNak}` +
+    (dmx ? `\ndemux    ${dmx}` : '') +
     (latestDriftMs !== null
       ? `\ndrift    ${latestDriftMs >= 0 ? '+' : ''}${latestDriftMs.toFixed(0)}ms (video vs audio)`
       : '');
+}
+
+const ST_H264_MAIN = 0x1b;
+const ST_HEVC_MAIN = 0x24;
+const ST_AAC_MAIN = 0x0f;
+const ST_PRIVATE_MAIN = 0x06;
+
+/** Condensed one-line demux summary for the simple stats panel. */
+function formatDemuxLine(d: DemuxStatsMsg | null): string {
+  if (!d || d.pids.length === 0) return '';
+  let videoPid = -1;
+  let audioPid = -1;
+  for (let i = 0; i < d.pmtPids.length; i++) {
+    const st = d.pmtStreamTypes[i];
+    if (st === ST_H264_MAIN || st === ST_HEVC_MAIN) videoPid = d.pmtPids[i];
+    else if (st === ST_AAC_MAIN) audioPid = d.pmtPids[i];
+    else if (st === ST_PRIVATE_MAIN) {
+      const fmt = d.pmtFormatIds[i];
+      if (fmt === 'AV01') videoPid = d.pmtPids[i];
+      else if (fmt === 'Opus') audioPid = d.pmtPids[i];
+    }
+  }
+  let videoMbps = 0;
+  let audioKbps = 0;
+  let ccErrors = 0;
+  for (let i = 0; i < d.pids.length; i++) {
+    if (d.pids[i] === videoPid) videoMbps = d.bitratesMbps[i];
+    else if (d.pids[i] === audioPid) audioKbps = d.bitratesMbps[i] * 1000;
+    ccErrors += d.ccErrors[i];
+  }
+  const demuxErrs = d.errorMsg.length;
+  return `video ${videoMbps.toFixed(1)} Mbps • audio ${audioKbps.toFixed(0)} kbps • CC errors ${ccErrors} • demux errors ${demuxErrs}`;
 }
 
 document.addEventListener('visibilitychange', () => {

@@ -2,7 +2,7 @@
 // GitHub issue reports. Called from the "Copy Info" and "Download" buttons.
 
 import type { DebugStore } from './store';
-import type { DebugDiagnostics } from './types';
+import type { DebugDiagnostics, DemuxStats } from './types';
 
 export async function buildDiagnostics(store: DebugStore): Promise<DebugDiagnostics> {
   const nav = navigator as any;
@@ -27,7 +27,7 @@ export async function buildDiagnostics(store: DebugStore): Promise<DebugDiagnost
     audio: store.audioStats.value,
     render: store.renderStats.value,
     srt: store.srtStats.value,
-    demux: store.demuxStats.value,
+    demux: serializeDemux(store.demuxStats.value),
     latencyMs: store.latencyMs.value,
     certMode: store.certMode.value,
     history: store.history.value,
@@ -58,4 +58,38 @@ function formatStamp(): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
     `-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
+// Typed arrays JSON-serialize as index-keyed objects, so flatten them to plain
+// arrays for the diagnostics export. Packet-ring fields are omitted (large and
+// covered by the packet-timeline view in the panel itself).
+function serializeDemux(d: DemuxStats | null): DebugDiagnostics['demux'] {
+  if (!d) return null;
+  return {
+    programNum: d.programNum,
+    pmtPid: d.pmtPid,
+    pmtPids: Array.from(d.pmtPids),
+    pmtStreamTypes: Array.from(d.pmtStreamTypes),
+    pmtFormatIds: d.pmtFormatIds,
+    pids: Array.from(d.pids),
+    pesCounts: Array.from(d.pesCounts),
+    byteTotals: Array.from(d.byteTotals),
+    bitratesMbps: Array.from(d.bitratesMbps),
+    raCounts: Array.from(d.raCounts),
+    lastPts: Array.from(d.lastPts),
+    lastDts: Array.from(d.lastDts),
+    ptsJumps: Array.from(d.ptsJumps),
+    ccErrors: Array.from(d.ccErrors),
+    teiCounts: Array.from(d.teiCounts),
+    pusiCounts: Array.from(d.pusiCounts),
+    scramblingCounts: Array.from(d.scramblingCounts),
+    afControlCounts: Array.from(d.afControlCounts),
+    pcrPids: Array.from(d.pcrPids),
+    pcrIntervalsMs: Array.from(d.pcrIntervalsMs),
+    pcrJitterMs: Array.from(d.pcrJitterMs),
+    nalPids: Array.from(d.nalPids),
+    nalStats: Array.from(d.nalStats),
+    errorT: Array.from(d.errorT),
+    errorMsg: d.errorMsg,
+  };
 }

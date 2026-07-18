@@ -17,7 +17,6 @@ export function SrtTab({ store }: Props): JSX.Element {
   }, []);
 
   const srt = store.srtStats.value;
-  const demux = store.demuxStats.value;
 
   if (!srt) return <div>Not connected</div>;
 
@@ -51,26 +50,6 @@ export function SrtTab({ store }: Props): JSX.Element {
             {row('Buffered', `${srt.rxBuffered}`)}
             {row('ACK count', `${srt.rxAck}`)}
             {row('NAK count', `${srt.rxNak}`)}
-          </tbody>
-        </table>
-      </div>
-
-      <div class="debug-section">
-        <h3>Demuxer Stats</h3>
-        <table class="debug-table">
-          <tbody>
-            {demux ? (
-              <>
-                {row('PAT', `${demux.pat}`)}
-                {row('PMT', `${demux.pmt}`)}
-                {row('PES', `${demux.pes}`)}
-                {row('Random Access', `${demux.ra}`)}
-                {row('Errors', `${demux.err}`, demux.err > 0 ? 'stat-bad' : 'stat-good')}
-                {row('Raw events', `${demux.raw}`)}
-              </>
-            ) : (
-              row('Status', 'No demux stats yet')
-            )}
           </tbody>
         </table>
       </div>

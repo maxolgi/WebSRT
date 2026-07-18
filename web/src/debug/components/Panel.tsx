@@ -5,6 +5,7 @@ import { StreamTab } from './StreamTab'
 import { CodecTab } from './CodecTab'
 import { GpuTab } from './GpuTab'
 import { SrtTab } from './SrtTab'
+import { DemuxTab } from './DemuxTab'
 import { DevToolsTab } from './DevToolsTab'
 import { ConsoleTab } from './ConsoleTab'
 import { TestTab } from './TestTab'
@@ -18,6 +19,7 @@ const TABS = [
   { id: 'codec', label: 'Codec' },
   { id: 'gpu', label: 'GPU' },
   { id: 'srt', label: 'SRT' },
+  { id: 'demux', label: 'Demux' },
   { id: 'devtools', label: 'DevTools' },
   { id: 'console', label: 'Console' },
   { id: 'test', label: 'Test' },
@@ -66,6 +68,7 @@ export function DebugPanel({ store }: Props) {
         {activeTab === 'codec' && <CodecTab store={store} />}
         {activeTab === 'gpu' && <GpuTab store={store} />}
         {activeTab === 'srt' && <SrtTab store={store} />}
+        {activeTab === 'demux' && <DemuxTab store={store} />}
         {activeTab === 'devtools' && <DevToolsTab />}
         {activeTab === 'console' && <ConsoleTab store={store} />}
         {activeTab === 'test' && <TestTab store={store} />}

@@ -1,5 +1,6 @@
 import init, { SrtReceiver, type SrtAction, type SrtStats } from '../wasm/srt-wasm/srt_wasm.js';
 import { Demuxer } from './demux';
+import type { DemuxStats } from './debug/types';
 
 export interface StatsMsg {
   elapsedMs: number;
@@ -21,14 +22,7 @@ export interface StatsMsg {
   txBuffered: number;
 }
 
-export interface DemuxStatsMsg {
-  pat: number;
-  pmt: number;
-  pes: number;
-  ra: number;
-  err: number;
-  raw: number;
-}
+export type DemuxStatsMsg = DemuxStats;
 
 export type WorkerCmd =
   | { cmd: 'init'; url: string; certHash: Uint8Array | null; latencyMs: number }
@@ -402,7 +396,54 @@ function serializeStats(s: SrtStats): StatsMsg {
   };
 }
 
-function getDemuxStats(): DemuxStatsMsg {
-  const s = (globalThis as any).__demuxStats ?? { pat: 0, pmt: 0, pes: 0, ra: 0, err: 0, raw: 0 };
-  return { pat: s.pat, pmt: s.pmt, pes: s.pes, ra: s.ra, err: s.err, raw: s.raw };
+function getDemuxStats(): DemuxStatsMsg | undefined {
+  if (!demux) return undefined;
+  // The snapshot is a wasm-bindgen struct holding a WASM pointer — it cannot
+  // be structured-cloned across the worker boundary, and it must be freed.
+  // Each typed-array getter already `.slice()`s into a JS-owned buffer, so we
+  // read every field into a plain POJO, then free the WASM struct.
+  const snap = demux.debugSnapshot();
+  try {
+    return {
+      programNum: snap.programNum,
+      pmtPid: snap.pmtPid,
+      pmtPids: snap.pmtPids,
+      pmtStreamTypes: snap.pmtStreamTypes,
+      pmtFormatIds: snap.pmtFormatIds,
+      pids: snap.pids,
+      pesCounts: snap.pesCounts,
+      byteTotals: snap.byteTotals,
+      bitratesMbps: snap.bitratesMbps,
+      raCounts: snap.raCounts,
+      lastPts: snap.lastPts,
+      lastDts: snap.lastDts,
+      ptsJumps: snap.ptsJumps,
+      ccErrors: snap.ccErrors,
+      teiCounts: snap.teiCounts,
+      pusiCounts: snap.pusiCounts,
+      scramblingCounts: snap.scramblingCounts,
+      afControlCounts: snap.afControlCounts,
+      pcrPids: snap.pcrPids,
+      pcrIntervalsMs: snap.pcrIntervalsMs,
+      pcrJitterMs: snap.pcrJitterMs,
+      nalPids: snap.nalPids,
+      nalStats: snap.nalStats,
+      errorT: snap.errorT,
+      errorMsg: snap.errorMsg,
+      ringT: snap.ringT,
+      ringPid: snap.ringPid,
+      ringKind: snap.ringKind,
+      ringPts: snap.ringPts,
+      ringDts: snap.ringDts,
+      ringSize: snap.ringSize,
+      ringRa: snap.ringRa,
+      ringCcErr: snap.ringCcErr,
+      ringTei: snap.ringTei,
+      ringPusi: snap.ringPusi,
+      ringNal: snap.ringNal,
+      ringNalOffsets: snap.ringNalOffsets,
+    };
+  } finally {
+    snap.free();
+  }
 }

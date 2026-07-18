@@ -38,13 +38,79 @@ export interface RenderStats {
   rafDeltaMs: number;
 }
 
+// Mirrors the WASM `DebugSnapshot` (crates/mpeg2ts-wasm/src/lib.rs).
+// Every typed array is a fresh JS-owned copy; the snapshot struct is GC'd.
+// Per-PID arrays are parallel to `pids`; `scramblingCounts`/`afControlCounts`
+// are flat 4×N, `nalStats` is flat 9×M (see WASM doc comment).
 export interface DemuxStats {
-  pat: number;
-  pmt: number;
-  pes: number;
-  ra: number;
-  err: number;
-  raw: number;
+  programNum: number;
+  pmtPid: number;
+  pmtPids: Uint16Array;
+  pmtStreamTypes: Uint8Array;
+  pmtFormatIds: string[];
+  pids: Uint16Array;
+  pesCounts: Float64Array;
+  byteTotals: Float64Array;
+  bitratesMbps: Float64Array;
+  raCounts: Float64Array;
+  lastPts: Float64Array;
+  lastDts: Float64Array;
+  ptsJumps: Float64Array;
+  ccErrors: Float64Array;
+  teiCounts: Float64Array;
+  pusiCounts: Float64Array;
+  scramblingCounts: Float64Array;
+  afControlCounts: Float64Array;
+  pcrPids: Uint16Array;
+  pcrIntervalsMs: Float64Array;
+  pcrJitterMs: Float64Array;
+  nalPids: Uint16Array;
+  nalStats: Float64Array;
+  errorT: Float64Array;
+  errorMsg: string[];
+  // Packet ring — populated by WASM, rendered by the packet-timeline commit.
+  ringT: Float64Array;
+  ringPid: Uint16Array;
+  ringKind: Uint8Array;
+  ringPts: Float64Array;
+  ringDts: Float64Array;
+  ringSize: Float64Array;
+  ringRa: Uint8Array;
+  ringCcErr: Uint8Array;
+  ringTei: Uint8Array;
+  ringPusi: Uint8Array;
+  ringNal: Uint8Array;
+  ringNalOffsets: Uint32Array;
+}
+
+// Plain-JSON form of DemuxStats (typed arrays → number[]) for the
+// diagnostics export, so the downloaded JSON reads as arrays not index-objects.
+export interface DemuxStatsSerialized {
+  programNum: number;
+  pmtPid: number;
+  pmtPids: number[];
+  pmtStreamTypes: number[];
+  pmtFormatIds: string[];
+  pids: number[];
+  pesCounts: number[];
+  byteTotals: number[];
+  bitratesMbps: number[];
+  raCounts: number[];
+  lastPts: number[];
+  lastDts: number[];
+  ptsJumps: number[];
+  ccErrors: number[];
+  teiCounts: number[];
+  pusiCounts: number[];
+  scramblingCounts: number[];
+  afControlCounts: number[];
+  pcrPids: number[];
+  pcrIntervalsMs: number[];
+  pcrJitterMs: number[];
+  nalPids: number[];
+  nalStats: number[];
+  errorT: number[];
+  errorMsg: string[];
 }
 
 export interface GpuInfo {
@@ -74,6 +140,9 @@ export interface TimeSeriesBucket {
   audioQueueDepth: number;
   fps: number;
   rafDeltaMs: number;
+  videoMbps: number;
+  audioMbps: number;
+  ccErrors: number;
 }
 
 export interface DebugDiagnostics {
@@ -91,7 +160,7 @@ export interface DebugDiagnostics {
   audio: AudioStats | null;
   render: RenderStats | null;
   srt: unknown | null;
-  demux: DemuxStats | null;
+  demux: DemuxStatsSerialized | null;
   latencyMs: number;
   certMode: string;
   history: TimeSeriesBucket[];
