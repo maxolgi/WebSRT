@@ -15,8 +15,8 @@
         transition: padding 0.2s ease;
       }
       body.debug-open {
-        padding-right: 496px;
       }
+      body.resizing { transition: none; }
       h1 { font-size: 1.1rem; }
       video, canvas { background: #000; display: block; }
       #video-canvas { width: 100%; height: auto; }
@@ -44,6 +44,14 @@
         font-size: 12px; box-shadow: -4px 0 16px rgba(0,0,0,0.5);
       }
       #debug-root.visible { display: flex; }
+      .debug-resizer {
+        position: fixed; top: 0; right: 480px; width: 7px; height: 100vh;
+        cursor: col-resize; z-index: 10001; background: transparent;
+        transition: background 0.15s; display: none;
+        transform: translateX(50%);
+      }
+      .debug-resizer.visible { display: block; }
+      .debug-resizer:hover, .debug-resizer.dragging { background: transparent; }
 
       .debug-header {
         display: flex; align-items: center; gap: 8px; padding: 8px;

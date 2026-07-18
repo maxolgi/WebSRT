@@ -19,6 +19,53 @@ const muteBtn = document.getElementById('mute') as HTMLButtonElement;
 const debugToggle = document.getElementById('debug-toggle') as HTMLButtonElement;
 const debugRoot = document.getElementById('debug-root') as HTMLDivElement;
 
+// --- Debug panel resize handle (left edge, horizontal) ---
+// Lives on document.body, NOT inside #debug-root, so Preact's diff never
+// touches it. Positioned fixed at the panel's left border.
+const PANEL_MIN_W = 320;
+const PANEL_MAX_W_RATIO = 0.85;
+const resizer = document.createElement('div');
+resizer.className = 'debug-resizer';
+document.body.appendChild(resizer);
+
+function syncResizerPosition() {
+  const w = debugRoot.offsetWidth;
+  resizer.style.right = `${w}px`;
+  document.body.style.paddingRight = `${w + 16}px`;
+}
+
+{
+  const savedW = localStorage.getItem('websrt-debug-width');
+  if (savedW) debugRoot.style.width = `${savedW}px`;
+
+  let dragging = false;
+  resizer.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    dragging = true;
+    resizer.classList.add('dragging');
+    document.body.classList.add('resizing');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const maxW = window.innerWidth * PANEL_MAX_W_RATIO;
+    const w = Math.min(maxW, Math.max(PANEL_MIN_W, window.innerWidth - e.clientX));
+    debugRoot.style.width = `${w}px`;
+    resizer.style.right = `${w}px`;
+    document.body.style.paddingRight = `${w + 16}px`;
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    resizer.classList.remove('dragging');
+    document.body.classList.remove('resizing');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    localStorage.setItem('websrt-debug-width', String(debugRoot.offsetWidth));
+  });
+}
+
 let audioEl: HTMLAudioElement | null = null;
 let audioReady = false;
 let reconnectTimer: number | null = null;
@@ -133,8 +180,10 @@ fullscreenBtn.addEventListener('click', () => {
 function setPanelVisible(visible: boolean) {
   store.panelVisible.value = visible;
   debugRoot.classList.toggle('visible', visible);
+  resizer.classList.toggle('visible', visible);
   document.body.classList.toggle('debug-open', visible);
   if (visible) {
+    syncResizerPosition();
     localStorage.setItem('websrt-debug-open', '1');
     if (!panelMounted) {
       render(<DebugPanel store={store} />, debugRoot);
@@ -144,6 +193,7 @@ function setPanelVisible(visible: boolean) {
       worker?.postMessage({ cmd: 'debug-rate', ms: 250 });
     }
   } else {
+    document.body.style.paddingRight = '';
     localStorage.removeItem('websrt-debug-open');
     if (samplerCleanup) {
       samplerCleanup();
