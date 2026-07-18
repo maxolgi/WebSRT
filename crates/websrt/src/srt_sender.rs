@@ -64,6 +64,8 @@ pub enum SenderAction {
     Close,
     /// Informational log message.
     Log(String),
+    /// Drain returned WaitForData — used for instrumentation only.
+    DrainWait(std::time::Duration),
 }
 
 /// The gateway-side SRT state machine. Owns Connect during handshake and
@@ -75,6 +77,10 @@ pub struct SrtInitiator {
     local_addr: IpAddr,
     last_stats: Option<SocketStatistics>,
     pushed: u64,
+    /// Total ReleaseData actions produced by drain() — independent of the
+    /// session-level pub_release_total counter, to detect counting bugs.
+    pub drain_releases: u64,
+    pub drain_release_bytes: u64,
 }
 
 enum InitiatorState {
@@ -117,6 +123,8 @@ impl SrtInitiator {
             local_addr,
             last_stats: None,
             pushed: 0,
+            drain_releases: 0,
+            drain_release_bytes: 0,
         }
     }
 
@@ -150,10 +158,17 @@ impl SrtInitiator {
                     Action::WaitForData(d) => {
                         wait = Some(d);
                     }
+                    Action::ReleaseData((ts, bytes)) => {
+                        self.drain_releases += 1;
+                        self.drain_release_bytes += bytes.len() as u64;
+                        out.push(SenderAction::ReleaseData((ts, bytes)));
+                    }
                     _ => {}
                 }
                 // drain() may overwrite `wait` with a fresher duration.
-                if let Some(d) = drain(duplex, now, &mut out, &mut self.last_stats) {
+                let (drain_out, drain_wait) = drain_with_counts(duplex, now, &mut self.last_stats, &mut self.drain_releases, &mut self.drain_release_bytes);
+                out.extend(drain_out);
+                if let Some(d) = drain_wait {
                     wait = Some(d);
                 }
             }
@@ -184,7 +199,9 @@ impl SrtInitiator {
             }
             InitiatorState::Connected(duplex) => {
                 duplex.handle_packet_input(now, Ok((packet, self.remote)));
-                wait = drain(duplex, now, &mut out, &mut self.last_stats);
+                let (drain_out, drain_wait) = drain_with_counts(duplex, now, &mut self.last_stats, &mut self.drain_releases, &mut self.drain_release_bytes);
+                out.extend(drain_out);
+                wait = drain_wait;
             }
             InitiatorState::Closed => {}
         }
@@ -237,13 +254,52 @@ fn drain(
                 out.push(SenderAction::ReleaseData((ts, bytes)));
             }
             Action::UpdateStatistics(s) => { *stats = Some(s.clone()); continue; }
-            Action::WaitForData(d) => return Some(d),
+            Action::WaitForData(d) => {
+                out.push(SenderAction::DrainWait(d));
+                return Some(d);
+            }
             Action::Close => {
                 out.push(SenderAction::Close);
                 return None;
             }
         }
     }
+}
+
+/// Same as drain() but counts ReleaseData actions into the initiator's counters.
+fn drain_with_counts(
+    duplex: &mut DuplexConnection,
+    now: Instant,
+    stats: &mut Option<SocketStatistics>,
+    release_count: &mut u64,
+    release_bytes: &mut u64,
+) -> (Vec<SenderAction>, Option<Duration>) {
+    let mut out = Vec::new();
+    let mut wait = None;
+    loop {
+        let action = duplex.handle_input(now, Input::DataReleased);
+        match action {
+            Action::SendPacket((pkt, _addr)) => {
+                out.push(SenderAction::SendDatagram(serialize_packet(&pkt)));
+            }
+            Action::ReleaseData((ts, bytes)) => {
+                *release_count += 1;
+                *release_bytes += bytes.len() as u64;
+                out.push(SenderAction::ReleaseData((ts, bytes)));
+            }
+            Action::UpdateStatistics(s) => { *stats = Some(s.clone()); continue; }
+            Action::WaitForData(d) => {
+                out.push(SenderAction::DrainWait(d));
+                wait = Some(d);
+                break;
+            }
+            Action::Close => {
+                out.push(SenderAction::Close);
+                break;
+            }
+        }
+    }
+    (out, wait)
 }
 
 fn process_hs_result(

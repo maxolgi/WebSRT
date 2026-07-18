@@ -161,6 +161,14 @@ impl BrowserSession {
             finished: AtomicBool::new(false),
             latency_ms,
             publish_tx,
+            publish_try_send_drops: AtomicU64::new(0),
+            publish_tick_try_send_drops: AtomicU64::new(0),
+            publish_release_total: AtomicU64::new(0),
+            publish_bytes_total: AtomicU64::new(0),
+            viewer_pushed_bytes: AtomicU64::new(0),
+            viewer_sent_datagrams: AtomicU64::new(0),
+            drain_wait_count: AtomicU64::new(0),
+            drain_wait_last_us: AtomicU64::new(0),
         });
 
         // Kick off the handshake immediately so the INDUCTION packet leaves
@@ -241,12 +249,26 @@ impl BrowserSession {
                     match &action {
                         SenderAction::ReleaseData((ts, bytes)) => {
                             if let Some(tx) = &entry.publish_tx {
-                                let _ = tx.try_send((*ts, bytes.clone()));
+                                entry.publish_release_total.fetch_add(1, Ordering::Relaxed);
+                                entry.publish_bytes_total.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                                if tx.try_send((*ts, bytes.clone())).is_err() {
+                                    entry.publish_try_send_drops.fetch_add(1, Ordering::Relaxed);
+                                    tracing::debug!(
+                                        session_id = entry.session_id,
+                                        queued = tx.capacity(),
+                                        "publish_tx try_send drop in recv_pump"
+                                    );
+                                }
                             }
                             continue;
                         }
                         SenderAction::Close => {
                             should_close = true;
+                        }
+                        SenderAction::DrainWait(d) => {
+                            entry.drain_wait_count.fetch_add(1, Ordering::Relaxed);
+                            entry.drain_wait_last_us.store(d.as_micros() as u64, Ordering::Relaxed);
+                            continue;
                         }
                         _ => {}
                     }
@@ -297,6 +319,9 @@ pub(crate) fn send_action(
         }
         SenderAction::Log(s) => {
             tracing::info!("session: log: {s}");
+        }
+        SenderAction::DrainWait(_) => {
+            // Instrumentation only; handled by caller.
         }
     }
     Ok(())

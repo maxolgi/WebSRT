@@ -22,7 +22,7 @@ use crate::ingest::TsMessage;
 use crate::session::{send_action, LossInjector};
 use crate::srt_sender::SrtInitiator;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
@@ -49,6 +49,29 @@ pub(crate) struct SessionEntry {
     /// Channel for routing upstream data (browser→gateway) to a broadcaster.
     /// None for viewer-only sessions.
     pub publish_tx: Option<tokio::sync::mpsc::Sender<TsMessage>>,
+    /// Publish-path: ReleaseData arrived in recv_pump but try_send to the
+    /// publish mpsc failed (channel full). Increments forever; logged every
+    /// 5s in the ticker stats line. 0 on viewer-only sessions.
+    pub publish_try_send_drops: AtomicU64,
+    /// Publish-path: ReleaseData arrived in tick_all but try_send failed.
+    /// Same semantics as above, but for the (rarer) tick-driven release path.
+    pub publish_tick_try_send_drops: AtomicU64,
+    /// Publish-path: total ReleaseData events observed across both paths
+    /// (drops + successes). Lets us compute a drop rate in the log line.
+    pub publish_release_total: AtomicU64,
+    /// Publish-path: total bytes released by ReleaseData. Lets us compute
+    /// the actual ingest byte rate independent of message count.
+    pub publish_bytes_total: AtomicU64,
+    /// Viewer-path: total bytes pushed to this session's SrtInitiator via
+    /// push_message. Lets us compare publish byte rate vs viewer push rate.
+    pub viewer_pushed_bytes: AtomicU64,
+    /// Viewer-path: total SendDatagram actions emitted to this session's
+    /// WT connection. Lets us compare push rate vs actual datagram sends.
+    pub viewer_sent_datagrams: AtomicU64,
+    /// Drain loop returned WaitForData this many times (across recv_pump + tick_all).
+    pub drain_wait_count: AtomicU64,
+    /// Last WaitForData duration (microseconds) from drain.
+    pub drain_wait_last_us: AtomicU64,
 }
 
 /// Central registry of active sessions, polled once per ~2ms by a single
@@ -108,11 +131,19 @@ impl SessionRegistry {
             // no pending viewer data. If try_recv does return a message, we
             // MUST hold onto it — consuming-and-dropping it here would lose
             // TS packets and corrupt the video stream.
+            //
+            // Publish sessions are exempt: their SRT receiver holds incoming
+            // data in a TSBPD buffer that drains on each tick(). Skipping
+            // based on next_deadline starves the drain, causing data to pile
+            // up and eventually be released too late (or not at all). The
+            // tick() call is cheap when there's nothing to release.
+            let is_publish = entry.publish_tx.is_some();
             let mut fast_path_msg = {
                 let next = *entry.next_deadline.lock().unwrap();
-                if now >= next {
-                    // Deadline arrived — service unconditionally. Don't
-                    // consume a message here; the drain loop below handles it.
+                if now >= next || is_publish {
+                    // Deadline arrived (or publish session — always service).
+                    // Don't consume a message here; the drain loop below
+                    // handles it.
                     None
                 } else {
                     // Check for new data without losing it.
@@ -127,7 +158,7 @@ impl SessionRegistry {
                     }
                 }
             };
-            if fast_path_msg.is_none() && now < *entry.next_deadline.lock().unwrap() {
+            if fast_path_msg.is_none() && !is_publish && now < *entry.next_deadline.lock().unwrap() {
                 continue;
             }
 
@@ -143,6 +174,7 @@ impl SessionRegistry {
                 // BEFORE draining the rest, to preserve arrival order.
                 if let Some(m) = fast_path_msg.take() {
                     if init.is_connected() {
+                        entry.viewer_pushed_bytes.fetch_add(m.1.len() as u64, Ordering::Relaxed);
                         let (a, w) = init.push_message(m, now);
                         actions.extend(a);
                         wait = w;
@@ -162,6 +194,7 @@ impl SessionRegistry {
                         };
                         match maybe_msg {
                             Some(Ok(Some(m))) => {
+                                entry.viewer_pushed_bytes.fetch_add(m.1.len() as u64, Ordering::Relaxed);
                                 let (a, w) = init.push_message(m, now);
                                 actions.extend(a);
                                 wait = w;
@@ -206,8 +239,25 @@ impl SessionRegistry {
                     match &action {
                         crate::srt_sender::SenderAction::ReleaseData((ts, bytes)) => {
                             if let Some(tx) = &entry.publish_tx {
-                                let _ = tx.try_send((*ts, bytes.clone()));
+                                entry.publish_release_total.fetch_add(1, Ordering::Relaxed);
+                                entry.publish_bytes_total.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                                if tx.try_send((*ts, bytes.clone())).is_err() {
+                                    entry.publish_tick_try_send_drops.fetch_add(1, Ordering::Relaxed);
+                                    tracing::debug!(
+                                        session_id = entry.session_id,
+                                        queued = tx.capacity(),
+                                        "publish_tx try_send drop in tick_all"
+                                    );
+                                }
                             }
+                            continue;
+                        }
+                        crate::srt_sender::SenderAction::SendDatagram(_) => {
+                            entry.viewer_sent_datagrams.fetch_add(1, Ordering::Relaxed);
+                        }
+                        crate::srt_sender::SenderAction::DrainWait(d) => {
+                            entry.drain_wait_count.fetch_add(1, Ordering::Relaxed);
+                            entry.drain_wait_last_us.store(d.as_micros() as u64, Ordering::Relaxed);
                             continue;
                         }
                         crate::srt_sender::SenderAction::Close => {

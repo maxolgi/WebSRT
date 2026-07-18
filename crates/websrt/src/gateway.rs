@@ -13,6 +13,7 @@ use anyhow::Result;
 use percent_encoding::percent_decode_str;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -462,12 +463,25 @@ async fn run_ticker(registry: Arc<SessionRegistry>, shutdown: impl Future<Output
                 }
                 for e in &entries {
                     let is_publish = e.publish_tx.is_some();
+                    let viewer_lag = e.viewer.lock().unwrap().as_ref().map(|v| v.lag_count()).unwrap_or(0);
                     let init = e.initiator.lock().await;
                     if let Some(s) = init.stats() {
+                        let publish_drops_recv = e.publish_try_send_drops.load(Ordering::Relaxed);
+                        let publish_drops_tick = e.publish_tick_try_send_drops.load(Ordering::Relaxed);
+                        let publish_total = e.publish_release_total.load(Ordering::Relaxed);
+                        let publish_drop_pct = if publish_total > 0 {
+                            ((publish_drops_recv + publish_drops_tick) as f64 / publish_total as f64 * 100.0) as f64
+                        } else {
+                            0.0
+                        };
+                        let publish_bytes = e.publish_bytes_total.load(Ordering::Relaxed);
+                        let viewer_pushed = e.viewer_pushed_bytes.load(Ordering::Relaxed);
+                        let viewer_dgrams = e.viewer_sent_datagrams.load(Ordering::Relaxed);
                         tracing::info!(
                             session_id = e.session_id,
                             publish = is_publish,
                             rx_data = s.rx_data,
+                            rx_unique = s.rx_unique_data,
                             rx_loss = s.rx_loss_data,
                             rx_drop = s.rx_dropped_data,
                             rx_retransmit = s.rx_retransmit_data,
@@ -477,6 +491,22 @@ async fn run_ticker(registry: Arc<SessionRegistry>, shutdown: impl Future<Output
                             tx_loss = s.tx_loss_data,
                             tx_retransmit = s.tx_retransmit_data,
                             rx_bw_bps = s.rx_bandwidth,
+                            rx_clk_adj = s.rx_clock_adjustments,
+                            rx_clk_drift = s.rx_clock_drift_mean,
+                            rx_clk_stddev = s.rx_clock_drift_stddev,
+                            rx_buf_time = ?s.rx_acknowledged_time,
+                            viewer_lag = viewer_lag,
+                            pub_drops_recv = publish_drops_recv,
+                            pub_drops_tick = publish_drops_tick,
+                            pub_release_total = publish_total,
+                            pub_bytes = publish_bytes,
+                            viewer_pushed_bytes = viewer_pushed,
+                            viewer_sent_dgrams = viewer_dgrams,
+                            drain_waits = e.drain_wait_count.load(Ordering::Relaxed),
+                            drain_wait_us = e.drain_wait_last_us.load(Ordering::Relaxed),
+                            init_releases = init.drain_releases,
+                            init_release_bytes = init.drain_release_bytes,
+                            pub_drop_pct = publish_drop_pct,
                             "session stats"
                         );
                     }
