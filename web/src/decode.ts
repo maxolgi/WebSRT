@@ -581,11 +581,18 @@ function parseAv1SeqHeader(sh: Uint8Array): Av1SeqInfo | null {
   return { profile, levelIdx, tier, bitDepth, width, height, monoChrome };
 }
 
-/** Build a WebCodecs AV1 codec string: `av01.<profile>.<LL><tier>.<DD>`. */
+/**
+ * Build a WebCodecs AV1 codec string: `av01.<profile>.<LL><tier>.<DD>`.
+ *
+ * NOTE: the level (seq_level_idx) and bit-depth fields are 2-digit DECIMAL,
+ * not hex. Hex-encoding values >= 10 (e.g. level 12 -> "0c", 10-bit -> "0a")
+ * produces strings Chrome rejects as "Unknown or ambiguous codec name",
+ * leaving the decoder in a configure -> error loop with no decoded frames.
+ */
 function buildAv1CodecString(info: Av1SeqInfo): string {
-  const ll = info.levelIdx.toString(16).padStart(2, '0');
+  const ll = info.levelIdx.toString().padStart(2, '0');
   const tierCh = info.tier === 0 ? 'M' : 'H';
-  const dd = info.bitDepth.toString(16).padStart(2, '0');
+  const dd = info.bitDepth.toString().padStart(2, '0');
   return `av01.${info.profile}.${ll}${tierCh}.${dd}`;
 }
 
@@ -609,6 +616,7 @@ export class VideoPipeline {
   private pendingAv1: { payload: Uint8Array; pts: number | null; isKey: boolean }[] = [];
   private static readonly PENDING_CAP = 30;
   private configured = false;
+  private configuring = false;
   private decodedCount = 0;
   private seenKeyframe = false;
   private droppedVideo = 0;
@@ -786,7 +794,7 @@ export class VideoPipeline {
     }
 
     if (!this.configured) {
-      if (this.av1ShRaw) this.configureAv1();
+      if (this.av1ShRaw && !this.configuring) this.configureAv1();
       this.pendingAv1.push({ payload, pts, isKey });
       if (this.pendingAv1.length > VideoPipeline.PENDING_CAP) {
         this.pendingAv1.splice(0, this.pendingAv1.length - VideoPipeline.PENDING_CAP);
@@ -835,87 +843,104 @@ export class VideoPipeline {
     }
   }
 
-  private configureAv1() {
-    if (!this.av1ShRaw) return;
-    const info = this.av1ShInfo;
-    // Chrome accepts the raw Sequence Header OBU (header + size + payload) as
-    // the decoder `description`; it parses bitdepth/chroma/subsampling from it.
-    const description = this.av1ShRaw;
+  private async configureAv1() {
+    if (!this.av1ShRaw || this.configuring) return;
+    this.configuring = true;
+    try {
+      const info = this.av1ShInfo;
+      // Chrome accepts the raw Sequence Header OBU (header + size + payload) as
+      // the decoder `description`; it parses bitdepth/chroma/subsampling from it.
+      const description = this.av1ShRaw;
 
-    // Validate the parsed SH: AV1 profiles are 0/1/2, bitdepths 8/10/12. If the
-    // parse desynced (e.g. a misaligned OBU captured as type-1, or an SH with
-    // features we don't fully parse), don't trust the extracted fields — pass
-    // only the raw `description` + a generic codec string and let Chrome parse
-    // the authoritative values from the SH OBU itself.
-    const infoValid = info !== null
-      && (info.profile === 0 || info.profile === 1 || info.profile === 2)
-      && (info.bitDepth === 8 || info.bitDepth === 10 || info.bitDepth === 12)
-      && info.width > 0 && info.height > 0;
-    const codec = infoValid ? buildAv1CodecString(info!) : null;
-    const codedWidth = infoValid ? info!.width : undefined;
-    const codedHeight = infoValid ? info!.height : undefined;
+      // Validate the parsed SH: AV1 profiles are 0/1/2, bitdepths 8/10/12. If the
+      // parse desynced (e.g. a misaligned OBU captured as type-1, or an SH with
+      // features we don't fully parse), don't trust the extracted fields — pass
+      // only the raw `description` + a generic codec string and let Chrome parse
+      // the authoritative values from the SH OBU itself.
+      const infoValid = info !== null
+        && (info.profile === 0 || info.profile === 1 || info.profile === 2)
+        && (info.bitDepth === 8 || info.bitDepth === 10 || info.bitDepth === 12)
+        && info.width > 0 && info.height > 0;
+      const preferred = infoValid ? buildAv1CodecString(info!) : null;
+      const codedWidth = infoValid ? info!.width : undefined;
+      const codedHeight = infoValid ? info!.height : undefined;
 
-    if (this.decoder) {
-      try { this.decoder.close(); } catch {}
-    }
-    this.decoder = new VideoDecoder({
-      output: (frame) => {
-        this.decodedCount++;
-        this.cb.onFrame(frame);
-      },
-      // On an async decode error Chrome closes the decoder. Drop configured
-      // so the next keyframe (which carries a fresh SH) reconfigures a new
-      // decoder instead of feeding chunks into a dead one forever.
-      error: (e) => {
-        this.configured = false;
-        this.seenKeyframe = false;
-        this.cb.onError(e);
-      },
-    });
-
-    const tryConfigure = (codecStr: string): boolean => {
-      try {
-        this.decoder!.configure({
-          codec: codecStr,
-          description,
-          codedWidth,
-          codedHeight,
-          hardwareAcceleration: 'prefer-hardware',
-        } as VideoDecoderConfig);
-        return true;
-      } catch {
-        return false;
+      if (this.decoder) {
+        try { this.decoder.close(); } catch {}
       }
-    };
+      this.decoder = new VideoDecoder({
+        output: (frame) => {
+          this.decodedCount++;
+          this.cb.onFrame(frame);
+        },
+        // On an async decode error Chrome closes the decoder. Drop configured
+        // so the next keyframe (which carries a fresh SH) reconfigures a new
+        // decoder instead of feeding chunks into a dead one forever.
+        error: (e) => {
+          this.configured = false;
+          this.seenKeyframe = false;
+          this.cb.onError(e);
+        },
+      });
 
-    let chosen = codec;
-    if (!chosen || !tryConfigure(chosen)) {
-      // Fallback: generic Main/level-4.0/8-bit string; the SH `description`
-      // carries the authoritative config to Chrome.
-      if (!chosen) console.warn('VideoPipeline AV1: SH parse invalid or incomplete; falling back to av01.0.08M.08 + raw description');
-      else console.warn(`VideoPipeline AV1: configure(${chosen}) failed; falling back to av01.0.08M.08`);
-      chosen = 'av01.0.08M.08';
-      if (!tryConfigure(chosen)) {
-        this.cb.onError(new Error(`AV1 VideoDecoder.configure failed for ${codec ?? '(no string)'} and fallback`));
+      // MUST validate via isConfigSupported: VideoDecoder.configure() does NOT
+      // throw synchronously for an unsupported codec — it resolves and then
+      // fails later via the error callback. A sync try/catch therefore cannot
+      // detect rejection, which is how the decoder previously got stuck looping
+      // on a bogus codec string. Probe each candidate; first supported wins.
+      // The raw SH `description` carries the authoritative config, so even a
+      // generic fallback string decodes the real bitstream correctly.
+      const candidates: string[] = [];
+      if (preferred) candidates.push(preferred);
+      for (const fb of ['av01.0.08M.08', 'av01.0.08M.10']) {
+        if (!candidates.includes(fb)) candidates.push(fb);
+      }
+
+      const buildCfg = (codecStr: string) => ({
+        codec: codecStr,
+        description,
+        codedWidth,
+        codedHeight,
+        hardwareAcceleration: 'prefer-hardware',
+      } as VideoDecoderConfig);
+
+      let chosen: string | null = null;
+      const tried: string[] = [];
+      for (const c of candidates) {
+        try {
+          const r = await VideoDecoder.isConfigSupported(buildCfg(c));
+          const ok = !!(r && r.supported);
+          tried.push(`${c}->${ok}`);
+          if (ok) { chosen = c; break; }
+        } catch {
+          tried.push(`${c}->err`);
+        }
+      }
+      if (!chosen) {
+        console.warn(`VideoPipeline AV1: no supported codec string (tried ${tried.join(', ')})`);
+        this.cb.onError(new Error(`AV1 VideoDecoder not supported (tried ${tried.join(', ')})`));
         this.decoder = null;
         return;
       }
-    }
 
-    this.configured = true;
-    this.seenKeyframe = false;
-    this.lastCodecString = chosen;
-    this.lastHwAccel = 'prefer-hardware';
-    this.lastProfile = infoValid ? info!.profile : 0;
-    this.lastLevel = infoValid ? info!.levelIdx : 0;
-    this.lastWidth = infoValid ? info!.width : 0;
-    this.lastHeight = infoValid ? info!.height : 0;
-    this.cb.onConfigured({
-      width: infoValid ? info!.width : 0,
-      height: infoValid ? info!.height : 0,
-      profile: infoValid ? info!.profile : 0,
-      level: infoValid ? info!.levelIdx : 0,
-    });
+      this.decoder.configure(buildCfg(chosen));
+      this.configured = true;
+      this.seenKeyframe = false;
+      this.lastCodecString = chosen;
+      this.lastHwAccel = 'prefer-hardware';
+      this.lastProfile = infoValid ? info!.profile : 0;
+      this.lastLevel = infoValid ? info!.levelIdx : 0;
+      this.lastWidth = infoValid ? info!.width : 0;
+      this.lastHeight = infoValid ? info!.height : 0;
+      this.cb.onConfigured({
+        width: infoValid ? info!.width : 0,
+        height: infoValid ? info!.height : 0,
+        profile: infoValid ? info!.profile : 0,
+        level: infoValid ? info!.levelIdx : 0,
+      });
+    } finally {
+      this.configuring = false;
+    }
   }
 
   private configureAvc() {
@@ -1030,6 +1055,7 @@ export class VideoPipeline {
 
   reset() {
     this.configured = false;
+    this.configuring = false;
     this.codec = null;
     this.sps = null;
     this.pps = null;

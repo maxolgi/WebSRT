@@ -460,6 +460,27 @@ async fn run_ticker(registry: Arc<SessionRegistry>, shutdown: impl Future<Output
                         "sessions with WT RTT > 4×latency; consider raising --latency"
                     );
                 }
+                for e in &entries {
+                    let is_publish = e.publish_tx.is_some();
+                    let init = e.initiator.lock().await;
+                    if let Some(s) = init.stats() {
+                        tracing::info!(
+                            session_id = e.session_id,
+                            publish = is_publish,
+                            rx_data = s.rx_data,
+                            rx_loss = s.rx_loss_data,
+                            rx_drop = s.rx_dropped_data,
+                            rx_retransmit = s.rx_retransmit_data,
+                            rx_nak = s.rx_nak,
+                            rx_buf = s.rx_acknowledged_data,
+                            tx_data = s.tx_data,
+                            tx_loss = s.tx_loss_data,
+                            tx_retransmit = s.tx_retransmit_data,
+                            rx_bw_bps = s.rx_bandwidth,
+                            "session stats"
+                        );
+                    }
+                }
             }
             _ = ticker.tick() => {
                 registry.tick_all().await;
