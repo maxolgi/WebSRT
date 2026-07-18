@@ -240,8 +240,16 @@ async fn main() -> Result<()> {
                 };
                 match result {
                     Ok(ingester) => {
+                        // Route by OBS's ?streamid=... if present, else "default".
+                        let stream_name = ingester
+                            .accepted_stream_id()
+                            .map(|s| {
+                                tracing::info!(stream = %s, "publishing SRT stream under OBS streamid");
+                                s.to_string()
+                            })
+                            .unwrap_or_else(|| "default".to_string());
                         tracing::info!("OBS connected; starting broadcaster");
-                        source.publish_stream("default", ingester);
+                        source.publish_stream(&stream_name, ingester);
                     }
                     Err(e) => {
                         tracing::error!(?e, "SRT ingester setup failed");

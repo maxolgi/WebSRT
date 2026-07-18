@@ -14,6 +14,11 @@ pub struct SrtIngester {
     kind: Kind,
     latency: Duration,
     socket: Option<SrtSocket>,
+    /// The stream_id of the currently-connected peer (set on each successful
+    /// accept/dial). Used by the demo binary to route the published stream
+    /// under a name derived from OBS's `?streamid=...`, so viewers can
+    /// subscribe via `?stream=<name>` instead of always `?stream=default`.
+    accepted_stream_id: Option<String>,
 }
 
 impl SrtIngester {
@@ -36,15 +41,19 @@ impl SrtIngester {
             .await
             .map_err(|e| anyhow!("srt listener bind: {e}"))?;
         tracing::info!("SRT listener bound, awaiting OBS connection…");
-        let socket = Self::accept_one(&mut incoming, &streamid).await?;
+        let (socket, accepted_stream_id) = Self::accept_one(&mut incoming, &streamid).await?;
         Ok(Self {
             kind: Kind::Listener(listener, incoming, streamid),
             latency,
             socket: Some(socket),
+            accepted_stream_id,
         })
     }
 
-    async fn accept_one(incoming: &mut SrtIncoming, filter: &Option<String>) -> Result<SrtSocket> {
+    async fn accept_one(
+        incoming: &mut SrtIncoming,
+        filter: &Option<String>,
+    ) -> Result<(SrtSocket, Option<String>)> {
         loop {
             let request = incoming
                 .incoming()
@@ -61,7 +70,7 @@ impl SrtIngester {
             }
             tracing::info!(%remote, ?stream_id, "SRT connection accepted from OBS");
             match request.accept(None).await {
-                Ok(socket) => return Ok(socket),
+                Ok(socket) => return Ok((socket, stream_id)),
                 Err(e) => {
                     tracing::warn!(?e, "SRT accept failed; retrying");
                     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -87,9 +96,12 @@ impl SrtIngester {
         tracing::info!(addr = %addr_str, "SRT caller: dialing OBS…");
         let socket = Self::dial(&addr_str, &streamid, latency).await?;
         Ok(Self {
-            kind: Kind::Caller(addr_str, streamid),
+            kind: Kind::Caller(addr_str, streamid.clone()),
             latency,
             socket: Some(socket),
+            // For caller mode the streamid we *sent* is the best routing hint
+            // (peer's response streamid isn't surfaced by srt-tokio).
+            accepted_stream_id: streamid,
         })
     }
 
@@ -110,13 +122,18 @@ impl SrtIngester {
         match &mut self.kind {
             Kind::Listener(_, incoming, streamid) => {
                 tracing::info!("SRT: OBS disconnected; waiting for reconnect…");
-                Self::accept_one(incoming, streamid).await
+                let (socket, accepted) = Self::accept_one(incoming, streamid).await?;
+                self.accepted_stream_id = accepted;
+                Ok(socket)
             }
             Kind::Caller(addr, streamid) => {
                 tracing::info!(addr, "SRT caller: re-dialing OBS…");
                 loop {
                     match Self::dial(addr, streamid, self.latency).await {
-                        Ok(s) => return Ok(s),
+                        Ok(s) => {
+                            self.accepted_stream_id = streamid.clone();
+                            return Ok(s);
+                        }
                         Err(e) => {
                             tracing::warn!(?e, addr, "SRT reconnect failed; retrying in 2s");
                             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -135,6 +152,14 @@ impl SrtIngester {
                 Err(_) => tracing::warn!("SRT socket close timed out after 5s; dropping"),
             }
         }
+    }
+
+    /// The stream_id reported by the currently-connected peer (OBS), or `None`
+    /// if the peer didn't send one. The demo binary uses this to route the
+    /// published stream under a name matching the streamid so viewers can
+    /// subscribe via `?stream=<streamid>` instead of always `?stream=default`.
+    pub fn accepted_stream_id(&self) -> Option<&str> {
+        self.accepted_stream_id.as_deref()
     }
 }
 
