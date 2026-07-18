@@ -12,17 +12,23 @@ no codec-specific server logic.
 
 The browser runs `srt-protocol` and `mpeg2ts` compiled to WASM; JS is glue only.
 
+The gateway supports **both directions**: OBS → viewers (the original use case)
+and browser → viewers (browser publishes via WebTransport, gateway re-originates
+to other browsers). A browser can even do both simultaneously.
+
 ```
-                ┌─────── Rust gateway ──────┐
-[OBS] --SRT/UDP─▶│ srt-tokio listener         │       ┌── Browser ──────────────────────┐
-                │   ↓ (Instant, Bytes)       │       │ JS: WebTransport datagram I/O    │
-                │ srt-protocol::sender       │       │   ↓ bytes                       │
-                │   ↓ SRT packets (bytes)    │──WT──▶│ WASM: srt-protocol::receiver     │
-                │ wtransport datagram driver │       │   ↓ (Instant, Bytes) messages    │
-                │   ↑ ACK/NAK (bytes)        │◀─WT───│ WASM: mpeg2ts demux              │
-                └────────────────────────────┘       │   ↓ PES / NAL / Opus             │
-                                                     │ JS: WebCodecs decode + render    │
-                                                     └──────────────────────────────────┘
+                 ┌─────── Rust gateway ──────────────┐
+ [OBS] --SRT/UDP─▶│ srt-tokio listener (ingest)        │       ┌── Browser (viewer) ─────────────┐
+                 │   ↓ (Instant, Bytes)               │       │ JS: WebTransport datagram I/O    │
+                 │ broadcaster (broadcast channel)    │       │   ↓ bytes                       │
+ [Browser] ─WT──▶│ SrtInitiator (ingest, publish)     │──WT──▶│ WASM: srt-protocol::receiver     │
+  (publisher)    │   ↓ (Instant, Bytes)               │       │   ↓ (Instant, Bytes) messages    │
+                 │   ↓                                │       │ WASM: mpeg2ts demux              │
+                 │ srt-protocol::sender (per viewer)  │       │   ↓ PES / NAL / Opus             │
+                 │   ↓ SRT packets (bytes)            │       │ JS: WebCodecs decode + render    │
+                 │ wtransport datagram driver         │       └──────────────────────────────────┘
+                 │   ↑ ACK/NAK (bytes)                │
+                 └────────────────────────────────────┘
 ```
 
 ## Key design points
@@ -30,6 +36,11 @@ The browser runs `srt-protocol` and `mpeg2ts` compiled to WASM; JS is glue only.
 - **Gateway is a dumb SRT repeater.** It terminates OBS's SRT connection, takes
   the resulting `(Instant, Bytes)` messages, and re-originates them as a new
   SRT sender to each browser. TS bytes are never inspected server-side.
+- **Browser publishing.** A browser can publish upstream via WebTransport
+  (the gateway runs an SRT receiver over WT datagrams). Published streams are
+  fanned out to viewers exactly like OBS streams — same broadcaster, same
+  per-viewer SRT sender. The publisher muxes TS locally (`ts-muxer-wasm`),
+  sends SRT over WT datagrams to the gateway.
 - **Each browser gets its own SRT sender instance** (independent seq numbers,
   independent retransmit buffer) via `tokio::sync::broadcast` fanout.
 - **Browser runs the same Rust state machines** the gateway does, compiled to
@@ -41,9 +52,10 @@ The browser runs `srt-protocol` and `mpeg2ts` compiled to WASM; JS is glue only.
   on the main thread.
 - **Automatic OBS reconnect.** If OBS disconnects, the gateway waits for a new
   connection — no restart needed.
-- **rAF-gated video presentation.** Decoded frames are buffered and presented
-  at their PTS-aligned wall-clock time via `requestAnimationFrame`, preventing
-  decode-ahead latency drift.
+- **rAF-gated video presentation.** Decoded frames are drawn on the next
+  `requestAnimationFrame`. SRT's TSBPD already provides delivery-time pacing;
+  the renderer simply presents the latest decoded frame without additional
+  playout delay or PTS-based scheduling.
 - **Bounded audio buffering.** The AudioWorklet path uses a fixed-size ring
   buffer with drop-oldest and skip-ahead to prevent latency accumulation.
 
@@ -117,6 +129,32 @@ auto-reconnect via the exponential-backoff logic.
 ```bash
 cargo run -p websrt-gateway -- --input srt --srt-mode caller --srt-call 192.168.1.50:9000
 ```
+
+### Browser publishing (browser-to-browser streaming)
+
+A browser can publish a stream to the gateway, which fans it out to other
+browsers. The publisher encodes video (WebCodecs `VideoEncoder`) and audio,
+muxes to MPEG-TS (`ts-muxer-wasm`), and sends via SRT-over-WebTransport.
+Viewers connect to `?stream=<name>` as usual.
+
+The publish URL pattern is `?publish=<name>` — the gateway creates a
+broadcaster for that stream name, and viewers subscribe via `?stream=<name>`.
+
+```bash
+cargo run -p websrt-gateway  # listener mode, any SRT source
+```
+
+Publisher connects to `https://127.0.0.1:4433/wt?publish=mystream`.
+Viewer connects to `https://127.0.0.1:5173/?stream=mystream`.
+
+The publisher-side SRT uses the same forked `srt-protocol` compiled to WASM
+(`srt-wasm`). The gateway's publish path runs an `SrtInitiator` (SRT receiver
+over WT datagrams) and releases TSBPD-paced messages to the broadcaster.
+
+**Note:** Browser publishing works best with low TSBPD latency (20–120 ms).
+High latency (e.g., 300 ms) is fine for viewing but adds unnecessary buffering
+on the publish side. The gateway services publish sessions on every ticker
+cycle (every 2 ms) to keep the TSBPD release path responsive.
 
 ### Simulated packet loss
 
@@ -235,29 +273,32 @@ See `certs/README.md` for details.
 
 ```
 OBS ──SRT/UDP──► SrtIngester ──► Broadcaster (broadcast channel, depth 4096)
+                                      ▲
+Browser ──WT──► SrtInitiator ────────┘  (publish path: WT dgrams → SRT receiver → ReleaseData)
+(publisher)     (recv_pump + ticker)
+
                                       │
                           ┌───────────┴───────────────┐
                           ▼                           ▼
                    BrowserSession A             BrowserSession B
                    ├── recv_pump                ├── recv_pump
                    │   (WT dgram → SrtInitiator)│   (WT dgram → SrtInitiator)
-                   └── sender_pump              └── sender_pump
-                       (viewer.recv →             (viewer.recv →
-                        SrtInitiator → WT dgram)   SrtInitiator → WT dgram)
+                   └── ticker (shared)          └── ticker (shared)
+                       (viewer.recv →               (viewer.recv →
+                        SrtInitiator → WT dgram)     SrtInitiator → WT dgram)
 ```
 
-The gateway is a **dumb SRT repeater**: it terminates OBS's SRT/UDP connection,
-re-originates TS bytes as a new SRT sender to each browser over WebTransport
-datagrams. TS bytes are never inspected server-side.
+The gateway is a **dumb SRT repeater**: it terminates OBS's SRT/UDP connection
+(or a browser's SRT-over-WT publish session), re-originates TS bytes as a new
+SRT sender to each browser over WebTransport datagrams. TS bytes are never
+inspected server-side.
 
-Each browser session runs two concurrent tokio tasks:
-- **recv_pump** — drains incoming WT datagrams (ACK/NAK from browser) into the
-  SRT initiator state machine.
-- **sender_pump** — drives the 2ms SRT ticker, pushes TS messages from the
-  broadcast subscriber into the initiator, and sends resulting SRT packets as
-  WT datagrams.
-
-The split prevents ACK traffic from starving the sender under load.
+Each browser session runs a **recv_pump** task (drains incoming WT datagrams —
+ACK/NAK from browser — into the SRT initiator state machine) and is serviced by
+a **single centralized ticker** (one task drives all sessions' SRT state
+machines every ~2 ms, eliminating N separate timer tasks). The ticker pushes
+TS messages from each viewer's broadcast subscriber into the initiator and
+sends resulting SRT packets as WT datagrams.
 
 ### Browser pipeline
 
@@ -289,10 +330,10 @@ the main thread free for decoding and rendering. Datagrams are batched (up to
 16 per tick) before posting to the worker. The worker polls the SRT state
 machine every 10ms via `setInterval`.
 
-**Video presentation:** Decoded `VideoFrame`s are buffered in a 4-frame ring.
-A `requestAnimationFrame` loop presents the latest frame whose PTS-mapped
-wall-clock time has arrived. Late frames are dropped; overflow frames are
-dropped. This prevents the decoder from running ahead of realtime.
+**Video presentation:** The latest decoded `VideoFrame` is drawn on the next
+`requestAnimationFrame` callback. No PTS-based ring scheduling or playout
+delay — SRT's TSBPD already paces delivery. If multiple frames are decoded
+between rAF callbacks, only the newest is drawn (skip-ahead, low latency).
 
 **Audio output:** On Chrome, `MediaStreamTrackGenerator` provides implicit
 pacing. On Firefox, the AudioWorklet path uses a bounded `Float32Array` ring
@@ -458,8 +499,9 @@ WebSRT/
           wt_hs_probe.rs      # SRT handshake + TS continuity probe
           mock_obs.rs         # Streams fixture over SRT
           wt_echo_client.rs   # WT datagram round-trip test
-    srt-wasm/                 # wasm-bindgen wrapper around srt-protocol::receiver
+    srt-wasm/                 # wasm-bindgen wrapper around srt-protocol (receiver + sender)
     mpeg2ts-wasm/             # wasm-bindgen wrapper around mpeg2ts::TsDemuxer
+    ts-muxer-wasm/            # wasm-bindgen wrapper around TS muxer (publisher side)
   web/
     index.html                # page shell, loads cert-hash.js
     package.json              # vite + typescript
@@ -472,7 +514,7 @@ WebSRT/
       srt.ts                  # SrtController (legacy main-thread path, unused)
       demux.ts                # Demuxer: wraps mpeg2ts-wasm, dispatches PES events
       decode.ts               # H.264 SPS parser, VideoPipeline, Opus/AAC audio pipelines
-      render.ts               # CanvasRenderer: rAF-gated PTS-based presentation
+      render.ts               # CanvasRenderer: draws latest decoded frame on rAF
       wasm.d.ts               # Type declarations for MediaStreamTrackGenerator
     public/
       cert-hash.js            # runtime-generated (gitignored)
@@ -501,8 +543,8 @@ a warning every 5 seconds if this is violated:
 WARN session: WT RTT suggests latency is too low; consider --latency <recommended>
 ```
 
-The browser's playout delay (video presentation buffering) is automatically set
-to `min(150ms, latency/2)`.
+The renderer does not add its own playout delay — SRT's TSBPD is the only
+latency buffer.
 
 ## Gotchas
 
