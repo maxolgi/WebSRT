@@ -742,7 +742,11 @@ export class VideoPipeline {
       return;
     }
     const data = nalusToLengthPrefixed(decodeNalus);
-    const tsUs = pts != null ? Math.floor(pts / 90) : undefined;
+    // PTS from the demuxer is in 90 kHz units. Convert to microseconds:
+    //   1 unit @ 90 kHz = 1_000_000 / 90_000 µs = 100/9 µs ≈ 11.111 µs.
+    // The previous `pts / 90` produced milliseconds (off by 1000×), which
+    // confused WebCodecs's internal reference-frame / output ordering.
+    const tsUs = pts != null ? Math.floor((pts * 100) / 9) : undefined;
     const chunk = new EncodedVideoChunk({
       type: hasIdr ? 'key' : 'delta',
       timestamp: tsUs ?? 0,
@@ -829,7 +833,9 @@ export class VideoPipeline {
       }
       return;
     }
-    const tsUs = pts != null ? Math.floor(pts / 90) : undefined;
+    // PTS from the demuxer is in 90 kHz units — convert to µs (100/9 per unit).
+    // See emitAu for the rationale; the old `pts / 90` was off by 1000×.
+    const tsUs = pts != null ? Math.floor((pts * 100) / 9) : undefined;
     const chunk = new EncodedVideoChunk({
       type: isKey ? 'key' : 'delta',
       timestamp: tsUs ?? 0,
@@ -1371,7 +1377,9 @@ export class OpusAudioPipeline extends AudioPipelineBase {
     }
     if (!this.decoder || this.decoder.state !== 'configured') return;
 
-    const tsUs = pts != null ? Math.floor(pts / 90) : undefined;
+    // PTS from the demuxer is in 90 kHz units — convert to µs (100/9 per unit).
+    // See VideoPipeline.emitAu for the rationale; old `pts / 90` was off by 1000×.
+    const tsUs = pts != null ? Math.floor((pts * 100) / 9) : undefined;
     this.feedFrame(new EncodedAudioChunk({
       type: 'key',
       timestamp: tsUs ?? 0,
@@ -1434,7 +1442,9 @@ export class AacAudioPipeline extends AudioPipelineBase {
     const aacData = payload.subarray(headerSize);
     if (aacData.length === 0) return;
 
-    const tsUs = pts != null ? Math.floor(pts / 90) : undefined;
+    // PTS from the demuxer is in 90 kHz units — convert to µs (100/9 per unit).
+    // See VideoPipeline.emitAu for the rationale; old `pts / 90` was off by 1000×.
+    const tsUs = pts != null ? Math.floor((pts * 100) / 9) : undefined;
     this.feedFrame(new EncodedAudioChunk({
       type: 'key',
       timestamp: tsUs ?? 0,
