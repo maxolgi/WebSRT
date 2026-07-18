@@ -96,13 +96,19 @@ impl TsMuxer {
         self.last_was_keyframe = is_keyframe;
 
         let pes = build_pes_video(data, pts_90k, dts_90k);
-        let pcr_base = if is_keyframe { Some(pts_90k) } else { None };
+        // Emit PCR on every video frame so receivers can track the sender
+        // clock within TR 101 290's 40 ms interval target (the prior
+        // keyframe-only path produced multi-second PCR gaps). The
+        // random_access_indicator (keyframe access point) is signalled
+        // separately via the `is_keyframe` argument so the join/seek point
+        // is still marked.
         packetize(
             &mut self.output,
             self.video_pid,
             &mut self.video_cc,
             &pes,
-            pcr_base,
+            Some(pts_90k),
+            is_keyframe,
         );
     }
 
@@ -121,6 +127,7 @@ impl TsMuxer {
             &mut self.audio_cc,
             &pes,
             None,
+            false,
         );
     }
 
@@ -213,6 +220,7 @@ fn packetize(
     cc: &mut u8,
     data: &[u8],
     pcr_base: Option<u64>,
+    random_access: bool,
 ) {
     let total = data.len();
     if total == 0 {
@@ -250,10 +258,17 @@ fn packetize(
             pos += 1;
 
             if af_length >= 1 {
+                // PCR flag and random_access_indicator are decoupled: PCR is
+                // emitted on every video frame (this PID is the PMT's
+                // PCR_PID), while random_access_indicator marks a keyframe
+                // access point and is only valid on the first TS packet of
+                // the PES (where PUSI=1).
                 let mut flags = 0u8;
                 if pcr_overhead > 0 {
-                    flags |= 0x40; // random_access_indicator
                     flags |= 0x10; // PCR flag
+                }
+                if first && random_access {
+                    flags |= 0x40; // random_access_indicator
                 }
                 pkt[pos] = flags;
                 pos += 1;
@@ -427,5 +442,53 @@ mod tests {
         m.set_video_codec("nonsense");
         let s = full_section(&mut m);
         assert_eq!(s[12], 0x1B);
+    }
+
+    /// Returns the adaptation-field flags byte of the first video PID packet
+    /// with PUSI set (the PES head, which carries PCR and the random-access
+    /// bit). Asserts an adaptation field is present.
+    fn first_video_pusi_af_flags(out: &[u8]) -> u8 {
+        for chunk in out.chunks(TS_PACKET_SIZE) {
+            let pid = ((chunk[1] as u16 & 0x1F) << 8) | chunk[2] as u16;
+            if pid == VIDEO_PID && (chunk[1] & 0x40 != 0) {
+                assert_eq!(
+                    (chunk[3] >> 4) & 0x03,
+                    0b11,
+                    "first video PES packet must carry an adaptation field"
+                );
+                return chunk[5];
+            }
+        }
+        unreachable!("no video PUSI packet found");
+    }
+
+    #[test]
+    fn pcr_on_every_video_frame_random_access_only_on_keyframe() {
+        // Non-keyframe: PCR must be emitted (TR 101 290 PCR interval), but
+        // random_access_indicator must be clear.
+        let mut m = TsMuxer::new();
+        m.push_video(&[0xAA; 8], 1_000_000.0, 1_000_000.0, false);
+        let af_flags = first_video_pusi_af_flags(&m.poll());
+        assert_eq!(
+            af_flags & 0x10,
+            0x10,
+            "PCR flag must be set on every video frame"
+        );
+        assert_eq!(
+            af_flags & 0x40,
+            0x00,
+            "random_access_indicator must be clear for non-keyframes"
+        );
+
+        // Keyframe: both PCR flag and random_access_indicator set.
+        let mut m = TsMuxer::new();
+        m.push_video(&[0xBB; 8], 1_000_000.0, 1_000_000.0, true);
+        let af_flags = first_video_pusi_af_flags(&m.poll());
+        assert_eq!(af_flags & 0x10, 0x10, "PCR flag must be set on keyframe");
+        assert_eq!(
+            af_flags & 0x40,
+            0x40,
+            "random_access_indicator must be set on keyframe (random access point)"
+        );
     }
 }
