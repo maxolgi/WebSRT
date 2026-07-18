@@ -73,6 +73,52 @@ console.log('loaded:', {
   console.log('mpeg2ts-wasm: PASS');
 }
 
+// Test 1b: debug_snapshot() — exercise the Commit 1 analysis surface.
+{
+  const demux = new mpeg2ts.TsDemuxer();
+  const bytes = fs.readFileSync(FIXTURE);
+  const CHUNK = 1024;
+  for (let i = 0; i < bytes.byteLength; i += CHUNK) {
+    const slice = bytes.subarray(i, Math.min(i + CHUNK, bytes.byteLength));
+    demux.feed(slice);
+  }
+  const snap = demux.debugSnapshot();
+  const totalPes = snap.pesCounts.reduce((a, b) => a + b, 0);
+  console.log('debug_snapshot:', {
+    programNum: snap.programNum,
+    pmtPid: snap.pmtPid,
+    pmtEntries: snap.pmtPids.length,
+    pids: snap.pids.length,
+    pcrPids: snap.pcrPids.length,
+    nalPids: snap.nalPids.length,
+    totalPes,
+    ringLen: snap.ringT.length,
+    errorCount: snap.errorMsg.length,
+  });
+  if (snap.programNum < 0 || snap.pmtPid < 0) {
+    console.error('FAIL: debug_snapshot missing PAT/PMT (programNum/pmtPid)');
+    process.exit(1);
+  }
+  if (snap.pids.length === 0) {
+    console.error('FAIL: debug_snapshot has no pids');
+    process.exit(1);
+  }
+  if (snap.ringT.length === 0) {
+    console.error('FAIL: debug_snapshot packet ring empty');
+    process.exit(1);
+  }
+  // Sanity: scrambling/af-control flat arrays are 4× the per-PID count.
+  if (snap.scramblingCounts.length !== snap.pids.length * 4) {
+    console.error(`FAIL: scramblingCounts len ${snap.scramblingCounts.length} != pids*4`);
+    process.exit(1);
+  }
+  if (snap.afControlCounts.length !== snap.pids.length * 4) {
+    console.error(`FAIL: afControlCounts len ${snap.afControlCounts.length} != pids*4`);
+    process.exit(1);
+  }
+  console.log('debug_snapshot: PASS');
+}
+
 // Test 2: srt-wasm — construct, poll, verify no crash.
 {
   const rx = new srt.SrtReceiver();

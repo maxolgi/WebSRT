@@ -9,3 +9,4 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 mpeg2ts.workspace = true
 wasm-bindgen = "0.2"
+web-time = "1.0"
