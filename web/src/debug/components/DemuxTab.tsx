@@ -281,12 +281,15 @@ export function DemuxTab({ store }: Props): JSX.Element {
 
 /** NAL rows: one per NAL PID; AV1 PIDs (in PMT, not in nalPids) show N/A. */
 function nalRows(d: DemuxStats): JSX.Element {
-  // Build the set of video PIDs that should appear (H.264/HEVC from PMT).
+  // Build the set of video PIDs that should appear (H.264/HEVC/AV1 from PMT).
   const videoPids: { pid: number; codec: string }[] = [];
   for (let i = 0; i < d.pmtPids.length; i++) {
     const st = d.pmtStreamTypes[i];
+    const fmt = d.pmtFormatIds[i] ?? '';
     if (st === ST_H264 || st === ST_HEVC) {
       videoPids.push({ pid: d.pmtPids[i], codec: st === ST_H264 ? 'H.264' : 'HEVC' });
+    } else if (st === ST_PRIVATE && fmt === 'AV01') {
+      videoPids.push({ pid: d.pmtPids[i], codec: 'AV1' });
     }
   }
   if (videoPids.length === 0 && d.nalPids.length === 0) {
