@@ -82,6 +82,11 @@ Browser runs the **same** `srt-protocol` + `mpeg2ts` Rust crates compiled to WAS
 - `web/src/decode.ts` — H.264 SPS parser (exp-Golomb, High profile), avcC builder, `VideoPipeline`, `OpusAudioPipeline`, `AacAudioPipeline`. AudioWorklet fallback when `MediaStreamTrackGenerator` unavailable.
 - `web/src/worker.ts` — Web Worker: runs SrtReceiver + Demuxer off main thread. Datagrams batched (up to 16) before processing. Polls SRT state machine every 10ms.
 - `web/src/main.ts` — WT connect, PMT codec detection (AAC 0x0F vs Opus 0x06), connect/stop button state, auto-reconnect with backoff.
+- `crates/mpeg2ts-wasm/src/lib.rs` — browser-side TS demuxer (WASM). `TsDemuxer.feed(bytes)` emits `TsEvent`s (PAT/PMT/PES/RA/error). `debug_snapshot()` returns aggregated per-PID analysis: CC errors, TS header flags, PCR interval/jitter, NAL frame-type counts (I/P/B via exp-Golomb slice header parse), packet ring (500 events), error ring. All analysis in Rust; JS renders.
+- `crates/mpeg2ts-wasm/src/nal.rs` — NAL parser: start-code scanner, H.264/HEVC nal_unit_type classification, exp-Golomb slice_type → I/P/B.
+- `web/src/debug/components/DemuxTab.tsx` — 8th debug panel tab: program table, elementary streams, PTS/DTS, CC errors, TS header flags, PCR, NAL frame-type breakdown, error log. Driven by `store.demuxStats` (mirrors `DebugSnapshot`).
+- `web/src/debug/components/PacketTimeline.tsx` — virtualized packet ring (CSS-only, 500-event cap) + click-to-inspect side panel. Color-coded rows (video/audio/PSI/error/other), filter bar, copy-JSON inline buttons.
+- `web/src/debug/components/charts/` — 7 demux charts: BitrateChart (per-PID line), PidDonutChart (byte share), CcHeatmap, RaTimeline, PtsJumpSparkline, PcrChart (interval+jitter with 100ms target), NalStackedBar (I/P/B/IDR/etc.).
 
 ## Runtime
 
@@ -106,6 +111,9 @@ Gateway runs under supervisord:
 - `SrtIngester.kind` field stores `SrtListener` to keep it alive (drop = close listener). The "never read" warning is intentional.
 - `performance.now()` epoch mismatch: browser uses `web_time::Instant` (Performance API), gateway uses `std::time::Instant`. SRT protocol handles this via timestamp fields in packets + clock sync during handshake.
 - TSBPD latency negotiation: `max(sender_latency, receiver_latency)` during HSv5. The browser slider solely controls the gateway→browser TSBPD (gateway-side floor is 10ms). `--latency` controls the OBS→gateway ingester SRT latency (default 120ms).
+- **Demux debug tab** requires the `mpeg2ts-wasm` rebuild (it consumes `debug_snapshot()`). On stale WASM, the tab renders empty tables — no crash. The old 6-counter `__demuxStats` global is deleted; all demux analysis lives in the `TsDemuxer` WASM struct.
+- **Packet inspector hex dump** is deferred — `debug_snapshot()` doesn't include raw packet bytes (memory cost). The inspector shows decoded fields + NAL summary but not a hex dump. Adding it requires a WASM change (`ringHex` field) + rebuild.
+- `DebugSnapshot` is a wasm-bindgen struct — **cannot be structured-cloned** across the worker `postMessage` boundary. `worker.ts:getDemuxStats()` reads every field into a POJO and calls `snap.free()` in a `finally` block. Any new snapshot fields must follow this pattern.
 
 ## Testing
 
