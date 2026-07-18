@@ -1,68 +1,49 @@
-// Canvas-based VideoFrame renderer with rAF-gated presentation scheduling.
+// Canvas-based VideoFrame renderer.
 //
-// Decoded frames are buffered in a small ring and presented via
-// requestAnimationFrame at the wall-clock time corresponding to their PTS.
-// This prevents the decoder from running ahead of realtime and causing
-// latency drift over time.
+// SRT's TSBPD already provides jitter buffering and delivery timing. The
+// renderer simply draws the most recent decoded frame on each
+// requestAnimationFrame — no PTS-based scheduling, no playout delay, no
+// ring-buffer capacity math. This avoids a class of bugs where high-fps
+// streams overflow a fixed-size ring before any frame becomes "due".
 
 export class CanvasRenderer {
   private ctx: CanvasRenderingContext2D;
   private canvas: HTMLCanvasElement;
 
-  private ring: VideoFrame[] = [];
-  private static readonly RING_CAP = 8;
-
-  private ptsAnchorUs: number | null = null;
-  private wallAnchorMs = 0;
-  private playoutDelayMs: number;
-  private lastFrameTsUs: number | null = null;
+  // The most recent decoded frame awaiting presentation. The decoder's output
+  // callback stores a frame here; the RAF loop draws and closes it. If a new
+  // frame arrives before the previous one was drawn, the previous one is
+  // dropped (the viewer skips to the latest, maintaining low latency).
+  private pending: VideoFrame | null = null;
 
   private rafId: number | null = null;
   private frameCount = 0;
-  private droppedLate = 0;
-  private droppedOverflow = 0;
+  private droppedOld = 0;
   private lastFpsTime = performance.now();
   private lastFps = 0;
   private lastRafDeltaMs = 16.67;
+  private lastPtsUs: number | null = null;
 
-  constructor(canvas: HTMLCanvasElement, playoutDelayMs = 100) {
+  constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('canvas 2d context unavailable');
     this.ctx = ctx;
-    this.playoutDelayMs = playoutDelayMs;
     this.startRafLoop();
   }
 
   draw(frame: VideoFrame) {
-    if (
-      this.lastFrameTsUs !== null &&
-      (frame.timestamp < this.lastFrameTsUs ||
-        frame.timestamp - this.lastFrameTsUs > 5_000_000)
-    ) {
-      this.ptsAnchorUs = null;
+    if (this.pending) {
+      this.pending.close();
+      this.droppedOld++;
     }
-
-    if (this.ptsAnchorUs === null) {
-      this.ptsAnchorUs = frame.timestamp;
-      this.wallAnchorMs = performance.now() + this.playoutDelayMs;
-    }
-
-    this.lastFrameTsUs = frame.timestamp;
-
-    if (this.ring.length >= CanvasRenderer.RING_CAP) {
-      const old = this.ring.shift()!;
-      old.close();
-      this.droppedOverflow++;
-    }
-
-    this.ring.push(frame);
+    this.pending = frame;
+    this.lastPtsUs = frame.timestamp;
   }
 
-  /** Current video presentation PTS in microseconds, or null if no anchor established yet. */
+  /** Current video PTS in microseconds, or null if no frame received yet. */
   currentPtsUs(): number | null {
-    if (this.ptsAnchorUs === null) return null;
-    return this.ptsAnchorUs + (performance.now() - this.wallAnchorMs) * 1000;
+    return this.lastPtsUs;
   }
 
   private startRafLoop() {
@@ -71,67 +52,41 @@ export class CanvasRenderer {
       const now = performance.now();
       this.lastRafDeltaMs = now - lastRaf;
       lastRaf = now;
-      this.presentDueFrames();
+      this.present();
       this.rafId = requestAnimationFrame(loop);
     };
     this.rafId = requestAnimationFrame(loop);
   }
 
-  private presentDueFrames() {
-    if (this.ring.length === 0 || this.ptsAnchorUs === null) return;
+  private present() {
+    const frame = this.pending;
+    if (!frame) return;
+    this.pending = null;
 
-    const nowMs = performance.now();
-
-    let bestIdx = -1;
-    for (let i = 0; i < this.ring.length; i++) {
-      const ptsDeltaUs = this.ring[i].timestamp - this.ptsAnchorUs;
-      const presentAtMs = this.wallAnchorMs + ptsDeltaUs / 1000;
-      if (presentAtMs <= nowMs) {
-        bestIdx = i;
-      } else {
-        break;
-      }
+    if (this.canvas.width !== frame.displayWidth) {
+      this.canvas.width = frame.displayWidth;
     }
-
-    if (bestIdx < 0) return;
-
-    const showFrame = this.ring[bestIdx];
-    for (let i = 0; i < bestIdx; i++) {
-      this.ring[i].close();
-      this.droppedLate++;
+    if (this.canvas.height !== frame.displayHeight) {
+      this.canvas.height = frame.displayHeight;
     }
-
-    if (this.canvas.width !== showFrame.displayWidth) {
-      this.canvas.width = showFrame.displayWidth;
-    }
-    if (this.canvas.height !== showFrame.displayHeight) {
-      this.canvas.height = showFrame.displayHeight;
-    }
-    this.ctx.drawImage(showFrame, 0, 0);
-    showFrame.close();
-
-    this.ring.splice(0, bestIdx + 1);
+    this.ctx.drawImage(frame, 0, 0);
+    frame.close();
 
     this.frameCount++;
     if (this.frameCount % 30 === 0) {
-      this.lastFps = (30 * 1000) / (nowMs - this.lastFpsTime);
-      this.lastFpsTime = nowMs;
-      console.debug(
-        `render fps: ${this.lastFps.toFixed(1)} (frame ${this.frameCount}, ` +
-        `late ${this.droppedLate}, overflow ${this.droppedOverflow}, ` +
-        `ring ${this.ring.length})`,
-      );
+      this.lastFps = (30 * 1000) / (performance.now() - this.lastFpsTime);
+      this.lastFpsTime = performance.now();
     }
   }
 
   getStats(): import('./debug/types').RenderStats {
     return {
       frameCount: this.frameCount,
-      droppedLate: this.droppedLate,
-      droppedOverflow: this.droppedOverflow,
-      ringLength: this.ring.length,
-      ringCap: CanvasRenderer.RING_CAP,
-      currentPtsUs: this.currentPtsUs(),
+      droppedLate: 0,
+      droppedOverflow: this.droppedOld,
+      ringLength: this.pending ? 1 : 0,
+      ringCap: 1,
+      currentPtsUs: this.lastPtsUs,
       fps: this.lastFps,
       rafDeltaMs: this.lastRafDeltaMs,
     };
@@ -140,7 +95,9 @@ export class CanvasRenderer {
   destroy() {
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
     this.rafId = null;
-    for (const f of this.ring) f.close();
-    this.ring = [];
+    if (this.pending) {
+      this.pending.close();
+      this.pending = null;
+    }
   }
 }

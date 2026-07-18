@@ -236,7 +236,7 @@ async function doConnect() {
     return;
   }
 
-  renderer = new CanvasRenderer(canvas, Math.min(150, Math.floor(+latencyNum.value / 2)));
+  renderer = new CanvasRenderer(canvas);
   let firstFrame = true;
 
   video = new VideoPipeline({
