@@ -19,7 +19,12 @@
       body.resizing { transition: none; }
       h1 { font-size: 1.1rem; }
       video, canvas { background: #000; display: block; }
-      #video-canvas { width: 100%; height: auto; }
+      #video-canvas {
+        max-width: 100%;
+        max-height: calc(100vh - 100px);
+        width: auto;
+        height: auto;
+      }
       #video-canvas:fullscreen {
         width: 100vw; height: 100vh; object-fit: contain; background: #000;
       }
