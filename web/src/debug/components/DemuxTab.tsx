@@ -28,6 +28,8 @@ export function DemuxTab({ store }: Props): JSX.Element {
     return () => clearInterval(id);
   }, []);
 
+  const [subTab, setSubTab] = useState<'streams' | 'errors' | 'video' | 'packets' | 'charts'>('streams');
+
   const d = store.demuxStats.value;
   if (!d) return <div>No demux stats yet — awaiting stream.</div>;
 
@@ -55,226 +57,264 @@ export function DemuxTab({ store }: Props): JSX.Element {
 
   const totalCcErrors = d.ccErrors.reduce((a, b) => a + b, 0);
 
+  const SUB_TABS: Array<{ id: 'streams' | 'errors' | 'video' | 'packets' | 'charts'; label: string }> = [
+    { id: 'streams', label: 'Streams' },
+    { id: 'errors', label: 'Errors' },
+    { id: 'video', label: 'Video' },
+    { id: 'packets', label: 'Packets' },
+    { id: 'charts', label: 'Charts' },
+  ];
+
   return (
     <>
-      {/* 1. Program table */}
-      <div class="debug-section">
-        <h3>Program</h3>
-        <table class="debug-table">
-          <tbody>
-            <tr><td>Program Number</td><td>{d.programNum >= 0 ? d.programNum : '—'}</td></tr>
-            <tr><td>PMT PID</td><td>{d.pmtPid >= 0 ? pidCell(d.pmtPid) : '—'}</td></tr>
-          </tbody>
-        </table>
+      <div
+        class="debug-tabs"
+        style={{ position: 'sticky', top: '-8px', background: '#1a1a1a', zIndex: 2, margin: '-8px -8px 8px -8px' }}
+      >
+        {SUB_TABS.map((t) => (
+          <button
+            class={`debug-tab ${subTab === t.id ? 'active' : ''}`}
+            onClick={() => setSubTab(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
 
-      {/* 2. Elementary streams table */}
-      <div class="debug-section">
-        <h3>Elementary Streams</h3>
-        <table class="debug-table">
-          <thead>
-            <tr>
-              <th>PID</th><th>Type</th><th>Format ID</th><th>Mbps</th>
-              <th>PES</th><th>RA</th><th>CC err</th>
-            </tr>
-          </thead>
-          <tbody>
-            {d.pmtPids.length === 0 ? (
-              <tr><td colspan={7}>No PMT entries yet</td></tr>
-            ) : Array.from(d.pmtPids).map((pid, i) => {
-              const st = d.pmtStreamTypes[i];
-              const fmt = d.pmtFormatIds[i] ?? '';
-              const idx = idxOf(pid);
-              const mbps = idx >= 0 ? d.bitratesMbps[idx] : null;
-              const pes = idx >= 0 ? d.pesCounts[idx] : 0;
-              const ra = idx >= 0 ? d.raCounts[idx] : 0;
-              const cc = idx >= 0 ? d.ccErrors[idx] : 0;
-              return (
-                <tr key={pid}>
-                  <td>{pidCell(pid)}</td>
-                  <td>{codecName(st, fmt)}</td>
-                  <td>{fmt || '—'}</td>
-                  <td>{mbps !== null ? mbps.toFixed(3) : '—'}</td>
-                  <td>{pes}</td>
-                  <td>{ra}</td>
-                  <td class={cc > 0 ? 'stat-bad' : 'stat-good'}>{cc}</td>
+      {subTab === 'streams' && (
+        <>
+          {/* Program table */}
+          <div class="debug-section">
+            <h3>Program</h3>
+            <table class="debug-table">
+              <tbody>
+                <tr><td>Program Number</td><td>{d.programNum >= 0 ? d.programNum : '—'}</td></tr>
+                <tr><td>PMT PID</td><td>{d.pmtPid >= 0 ? pidCell(d.pmtPid) : '—'}</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          {/* Elementary streams table */}
+          <div class="debug-section">
+            <h3>Elementary Streams</h3>
+            <table class="debug-table">
+              <thead>
+                <tr>
+                  <th>PID</th><th>Type</th><th>Format ID</th><th>Mbps</th>
+                  <th>PES</th><th>RA</th><th>CC err</th>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+              </thead>
+              <tbody>
+                {d.pmtPids.length === 0 ? (
+                  <tr><td colspan={7}>No PMT entries yet</td></tr>
+                ) : Array.from(d.pmtPids).map((pid, i) => {
+                  const st = d.pmtStreamTypes[i];
+                  const fmt = d.pmtFormatIds[i] ?? '';
+                  const idx = idxOf(pid);
+                  const mbps = idx >= 0 ? d.bitratesMbps[idx] : null;
+                  const pes = idx >= 0 ? d.pesCounts[idx] : 0;
+                  const ra = idx >= 0 ? d.raCounts[idx] : 0;
+                  const cc = idx >= 0 ? d.ccErrors[idx] : 0;
+                  return (
+                    <tr key={pid}>
+                      <td>{pidCell(pid)}</td>
+                      <td>{codecName(st, fmt)}</td>
+                      <td>{fmt || '—'}</td>
+                      <td>{mbps !== null ? mbps.toFixed(3) : '—'}</td>
+                      <td>{pes}</td>
+                      <td>{ra}</td>
+                      <td class={cc > 0 ? 'stat-bad' : 'stat-good'}>{cc}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
 
-      {/* 3. PTS / DTS panel */}
-      <div class="debug-section">
-        <h3>PTS / DTS (top-2 PIDs by bytes)</h3>
-        <table class="debug-table">
-          <thead>
-            <tr><th>PID</th><th>last PTS (ms)</th><th>last DTS (ms)</th><th>PTS jumps</th></tr>
-          </thead>
-          <tbody>
-            {top2.length === 0 ? (
-              <tr><td colspan={4}>No PIDs yet</td></tr>
-            ) : top2.map((pid) => {
-              const idx = idxOf(pid);
-              const pts = idx >= 0 ? d.lastPts[idx] : -1;
-              const dtsV = idx >= 0 ? d.lastDts[idx] : -1;
-              const jumps = idx >= 0 ? d.ptsJumps[idx] : 0;
-              return (
-                <tr key={pid}>
-                  <td>{pidCell(pid)}</td>
-                  <td>{pts >= 0 ? (pts / 90).toFixed(1) : '—'}</td>
-                  <td>{dtsV >= 0 ? (dtsV / 90).toFixed(1) : '—'}</td>
-                  <td class={jumps > 0 ? 'stat-bad' : ''}>{jumps}</td>
+          {/* PTS / DTS panel */}
+          <div class="debug-section">
+            <h3>PTS / DTS (top-2 PIDs by bytes)</h3>
+            <table class="debug-table">
+              <thead>
+                <tr><th>PID</th><th>last PTS (ms)</th><th>last DTS (ms)</th><th>PTS jumps</th></tr>
+              </thead>
+              <tbody>
+                {top2.length === 0 ? (
+                  <tr><td colspan={4}>No PIDs yet</td></tr>
+                ) : top2.map((pid) => {
+                  const idx = idxOf(pid);
+                  const pts = idx >= 0 ? d.lastPts[idx] : -1;
+                  const dtsV = idx >= 0 ? d.lastDts[idx] : -1;
+                  const jumps = idx >= 0 ? d.ptsJumps[idx] : 0;
+                  return (
+                    <tr key={pid}>
+                      <td>{pidCell(pid)}</td>
+                      <td>{pts >= 0 ? (pts / 90).toFixed(1) : '—'}</td>
+                      <td>{dtsV >= 0 ? (dtsV / 90).toFixed(1) : '—'}</td>
+                      <td class={jumps > 0 ? 'stat-bad' : ''}>{jumps}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {subTab === 'errors' && (
+        <>
+          {/* CC errors table */}
+          <div class="debug-section">
+            <h3>Continuity Counter Errors <span class={totalCcErrors > 0 ? 'stat-bad' : 'stat-good'}>(total {totalCcErrors})</span></h3>
+            <table class="debug-table">
+              <thead><tr><th>PID</th><th>CC errors</th></tr></thead>
+              <tbody>
+                {d.pids.length === 0 ? (
+                  <tr><td colspan={2}>No PIDs yet</td></tr>
+                ) : Array.from(d.pids).map((pid, i) => (
+                  <tr key={pid}>
+                    <td>{pidCell(pid)}</td>
+                    <td class={d.ccErrors[i] > 0 ? 'stat-bad' : 'stat-good'}>{d.ccErrors[i]}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* TS header flags panel */}
+          <div class="debug-section">
+            <h3>TS Header Flags</h3>
+            <table class="debug-table">
+              <thead>
+                <tr>
+                  <th>PID</th><th>TEI</th><th>PUSI</th>
+                  <th>Scramble (0/Even/Odd)</th><th>Adapt (Pay/Adp/Both)</th>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+              </thead>
+              <tbody>
+                {d.pids.length === 0 ? (
+                  <tr><td colspan={5}>No PIDs yet</td></tr>
+                ) : Array.from(d.pids).map((pid, i) => {
+                  const o4 = 4 * i;
+                  const sc = d.scramblingCounts; // [NotScrambled, _, Even, Odd]
+                  const af = d.afControlCounts;   // [_, Pay, Adp, Both]
+                  return (
+                    <tr key={pid}>
+                      <td>{pidCell(pid)}</td>
+                      <td class={d.teiCounts[i] > 0 ? 'stat-bad' : ''}>{d.teiCounts[i]}</td>
+                      <td>{d.pusiCounts[i]}</td>
+                      <td>{sc[o4]}/{sc[o4 + 2]}/{sc[o4 + 3]}</td>
+                      <td>{af[o4 + 1]}/{af[o4 + 2]}/{af[o4 + 3]}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
 
-      {/* 4. CC errors table */}
-      <div class="debug-section">
-        <h3>Continuity Counter Errors <span class={totalCcErrors > 0 ? 'stat-bad' : 'stat-good'}>(total {totalCcErrors})</span></h3>
-        <table class="debug-table">
-          <thead><tr><th>PID</th><th>CC errors</th></tr></thead>
-          <tbody>
-            {d.pids.length === 0 ? (
-              <tr><td colspan={2}>No PIDs yet</td></tr>
-            ) : Array.from(d.pids).map((pid, i) => (
-              <tr key={pid}>
-                <td>{pidCell(pid)}</td>
-                <td class={d.ccErrors[i] > 0 ? 'stat-bad' : 'stat-good'}>{d.ccErrors[i]}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+          {/* Demux errors */}
+          <div class="debug-section">
+            <h3>Demux Errors {d.errorMsg.length > 0 && <span class="stat-bad">({d.errorMsg.length})</span>}</h3>
+            {d.errorMsg.length === 0 ? (
+              <div class="stat-good">No demux errors.</div>
+            ) : (
+              <table class="debug-table">
+                <thead><tr><th>t (s)</th><th>message</th></tr></thead>
+                <tbody>
+                  {d.errorMsg.map((msg, i) => (
+                    <tr key={i}>
+                      <td>{(d.errorT[i] / 1000).toFixed(2)}</td>
+                      <td class="stat-bad">{msg}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
 
-      {/* 5. TS header flags panel */}
-      <div class="debug-section">
-        <h3>TS Header Flags</h3>
-        <table class="debug-table">
-          <thead>
-            <tr>
-              <th>PID</th><th>TEI</th><th>PUSI</th>
-              <th>Scramble (0/Even/Odd)</th><th>Adapt (Pay/Adp/Both)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {d.pids.length === 0 ? (
-              <tr><td colspan={5}>No PIDs yet</td></tr>
-            ) : Array.from(d.pids).map((pid, i) => {
-              const o4 = 4 * i;
-              const sc = d.scramblingCounts; // [NotScrambled, _, Even, Odd]
-              const af = d.afControlCounts;   // [_, Pay, Adp, Both]
-              return (
-                <tr key={pid}>
-                  <td>{pidCell(pid)}</td>
-                  <td class={d.teiCounts[i] > 0 ? 'stat-bad' : ''}>{d.teiCounts[i]}</td>
-                  <td>{d.pusiCounts[i]}</td>
-                  <td>{sc[o4]}/{sc[o4 + 2]}/{sc[o4 + 3]}</td>
-                  <td>{af[o4 + 1]}/{af[o4 + 2]}/{af[o4 + 3]}</td>
+      {subTab === 'video' && (
+        <>
+          {/* PCR panel */}
+          <div class="debug-section">
+            <h3>PCR</h3>
+            <table class="debug-table">
+              <thead><tr><th>PID</th><th>interval (ms)</th><th>jitter (ms)</th></tr></thead>
+              <tbody>
+                {d.pcrPids.length === 0 ? (
+                  <tr><td colspan={3}>No PCR-bearing PID seen yet</td></tr>
+                ) : Array.from(d.pcrPids).map((pid, i) => {
+                  const interval = d.pcrIntervalsMs[i];
+                  const jitter = d.pcrJitterMs[i];
+                  const bad = interval > 100;
+                  return (
+                    <tr key={pid}>
+                      <td>{pidCell(pid)}</td>
+                      <td class={bad ? 'stat-bad' : ''}>{interval.toFixed(1)}</td>
+                      <td>{jitter.toFixed(2)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <div style={{ marginTop: '6px' }}>
+              <PcrChart store={store} height={100} />
+            </div>
+          </div>
+
+          {/* NAL frame-type breakdown */}
+          <div class="debug-section">
+            <h3>NAL Frame Types</h3>
+            <table class="debug-table">
+              <thead>
+                <tr>
+                  <th>PID</th><th>Codec</th><th>I</th><th>P</th><th>B</th>
+                  <th>IDR</th><th>SPS</th><th>PPS</th><th>SEI</th><th>AUD</th><th>NonIDR</th>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+              </thead>
+              <tbody>
+                {nalRows(d)}
+              </tbody>
+            </table>
+            <div style={{ marginTop: '6px' }}>
+              <NalStackedBar store={store} height={140} />
+            </div>
+          </div>
+        </>
+      )}
 
-      {/* 6. PCR panel */}
-      <div class="debug-section">
-        <h3>PCR</h3>
-        <table class="debug-table">
-          <thead><tr><th>PID</th><th>interval (ms)</th><th>jitter (ms)</th></tr></thead>
-          <tbody>
-            {d.pcrPids.length === 0 ? (
-              <tr><td colspan={3}>No PCR-bearing PID seen yet</td></tr>
-            ) : Array.from(d.pcrPids).map((pid, i) => {
-              const interval = d.pcrIntervalsMs[i];
-              const jitter = d.pcrJitterMs[i];
-              const bad = interval > 100;
-              return (
-                <tr key={pid}>
-                  <td>{pidCell(pid)}</td>
-                  <td class={bad ? 'stat-bad' : ''}>{interval.toFixed(1)}</td>
-                  <td>{jitter.toFixed(2)}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-        <div style={{ marginTop: '6px' }}>
-          <PcrChart store={store} height={100} />
+      {subTab === 'packets' && (
+        <div class="debug-section">
+          <h3>Packet Timeline</h3>
+          <PacketTimeline store={store} />
         </div>
-      </div>
+      )}
 
-      {/* 7. NAL frame-type breakdown */}
-      <div class="debug-section">
-        <h3>NAL Frame Types</h3>
-        <table class="debug-table">
-          <thead>
-            <tr>
-              <th>PID</th><th>Codec</th><th>I</th><th>P</th><th>B</th>
-              <th>IDR</th><th>SPS</th><th>PPS</th><th>SEI</th><th>AUD</th><th>NonIDR</th>
-            </tr>
-          </thead>
-          <tbody>
-            {nalRows(d)}
-          </tbody>
-        </table>
-        <div style={{ marginTop: '6px' }}>
-          <NalStackedBar store={store} height={140} />
-        </div>
-      </div>
-
-      {/* 8. Error log */}
-      <div class="debug-section">
-        <h3>Demux Errors {d.errorMsg.length > 0 && <span class="stat-bad">({d.errorMsg.length})</span>}</h3>
-        {d.errorMsg.length === 0 ? (
-          <div class="stat-good">No demux errors.</div>
-        ) : (
-          <table class="debug-table">
-            <thead><tr><th>t (s)</th><th>message</th></tr></thead>
-            <tbody>
-              {d.errorMsg.map((msg, i) => (
-                <tr key={i}>
-                  <td>{(d.errorT[i] / 1000).toFixed(2)}</td>
-                  <td class="stat-bad">{msg}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      {/* 9. Packet timeline + inspector */}
-      <div class="debug-section">
-        <h3>Packet Timeline</h3>
-        <PacketTimeline store={store} />
-      </div>
-
-      {/* Charts */}
-      <div class="debug-section">
-        <h3>Bitrate</h3>
-        <BitrateChart store={store} height={120} />
-      </div>
-      <div class="debug-section">
-        <h3>Byte Distribution</h3>
-        <PidDonutChart store={store} height={180} />
-      </div>
-      <div class="debug-section">
-        <h3>CC Error Heatmap</h3>
-        <CcHeatmap store={store} height={40} />
-      </div>
-      <div class="debug-section">
-        <h3>Random-Access Cadence (video PID)</h3>
-        <RaTimeline store={store} height={60} />
-      </div>
-      <div class="debug-section">
-        <h3>PTS Jump Sparkline (cumulative)</h3>
-        <PtsJumpSparkline store={store} height={50} />
-      </div>
+      {subTab === 'charts' && (
+        <>
+          <div class="debug-section">
+            <h3>Bitrate</h3>
+            <BitrateChart store={store} height={120} />
+          </div>
+          <div class="debug-section">
+            <h3>Byte Distribution</h3>
+            <PidDonutChart store={store} height={180} />
+          </div>
+          <div class="debug-section">
+            <h3>CC Error Heatmap</h3>
+            <CcHeatmap store={store} height={40} />
+          </div>
+          <div class="debug-section">
+            <h3>Random-Access Cadence (video PID)</h3>
+            <RaTimeline store={store} height={60} />
+          </div>
+          <div class="debug-section">
+            <h3>PTS Jump Sparkline (cumulative)</h3>
+            <PtsJumpSparkline store={store} height={50} />
+          </div>
+        </>
+      )}
     </>
   );
 }

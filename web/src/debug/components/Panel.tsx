@@ -1,12 +1,10 @@
 import { useEffect, useState } from 'preact/hooks'
 import type { DebugStore } from '../store'
-import { downloadDiagnostics } from '../diagnostics'
 import { StreamTab } from './StreamTab'
 import { CodecTab } from './CodecTab'
 import { GpuTab } from './GpuTab'
 import { SrtTab } from './SrtTab'
 import { DemuxTab } from './DemuxTab'
-import { DevToolsTab } from './DevToolsTab'
 import { ConsoleTab } from './ConsoleTab'
 import { TestTab } from './TestTab'
 
@@ -20,9 +18,8 @@ const TABS = [
   { id: 'gpu', label: 'GPU' },
   { id: 'srt', label: 'SRT' },
   { id: 'demux', label: 'Demux' },
-  { id: 'devtools', label: 'DevTools' },
   { id: 'console', label: 'Console' },
-  { id: 'test', label: 'Test' },
+  { id: 'test', label: 'Tools' },
 ] as const
 
 export function DebugPanel({ store }: Props) {
@@ -34,25 +31,8 @@ export function DebugPanel({ store }: Props) {
 
   const activeTab = store.activeTab.value
 
-  const close = () => {
-    store.panelVisible.value = false
-    document.getElementById('debug-root')?.classList.remove('visible')
-    document.body.classList.remove('debug-open')
-    localStorage.removeItem('websrt-debug-open')
-  }
-
   return (
     <>
-      <div class="debug-header">
-        <strong style={{ flex: 1 }}>Debug Panel</strong>
-        <button onClick={() => copyDiagnostics(store)} title="Copy debug info to clipboard">
-          Copy Info
-        </button>
-        <button onClick={() => downloadDiagnostics(store)} title="Download debug info as JSON file">
-          Download
-        </button>
-        <button onClick={close}>✕</button>
-      </div>
       <div class="debug-tabs">
         {TABS.map((t) => (
           <button
@@ -69,22 +49,9 @@ export function DebugPanel({ store }: Props) {
         {activeTab === 'gpu' && <GpuTab store={store} />}
         {activeTab === 'srt' && <SrtTab store={store} />}
         {activeTab === 'demux' && <DemuxTab store={store} />}
-        {activeTab === 'devtools' && <DevToolsTab />}
         {activeTab === 'console' && <ConsoleTab store={store} />}
         {activeTab === 'test' && <TestTab store={store} />}
       </div>
     </>
   )
-}
-
-async function copyDiagnostics(store: DebugStore) {
-  try {
-    const { buildDiagnostics } = await import('../diagnostics')
-    const diag = await buildDiagnostics(store)
-    const json = JSON.stringify(diag, null, 2)
-    await navigator.clipboard.writeText(json)
-    console.info('Debug diagnostics copied to clipboard')
-  } catch (e) {
-    console.error('Failed to copy diagnostics:', e)
-  }
 }

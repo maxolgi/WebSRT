@@ -16,7 +16,6 @@ const connectBtn = document.getElementById('connect') as HTMLButtonElement;
 const canvas = document.getElementById('video-canvas') as HTMLCanvasElement;
 const latencyNum = document.getElementById('latency-num') as HTMLInputElement;
 const muteBtn = document.getElementById('mute') as HTMLButtonElement;
-const debugToggle = document.getElementById('debug-toggle') as HTMLButtonElement;
 const debugRoot = document.getElementById('debug-root') as HTMLDivElement;
 
 // --- Debug panel resize handle (left edge, horizontal) ---
@@ -25,7 +24,7 @@ const debugRoot = document.getElementById('debug-root') as HTMLDivElement;
 const PANEL_MIN_W = 320;
 const PANEL_MAX_W_RATIO = 0.85;
 const resizer = document.createElement('div');
-resizer.className = 'debug-resizer';
+resizer.className = 'debug-resizer visible';
 document.body.appendChild(resizer);
 
 function syncResizerPosition() {
@@ -180,7 +179,6 @@ fullscreenBtn.addEventListener('click', () => {
 function setPanelVisible(visible: boolean) {
   store.panelVisible.value = visible;
   debugRoot.classList.toggle('visible', visible);
-  resizer.classList.toggle('visible', visible);
   document.body.classList.toggle('debug-open', visible);
   if (visible) {
     syncResizerPosition();
@@ -202,10 +200,6 @@ function setPanelVisible(visible: boolean) {
     }
   }
 }
-
-debugToggle.addEventListener('click', () => {
-  setPanelVisible(!store.panelVisible.value);
-});
 
 function scheduleReconnect() {
   if (reconnectTimer !== null) return;

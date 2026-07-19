@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { DebugStore } from '../store'
+import { downloadDiagnostics } from '../diagnostics'
 
 interface Props {
   store: DebugStore
@@ -82,6 +83,38 @@ export function TestTab({ store }: Props): JSX.Element {
           The gateway's --sim-loss flag is the recommended way to test NAK/retransmit.
         </div>
       </div>
+
+      <div class="debug-section">
+        <h3>Diagnostics</h3>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button
+            onClick={() => copyDiagnostics(store)}
+            title="Copy debug info to clipboard"
+            style={{ background: '#333', color: '#ddd', padding: '6px 12px', cursor: 'pointer', border: '1px solid #555', borderRadius: '3px' }}
+          >
+            Copy Info
+          </button>
+          <button
+            onClick={() => downloadDiagnostics(store)}
+            title="Download debug info as JSON file"
+            style={{ background: '#333', color: '#ddd', padding: '6px 12px', cursor: 'pointer', border: '1px solid #555', borderRadius: '3px' }}
+          >
+            Download
+          </button>
+        </div>
+      </div>
     </>
   )
+}
+
+async function copyDiagnostics(store: DebugStore) {
+  try {
+    const { buildDiagnostics } = await import('../diagnostics')
+    const diag = await buildDiagnostics(store)
+    const json = JSON.stringify(diag, null, 2)
+    await navigator.clipboard.writeText(json)
+    console.info('Debug diagnostics copied to clipboard')
+  } catch (e) {
+    console.error('Failed to copy diagnostics:', e)
+  }
 }
