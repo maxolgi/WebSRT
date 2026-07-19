@@ -66,10 +66,32 @@ to other browsers). A browser can even do both simultaneously.
 - Rust stable (>=1.75), with `wasm32-unknown-unknown` target and `wasm-pack`
 - Node.js >=18 (for the Vite dev server)
 - ffmpeg (only for the live publisher script, `fixtures/stream.sh`)
+- System C/C++ build tools: `build-essential` / `cmake` / `pkg-config`
+
+#### One-command install (Debian/Ubuntu, Fedora, Arch, macOS)
 
 ```bash
+./install-prereqs.sh
+```
+
+Detects what's already installed and only installs what's missing. Run
+`./install-prereqs.sh --check` to verify without installing. Can also be
+curl'd directly on a fresh machine before cloning the repo:
+
+```bash
+curl -sSf https://raw.githubusercontent.com/maxolgi/WebSRT/master/install-prereqs.sh | bash
+```
+
+#### Manual setup
+
+```bash
+# rustup + stable toolchain + wasm32 target + wasm-pack (user-local, ~/.cargo)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+source "$HOME/.cargo/env"
 rustup target add wasm32-unknown-unknown
-cargo install wasm-pack
+curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+# Node.js >= 18, ffmpeg, and C/C++ build tools via your system package manager.
 
 # one-time: build all 3 WASM modules, copy to web/wasm/, install web deps
 ./build.sh setup
@@ -518,6 +540,7 @@ WebSRT/
   Cargo.lock
   AGENTS.md                   # build commands, architecture, gotchas
   build.sh                    # build orchestrator (./build.sh --help for the menu)
+  install-prereqs.sh          # toolchain installer (./install-prereqs.sh --check to verify)
   websrt.conf                 # supervisord config (production)
   LICENSE                     # MPL-2.0
   crates/

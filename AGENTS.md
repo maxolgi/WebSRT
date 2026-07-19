@@ -2,6 +2,13 @@
 
 ## Build commands
 
+Fresh-clone toolchain setup (installs rustup, wasm-pack, Node ≥ 18, ffmpeg,
+build tools — Debian/Ubuntu, Fedora, Arch, macOS):
+
+    ./install-prereqs.sh           # idempotent; --check to verify only
+    # or remotely, before cloning:
+    curl -sSf https://raw.githubusercontent.com/maxolgi/WebSRT/master/install-prereqs.sh | bash
+
 `./build.sh` wraps every common build step (`./build.sh --help` for the full menu):
 
 # One-time after a fresh clone: build all 3 WASM crates + copy to web/wasm/ + npm install
