@@ -65,25 +65,29 @@ to other browsers). A browser can even do both simultaneously.
 
 - Rust stable (>=1.75), with `wasm32-unknown-unknown` target and `wasm-pack`
 - Node.js >=18 (for the Vite dev server)
-- ffmpeg (only to generate the test fixture)
+- ffmpeg (only for the live publisher script, `fixtures/stream.sh`)
 
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install wasm-pack
 
-# one-time: generate the test fixture (~350 KB)
-./fixtures/make-fixture.sh
-
 # one-time: build the WASM modules and copy to web/
-mkdir -p web/wasm/srt-wasm web/wasm/mpeg2ts-wasm
+mkdir -p web/wasm/srt-wasm web/wasm/mpeg2ts-wasm web/wasm/ts-muxer-wasm
 (cd crates/srt-wasm     && wasm-pack build --target web --release)
 cp crates/srt-wasm/pkg/* web/wasm/srt-wasm/
 (cd crates/mpeg2ts-wasm && wasm-pack build --target web --release)
 cp crates/mpeg2ts-wasm/pkg/* web/wasm/mpeg2ts-wasm/
+(cd crates/ts-muxer-wasm && wasm-pack build --target web --release)
+cp crates/ts-muxer-wasm/pkg/* web/wasm/ts-muxer-wasm/
 
 # install web deps
 (cd web && npm install)
 ```
+
+The test fixture (`fixtures/test.ts`, ~45 KB, H.264+Opus, 10 s loop) is committed
+to the repo — no generation step needed. The replacement for the old
+`make-fixture.sh` is `fixtures/stream.sh`, a live ffmpeg publisher (NVENC/VAAPI)
+that streams to the gateway's SRT listener instead of writing a file.
 
 ### Run with the test fixture (no OBS required)
 
@@ -179,7 +183,7 @@ a thin CLI wrapper around it. To embed in your own application:
 ```rust
 use websrt::Gateway;
 use websrt::cert::{Cert, CertSource};
-use websrt::ingest::SrtIngester;
+use websrt::ingest::srt::SrtIngester;
 
 # async fn run() -> anyhow::Result<()> {
 let cert = Cert::build(CertSource::SelfSigned {
@@ -187,17 +191,17 @@ let cert = Cert::build(CertSource::SelfSigned {
 }).await?;
 
 let gateway = Gateway::builder()
-    .bind_addr("127.0.0.1:4433")
+    .bind_addr("127.0.0.1:4433".parse::<std::net::SocketAddr>()?)
     .identity(cert.identity.clone_identity())
     .latency_ms(1000)
     .max_viewers(16)
-    .build();
+    .build()?;
 
 // Deferred ingester: connect OBS in background
 let source = gateway.source_handle();
 tokio::spawn(async move {
     let ingester = SrtIngester::bind(9000).await.unwrap();
-    source.set_ingester(ingester).await;
+    source.publish_stream("default", ingester);
 });
 
 gateway.run(async {
@@ -237,7 +241,9 @@ Options:
       --key-pem <KEY_PEM>        PEM key path (mkcert mode)
       --sim-loss <SIM_LOSS>      Simulated data-packet loss percentage (0-100) [default: 0]
       --sim-seed <SIM_SEED>      RNG seed for sim-loss (deterministic) [default: 42]
-      --latency <LATENCY>        SRT TSBPD latency in milliseconds [default: 300]
+      --latency <LATENCY>        OBS↔gateway SRT TSBPD latency in milliseconds [default: 120]
+      --health-port <HEALTH_PORT> HTTP health/metrics port (0 = disabled) [default: 0]
+      --auth-token <AUTH_TOKEN>  Viewer auth token; browsers must pass ?token=<value>
 ```
 
 ## Certificate modes
@@ -383,6 +389,8 @@ cargo build --release -p websrt
 cp crates/srt-wasm/pkg/* web/wasm/srt-wasm/
 (cd crates/mpeg2ts-wasm && wasm-pack build --target web --release)
 cp crates/mpeg2ts-wasm/pkg/* web/wasm/mpeg2ts-wasm/
+(cd crates/ts-muxer-wasm && wasm-pack build --target web --release)
+cp crates/ts-muxer-wasm/pkg/* web/wasm/ts-muxer-wasm/
 
 # Web dev server (hot-reloads TS, not WASM)
 cd web && npm run dev
@@ -390,17 +398,21 @@ cd web && npm run dev
 # TypeScript typecheck (no emit)
 cd web && npx tsc --noEmit
 
-# Fixture generator (needs ffmpeg)
-./fixtures/make-fixture.sh
+# Live publisher (needs ffmpeg; h264 uses NVENC, av1 uses VAAPI)
+./fixtures/stream.sh h264|av1
 ```
 
 ### Critical build order
 
 1. Forked `srt-protocol` (`maxolgi/srt-rs`) change → rebuild
    BOTH the gateway binary AND the srt-wasm crate + copy pkg to `web/wasm/`.
-2. Changing only `web/src/*.ts` → Vite hot-reloads, no rebuild needed.
+2. Changing only `web/src/*.ts` / `*.tsx` → Vite hot-reloads, no rebuild needed.
 3. Changing `crates/srt-wasm/src/lib.rs` → wasm-pack build + copy pkg + browser
    reload.
+4. Changing `crates/mpeg2ts-wasm/` or `crates/ts-muxer-wasm/` → wasm-pack build
+   the touched crate + copy pkg + browser reload.
+5. Changing `crates/websrt/` (library) → rebuild `websrt-gateway` binary +
+   restart supervisord.
 
 ## Production deployment
 
@@ -474,7 +486,7 @@ node web/smoke.mjs
 
 ```
 WebSRT/
-  Cargo.toml                  # workspace (4 crates, 2 forked deps via [patch.crates-io])
+  Cargo.toml                  # workspace (5 crates, 2 forked deps via [patch.crates-io])
   Cargo.lock
   AGENTS.md                   # build commands, architecture, gotchas
   websrt.conf                 # supervisord config (production)
@@ -482,14 +494,17 @@ WebSRT/
   crates/
     websrt/                   # library crate: SRT-over-WebTransport gateway core
       src/
-        lib.rs                # pub re-exports
-        gateway.rs            # Gateway builder: WT accept loop, session spawn, fanout
-        session.rs            # per-browser session: recv_pump + sender_pump
+        lib.rs                # pub re-exports + crate docs
+        gateway.rs            # Gateway builder: WT accept loop, session spawn, fanout, health
+        session.rs            # per-browser session: recv_pump (ticker drives the sender half)
+        registry.rs           # centralized SessionRegistry + 2 ms ticker (replaces per-session sender_pump)
+        stream_registry.rs    # multi-stream name → Broadcaster map (?stream= / ?publish=)
         srt_sender.rs         # SrtInitiator: wraps srt-protocol Connect → DuplexConnection
-        broadcaster.rs        # broadcast fanout with alive-flag + subscriber cap
+        broadcaster.rs        # broadcast fanout with alive-flag + per-stream viewer cap
         cert.rs               # self-signed / mkcert cert management
         ingest/
           mod.rs              # Ingester trait + TsMessage type
+          channel.rs          # ChannelIngester: mpsc-backed ingester (browser publish path)
           srt.rs              # SrtIngester: srt-tokio listener/caller with reconnect
           file.rs             # FileIngester: fixture loop with real-time pacing
     websrt-gateway/           # demo binary: CLI wrapper around the websrt library
@@ -499,49 +514,62 @@ WebSRT/
           wt_hs_probe.rs      # SRT handshake + TS continuity probe
           mock_obs.rs         # Streams fixture over SRT
           wt_echo_client.rs   # WT datagram round-trip test
+      tests/
+        broadcaster.rs        # fanout / viewer cap / lag integration tests
+        timebase_drift.rs     # diagnostic: confirms forked TimeBase::adjust sign-flip fix
     srt-wasm/                 # wasm-bindgen wrapper around srt-protocol (receiver + sender)
-    mpeg2ts-wasm/             # wasm-bindgen wrapper around mpeg2ts::TsDemuxer
-    ts-muxer-wasm/            # wasm-bindgen wrapper around TS muxer (publisher side)
+    mpeg2ts-wasm/             # wasm-bindgen wrapper around mpeg2ts::TsDemuxer (+ nal.rs + DebugSnapshot)
+    ts-muxer-wasm/            # wasm-bindgen wrapper around the publisher-side TS muxer
   web/
-    index.html                # page shell, loads cert-hash.js
-    package.json              # vite + typescript
-    vite.config.ts            # HTTPS dev server (basic-ssl plugin)
+    index.html                # default page — loads advanced.tsx (full debug panel)
+    simple.html               # stripped-down page — loads main.ts (no debug panel)
+    package.json              # vite + typescript + preact + chart.js
+    vite.config.ts            # HTTPS dev server (basic-ssl), multi-page input
     tsconfig.json
     smoke.mjs                 # Node smoke test for WASM modules
     src/
-      main.ts                 # WT connect, PMT codec detection, auto-reconnect
+      advanced.tsx            # default entry: same pipeline as main.ts + Preact debug overlay
+      main.ts                 # simple-page entry: WT connect, PMT codec detection, auto-reconnect
       worker.ts               # Web Worker: SrtReceiver + Demuxer (off main thread)
-      srt.ts                  # SrtController (legacy main-thread path, unused)
       demux.ts                # Demuxer: wraps mpeg2ts-wasm, dispatches PES events
-      decode.ts               # H.264 SPS parser, VideoPipeline, Opus/AAC audio pipelines
+      decode.ts               # H.264/HEVC/AV1 parsers, VideoPipeline, Opus/AAC audio pipelines
       render.ts               # CanvasRenderer: draws latest decoded frame on rAF
       wasm.d.ts               # Type declarations for MediaStreamTrackGenerator
+      debug/                  # debug panel (Preact + signals)
+        store.ts              # DebugStore: reactive signals consumed by all tabs
+        sampler.ts            # main-thread sampler for decoder/renderer stats
+        types.ts              # shared TS contracts (DemuxStats, VideoStats, etc.)
+        diagnostics.ts        # "Download/Copy Info" JSON exporter
+        gpu-info.ts, media-capabilities.ts
+        components/           # Panel, StreamTab, CodecTab, GpuTab, SrtTab, DemuxTab,
+                              # DevToolsTab, ConsoleTab, TestTab, PacketTimeline
+        components/charts/    # BitrateChart, PidDonutChart, CcHeatmap, RaTimeline,
+                              # PtsJumpSparkline, PcrChart, NalStackedBar, …
     public/
       cert-hash.js            # runtime-generated (gitignored)
       favicon.ico
     wasm/                     # pre-built wasm-pack pkg output (gitignored)
       srt-wasm/
       mpeg2ts-wasm/
+      ts-muxer-wasm/
   fixtures/
-    make-fixture.sh           # ffmpeg generates 10s H.264+Opus test stream
-    test.ts                   # generated fixture (committed)
+    stream.sh                 # live ffmpeg publisher (h264 NVENC / av1 VAAPI) → SRT 9000
+    test.ts                   # committed fixture (~45 KB, 10 s H.264+Opus loop)
   certs/
     README.md                 # mkcert setup instructions
 ```
 
 ## Latency tuning
 
-The `--latency` flag sets the SRT TSBPD (Timestamp-Based Packet Delivery)
-latency on the gateway side. The browser's latency slider does the same on the
-receiver side. During HSv5 handshake, the effective latency is `max(sender,
-receiver)`.
+There are two independent SRT TSBPD latencies in the demo binary:
 
-**Rule of thumb:** Set `--latency` to at least 4x the WT RTT. The gateway logs
-a warning every 5 seconds if this is violated:
-
-```
-WARN session: WT RTT suggests latency is too low; consider --latency <recommended>
-```
+- **`--latency` (default 120 ms)** — controls the **OBS → gateway** ingester
+  link (passed to `SrtIngester::bind_with_latency`). Raise it if OBS is on a
+  high-latency network.
+- **Browser latency slider (default 300 ms in the UI)** — controls the
+  **gateway → browser** link. The gateway-side floor is 10 ms
+  (`SrtConfig::default().send_latency`); the browser's requested latency wins
+  via `max(sender, receiver)` during HSv5 handshake.
 
 The renderer does not add its own playout delay — SRT's TSBPD is the only
 latency buffer.

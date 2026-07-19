@@ -13,6 +13,8 @@ cargo build --release -p websrt
 cp crates/srt-wasm/pkg/* web/wasm/srt-wasm/
 (cd crates/mpeg2ts-wasm && wasm-pack build --target web --release)
 cp crates/mpeg2ts-wasm/pkg/* web/wasm/mpeg2ts-wasm/
+(cd crates/ts-muxer-wasm && wasm-pack build --target web --release)
+cp crates/ts-muxer-wasm/pkg/* web/wasm/ts-muxer-wasm/
 
 # Web dev server (hot-reloads TS, not WASM)
 cd web && npm run dev
@@ -26,16 +28,18 @@ cd web && npx tsc --noEmit
 ## Critical build order
 
 1. Forked `srt-protocol` (`maxolgi/srt-rs`) changes → rebuild BOTH the gateway binary AND the srt-wasm crate + copy pkg to web/wasm/
-2. Changing only `web/src/*.ts` → Vite hot-reloads, no rebuild needed
+2. Changing only `web/src/*.ts` / `*.tsx` → Vite hot-reloads, no rebuild needed
 3. Changing `crates/srt-wasm/src/lib.rs` → wasm-pack build + copy pkg + browser reload
-4. Changing `crates/websrt/` (library) → rebuild `websrt-gateway` binary + restart supervisord
+4. Changing `crates/mpeg2ts-wasm/` or `crates/ts-muxer-wasm/` → wasm-pack build the touched crate + copy pkg + browser reload
+5. Changing `crates/websrt/` (library) → rebuild `websrt-gateway` binary + restart supervisord
 
 ## Workspace structure
 
 - `crates/websrt/` — **library crate**: SRT-over-WebTransport gateway core. Exposes `Gateway` builder, `BrowserSession`, `Broadcaster`, `SrtInitiator`, `Cert`, `Ingester`. Sim-loss behind `sim-loss` feature.
 - `crates/websrt-gateway/` — **demo binary**: CLI wrapper around the library. This is what runs in production.
-- `crates/srt-wasm/` — browser-side SRT receiver (WASM).
-- `crates/mpeg2ts-wasm/` — browser-side TS demuxer (WASM).
+- `crates/srt-wasm/` — browser-side SRT receiver + sender (WASM). Used by both viewer and publisher pages.
+- `crates/mpeg2ts-wasm/` — browser-side TS demuxer (WASM). Viewer side.
+- `crates/ts-muxer-wasm/` — browser-side TS muxer (WASM). Publisher side (browser→gateway publishing).
 
 ## Production readiness scope
 
