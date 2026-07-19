@@ -71,7 +71,13 @@ to other browsers). A browser can even do both simultaneously.
 rustup target add wasm32-unknown-unknown
 cargo install wasm-pack
 
-# one-time: build the WASM modules and copy to web/
+# one-time: build all 3 WASM modules, copy to web/wasm/, install web deps
+./build.sh setup
+```
+
+`./build.sh setup` runs the equivalent of:
+
+```bash
 mkdir -p web/wasm/srt-wasm web/wasm/mpeg2ts-wasm web/wasm/ts-muxer-wasm
 (cd crates/srt-wasm     && wasm-pack build --target web --release)
 cp crates/srt-wasm/pkg/* web/wasm/srt-wasm/
@@ -79,10 +85,11 @@ cp crates/srt-wasm/pkg/* web/wasm/srt-wasm/
 cp crates/mpeg2ts-wasm/pkg/* web/wasm/mpeg2ts-wasm/
 (cd crates/ts-muxer-wasm && wasm-pack build --target web --release)
 cp crates/ts-muxer-wasm/pkg/* web/wasm/ts-muxer-wasm/
-
-# install web deps
 (cd web && npm install)
 ```
+
+Run `./build.sh --help` for the full menu (per-crate WASM builds, gateway,
+library, web, check, test, clean, etc.).
 
 The test fixture (`fixtures/test.ts`, ~45 KB, H.264+Opus, 10 s loop) is committed
 to the repo — no generation step needed. The replacement for the old
@@ -377,6 +384,28 @@ root `Cargo.toml`. Cargo fetches them automatically at build time — they are
 
 ## Build commands
 
+`./build.sh` wraps every common build step. Run `./build.sh --help` for the
+full list; the most-used subcommands:
+
+```bash
+./build.sh setup                # one-time: WASM + npm install (run after fresh clone)
+./build.sh wasm                 # rebuild all 3 WASM crates + copy to web/wasm/
+./build.sh wasm srt             # rebuild just srt-wasm + copy
+./build.sh gateway              # cargo build --release -p websrt-gateway
+./build.sh gateway --sim-loss   # add the sim-loss feature
+./build.sh lib                  # cargo build --release -p websrt (the library)
+./build.sh web                  # vite dev server (alias: ./build.sh web dev)
+./build.sh web build            # vite production build → web/dist/
+./build.sh check                # cargo check + tsc --noEmit
+./build.sh test                 # cargo test --workspace + node web/smoke.mjs
+./build.sh srt-protocol         # rule 1: rebuild gateway + srt-wasm after editing forked srt-rs
+./build.sh restart              # sudo supervisorctl restart websrt (production only)
+./build.sh clean                # rm -rf web/wasm web/dist target
+./build.sh all                  # full clean rebuild: clean → setup → gateway → web build
+```
+
+Raw form (what the script runs):
+
 ```bash
 # Demo gateway binary (release, with sim-loss feature)
 cargo build --release -p websrt-gateway --features sim-loss
@@ -404,15 +433,14 @@ cd web && npx tsc --noEmit
 
 ### Critical build order
 
-1. Forked `srt-protocol` (`maxolgi/srt-rs`) change → rebuild
-   BOTH the gateway binary AND the srt-wasm crate + copy pkg to `web/wasm/`.
+1. Forked `srt-protocol` (`maxolgi/srt-rs`) change → run `./build.sh srt-protocol`
+   (rebuilds BOTH the gateway binary AND srt-wasm + copies pkg to `web/wasm/`).
 2. Changing only `web/src/*.ts` / `*.tsx` → Vite hot-reloads, no rebuild needed.
-3. Changing `crates/srt-wasm/src/lib.rs` → wasm-pack build + copy pkg + browser
-   reload.
-4. Changing `crates/mpeg2ts-wasm/` or `crates/ts-muxer-wasm/` → wasm-pack build
-   the touched crate + copy pkg + browser reload.
-5. Changing `crates/websrt/` (library) → rebuild `websrt-gateway` binary +
-   restart supervisord.
+3. Changing `crates/srt-wasm/src/lib.rs` → `./build.sh wasm srt` + browser reload.
+4. Changing `crates/mpeg2ts-wasm/` or `crates/ts-muxer-wasm/` →
+   `./build.sh wasm mpeg2ts` (or `ts-muxer`) + browser reload.
+5. Changing `crates/websrt/` (library) → `./build.sh gateway` +
+   `./build.sh restart` (production only; dev just reruns the binary).
 
 ## Production deployment
 
@@ -489,6 +517,7 @@ WebSRT/
   Cargo.toml                  # workspace (5 crates, 2 forked deps via [patch.crates-io])
   Cargo.lock
   AGENTS.md                   # build commands, architecture, gotchas
+  build.sh                    # build orchestrator (./build.sh --help for the menu)
   websrt.conf                 # supervisord config (production)
   LICENSE                     # MPL-2.0
   crates/

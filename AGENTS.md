@@ -2,6 +2,36 @@
 
 ## Build commands
 
+`./build.sh` wraps every common build step (`./build.sh --help` for the full menu):
+
+# One-time after a fresh clone: build all 3 WASM crates + copy to web/wasm/ + npm install
+./build.sh setup
+
+# Per-crate WASM rebuild (hot loop)
+./build.sh wasm srt          # or: mpeg2ts | ts-muxer | (no arg = all three)
+./build.sh wasm srt --debug  # dev profile instead of release
+
+# Native builds
+./build.sh gateway                # cargo build --release -p websrt-gateway
+./build.sh gateway --sim-loss     # add the sim-loss feature
+./build.sh lib                    # cargo build --release -p websrt (the library)
+
+# Web
+./build.sh web                    # vite dev server (alias for: ./build.sh web dev)
+./build.sh web build              # production build → web/dist/
+
+# Checks + tests
+./build.sh check                  # cargo check --workspace + tsc --noEmit
+./build.sh test                   # cargo test --workspace + node web/smoke.mjs
+
+# Combined workflows (AGENTS.md "Critical build order")
+./build.sh srt-protocol           # rule 1: gateway + srt-wasm after editing forked srt-rs
+./build.sh restart                # rule 5: sudo supervisorctl restart websrt
+./build.sh all                    # clean -y → setup → gateway → web build
+./build.sh clean                  # rm -rf web/wasm web/dist target
+
+Raw form (what the script wraps — useful when debugging the script itself):
+
 # Demo gateway binary (release, with sim-loss feature)
 cargo build --release -p websrt-gateway --features sim-loss
 
@@ -27,11 +57,11 @@ cd web && npx tsc --noEmit
 
 ## Critical build order
 
-1. Forked `srt-protocol` (`maxolgi/srt-rs`) changes → rebuild BOTH the gateway binary AND the srt-wasm crate + copy pkg to web/wasm/
+1. Forked `srt-protocol` (`maxolgi/srt-rs`) changes → `./build.sh srt-protocol` (rebuilds BOTH the gateway binary AND srt-wasm + copies pkg to web/wasm/)
 2. Changing only `web/src/*.ts` / `*.tsx` → Vite hot-reloads, no rebuild needed
-3. Changing `crates/srt-wasm/src/lib.rs` → wasm-pack build + copy pkg + browser reload
-4. Changing `crates/mpeg2ts-wasm/` or `crates/ts-muxer-wasm/` → wasm-pack build the touched crate + copy pkg + browser reload
-5. Changing `crates/websrt/` (library) → rebuild `websrt-gateway` binary + restart supervisord
+3. Changing `crates/srt-wasm/src/lib.rs` → `./build.sh wasm srt` + browser reload
+4. Changing `crates/mpeg2ts-wasm/` or `crates/ts-muxer-wasm/` → `./build.sh wasm <crate>` + browser reload
+5. Changing `crates/websrt/` (library) → `./build.sh gateway` + `./build.sh restart` (production only)
 
 ## Workspace structure
 
