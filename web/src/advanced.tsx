@@ -136,7 +136,6 @@ let renderer: CanvasRenderer | null = null;
 const audioCb = {
   onError: (e: unknown) => log(`audio err: ${e}`, 'err'),
   onReady: () => {
-    log('AudioDecoder ready', 'info');
     audioReady = true;
     wireAudio();
   },
@@ -274,14 +273,11 @@ function wireAudio() {
   if (track) {
     if (!audioEl) {
       audioEl = document.createElement('audio');
-      audioEl.autoplay = true;
       document.body.appendChild(audioEl);
     }
     audioEl.srcObject = new MediaStream([track]);
     audioEl.muted = true;
-    audioEl.play()
-      .then(() => { log('audio ready (muted — click to unmute)', 'info'); })
-      .catch((e) => log(`audio play failed: ${e}`, 'err'));
+    log('audio ready (muted — click to unmute)', 'info');
     muteBtn.disabled = false;
     muteBtn.textContent = 'muted';
   } else {
