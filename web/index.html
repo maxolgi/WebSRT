@@ -43,14 +43,14 @@
 
       /* Debug panel overlay */
       #debug-root {
-        position: fixed; top: 0; right: 0; width: 480px; height: 100vh;
+        position: fixed; top: 0; right: 0; width: 50vw; height: 100vh;
         background: rgba(17, 17, 17, 0.97); border-left: 1px solid #333;
         z-index: 9999; display: none; flex-direction: column;
         font-size: 12px; box-shadow: -4px 0 16px rgba(0,0,0,0.5);
       }
       #debug-root.visible { display: flex; }
       .debug-resizer {
-        position: fixed; top: 0; right: 480px; width: 7px; height: 100vh;
+        position: fixed; top: 0; right: 50vw; width: 7px; height: 100vh;
         cursor: col-resize; z-index: 10001; background: transparent;
         transition: background 0.15s; display: none;
         transform: translateX(50%);

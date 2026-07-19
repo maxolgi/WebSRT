@@ -471,6 +471,4 @@ if ((window as any).CERT_HASH !== undefined) {
   log('No cert-hash.js. Start the gateway first, then reload.', 'info');
 }
 
-if (localStorage.getItem('websrt-debug-open') === '1') {
-  setPanelVisible(true);
-}
+setPanelVisible(true);
