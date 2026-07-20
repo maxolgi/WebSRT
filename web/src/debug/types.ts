@@ -8,6 +8,7 @@ export interface VideoStats {
   decoderState: string;
   decodeQueueSize: number;
   decodedCount: number;
+  decodeFps: number;
   droppedFrames: number;
   hwAcceleration: string | undefined;
   hwModePreference: 'prefer-hardware' | 'prefer-software';

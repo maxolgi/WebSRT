@@ -77,7 +77,8 @@ export function CodecTab({ store }: Props): JSX.Element {
           <tr><td>Decode Queue</td><td>{video?.decodeQueueSize ?? 0}</td></tr>
           <tr><td>Decoded Frames</td><td>{video?.decodedCount ?? 0}</td></tr>
           <tr><td>Dropped Frames</td><td>{video?.droppedFrames ?? 0}</td></tr>
-          <tr><td>Decode FPS</td><td>{render?.fps ?? '—'}</td></tr>
+          <tr><td>Decode FPS</td><td>{video?.decodeFps?.toFixed(1) ?? '—'}</td></tr>
+          <tr><td>Render FPS</td><td>{render?.fps?.toFixed(1) ?? '—'}</td></tr>
         </table>
       </div>
 

@@ -618,6 +618,13 @@ export class VideoPipeline {
   private configured = false;
   private configuring = false;
   private decodedCount = 0;
+  // Decode-output FPS, sampled every 30 frames (same window pattern as
+  // CanvasRenderer). Distinct from the renderer's draw FPS — comparing the
+  // two isolates whether dropped frames come from upstream of the decoder
+  // or from the renderer's presentation ring.
+  private decodeFps = 0;
+  private decodeFpsCount = 0;
+  private decodeFpsLastTime = performance.now();
   private seenKeyframe = false;
   private droppedVideo = 0;
   private reconfigureCount = 0;
@@ -898,7 +905,7 @@ export class VideoPipeline {
       }
       this.decoder = new VideoDecoder({
         output: (frame) => {
-          this.decodedCount++;
+          this.markDecoded();
           this.cb.onFrame(frame);
         },
         // On an async decode error Chrome closes the decoder. Drop configured
@@ -988,7 +995,7 @@ export class VideoPipeline {
     }
     this.decoder = new VideoDecoder({
       output: (frame) => {
-        this.decodedCount++;
+        this.markDecoded();
         this.cb.onFrame(frame);
       },
       error: (e) => this.cb.onError(e),
@@ -1034,7 +1041,7 @@ export class VideoPipeline {
     }
     this.decoder = new VideoDecoder({
       output: (frame) => {
-        this.decodedCount++;
+        this.markDecoded();
         this.cb.onFrame(frame);
       },
       error: (e) => this.cb.onError(e),
@@ -1067,6 +1074,17 @@ export class VideoPipeline {
     }
   }
 
+  /** Bump decoded-frame counters; refresh decode FPS every 30 outputs. */
+  private markDecoded() {
+    this.decodedCount++;
+    this.decodeFpsCount++;
+    if (this.decodeFpsCount % 30 === 0) {
+      const now = performance.now();
+      this.decodeFps = (30 * 1000) / (now - this.decodeFpsLastTime);
+      this.decodeFpsLastTime = now;
+    }
+  }
+
   getStats(): import('./debug/types').VideoStats {
     return {
       codec: this.codec,
@@ -1074,6 +1092,7 @@ export class VideoPipeline {
       decoderState: this.decoder?.state ?? 'unconfigured',
       decodeQueueSize: this.decoder?.decodeQueueSize ?? 0,
       decodedCount: this.decodedCount,
+      decodeFps: this.decodeFps,
       droppedFrames: this.droppedVideo,
       hwAcceleration: this.lastHwAccel,
       hwModePreference: this.hwMode,
