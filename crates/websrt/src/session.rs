@@ -138,7 +138,6 @@ impl BrowserSession {
         let peer = conn.remote_address();
         tracing::info!(session_id, %peer, sim_loss, "session: starting SRT initiator");
 
-        let latency_ms = config.send_latency.as_millis() as u64;
         let initiator = Arc::new(Mutex::new(SrtInitiator::new(
             Self::DUMMY_LOCAL_ADDR.ip(),
             Self::DUMMY_REMOTE_ADDR,
@@ -159,7 +158,6 @@ impl BrowserSession {
             session_id,
             shutdown: shutdown.clone(),
             finished: AtomicBool::new(false),
-            latency_ms,
             publish_tx,
             publish_try_send_drops: AtomicU64::new(0),
             publish_tick_try_send_drops: AtomicU64::new(0),

@@ -44,8 +44,6 @@ pub(crate) struct SessionEntry {
     pub session_id: u64,
     pub shutdown: Arc<Notify>,
     pub finished: AtomicBool,
-    /// TSBPD latency (ms) — used for aggregate WT-RTT warnings in the ticker.
-    pub latency_ms: u64,
     /// Channel for routing upstream data (browser→gateway) to a broadcaster.
     /// None for viewer-only sessions.
     pub publish_tx: Option<tokio::sync::mpsc::Sender<TsMessage>>,

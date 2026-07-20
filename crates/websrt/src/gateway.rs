@@ -447,20 +447,8 @@ async fn run_ticker(registry: Arc<SessionRegistry>, shutdown: impl Future<Output
             _ = &mut shutdown => break,
             _ = stats_interval.tick() => {
                 let active = registry.len();
-                // Aggregate WT-RTT check: warn for sessions whose RTT suggests
-                // the configured TSBPD latency is too low (4×RTT rule of thumb).
                 let entries = registry.snapshot();
-                let rtt_warn_count = entries.iter().filter(|e| {
-                    let wt_rtt_ms = e.conn.rtt().as_secs_f64() * 1000.0;
-                    wt_rtt_ms * 4.0 > e.latency_ms as f64
-                }).count();
                 tracing::info!(active, "ticker stats");
-                if rtt_warn_count > 0 {
-                    tracing::warn!(
-                        rtt_warn_count,
-                        "sessions with WT RTT > 4×latency; consider raising --latency"
-                    );
-                }
                 for e in &entries {
                     let is_publish = e.publish_tx.is_some();
                     let viewer_lag = e.viewer.lock().unwrap().as_ref().map(|v| v.lag_count()).unwrap_or(0);
