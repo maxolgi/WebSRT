@@ -10,6 +10,8 @@ export interface VideoStats {
   decodedCount: number;
   droppedFrames: number;
   hwAcceleration: string | undefined;
+  hwModePreference: 'prefer-hardware' | 'prefer-software';
+  reconfigureCount: number;
   profile: number;
   level: number;
   codedWidth: number;
@@ -171,4 +173,5 @@ export interface TestActions {
   resetDecoder: () => void;
   reconnect: () => void;
   cycleLatency: () => void;
+  setHwMode: (mode: 'prefer-hardware' | 'prefer-software') => void;
 }

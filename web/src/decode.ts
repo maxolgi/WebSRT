@@ -620,6 +620,10 @@ export class VideoPipeline {
   private decodedCount = 0;
   private seenKeyframe = false;
   private droppedVideo = 0;
+  private reconfigureCount = 0;
+  // Hardware-acceleration preference. Exposed via setHwMode() so the debug
+  // panel can A/B test hardware vs software decode paths without reconnecting.
+  private hwMode: 'prefer-hardware' | 'prefer-software' = 'prefer-hardware';
   private lastCodecString: string | null = null;
   private lastHwAccel: string | undefined = undefined;
   private lastProfile = 0;
@@ -643,6 +647,23 @@ export class VideoPipeline {
       this.reset();
     }
     this.codecHint = codec;
+  }
+
+  /**
+   * Switch the hardware-acceleration preference. Takes effect on the next
+   * configure() — kept SPS/PPS/VPS/SH mean that happens immediately on the
+   * next feed() rather than waiting for a fresh keyframe. Callers should
+   * follow up with resetDecoder() if they want a clean slate instead.
+   */
+  setHwMode(mode: 'prefer-hardware' | 'prefer-software') {
+    if (this.hwMode === mode) return;
+    this.hwMode = mode;
+    this.configured = false;
+    this.seenKeyframe = false;
+    if (this.decoder) {
+      try { this.decoder.close(); } catch {}
+      this.decoder = null;
+    }
   }
 
   /** Feed a PES payload from the demuxer (Annex-B byte stream, or AV1 OBUs). */
@@ -852,6 +873,7 @@ export class VideoPipeline {
   private async configureAv1() {
     if (!this.av1ShRaw || this.configuring) return;
     this.configuring = true;
+    this.reconfigureCount++;
     try {
       const info = this.av1ShInfo;
       // Chrome accepts the raw Sequence Header OBU (header + size + payload) as
@@ -907,7 +929,7 @@ export class VideoPipeline {
         description,
         codedWidth,
         codedHeight,
-        hardwareAcceleration: 'prefer-hardware',
+        hardwareAcceleration: this.hwMode,
       } as VideoDecoderConfig);
 
       let chosen: string | null = null;
@@ -933,7 +955,7 @@ export class VideoPipeline {
       this.configured = true;
       this.seenKeyframe = false;
       this.lastCodecString = chosen;
-      this.lastHwAccel = 'prefer-hardware';
+      this.lastHwAccel = this.hwMode;
       this.lastProfile = infoValid ? info!.profile : 0;
       this.lastLevel = infoValid ? info!.levelIdx : 0;
       this.lastWidth = infoValid ? info!.width : 0;
@@ -951,6 +973,7 @@ export class VideoPipeline {
 
   private configureAvc() {
     if (!this.sps || !this.pps) return;
+    this.reconfigureCount++;
     const info = parseSps(this.sps);
     if (!info) return;
     const avcc = buildAvcC(this.sps, this.pps);
@@ -978,12 +1001,12 @@ export class VideoPipeline {
         description: avcc,
         codedWidth: info.width || undefined,
         codedHeight: info.height || undefined,
-        hardwareAcceleration: 'prefer-hardware',
+        hardwareAcceleration: this.hwMode,
       } as VideoDecoderConfig);
       this.configured = true;
       this.seenKeyframe = false;
       this.lastCodecString = codecStr;
-      this.lastHwAccel = 'prefer-hardware';
+      this.lastHwAccel = this.hwMode;
       this.lastProfile = info.profile;
       this.lastLevel = info.level;
       this.lastWidth = info.width;
@@ -1002,6 +1025,7 @@ export class VideoPipeline {
 
   private configureHevc() {
     if (!this.vps || !this.sps || !this.pps) return;
+    this.reconfigureCount++;
     const info = parseHevcSps(this.sps);
     const hvcc = buildHvcC(this.vps, this.sps, this.pps);
 
@@ -1021,12 +1045,12 @@ export class VideoPipeline {
       this.decoder.configure({
         codec,
         description: hvcc,
-        hardwareAcceleration: 'prefer-hardware',
+        hardwareAcceleration: this.hwMode,
       } as VideoDecoderConfig);
       this.configured = true;
       this.seenKeyframe = false;
       this.lastCodecString = codec;
-      this.lastHwAccel = 'prefer-hardware';
+      this.lastHwAccel = this.hwMode;
       this.lastProfile = info?.profileIdc ?? 0;
       this.lastLevel = info?.levelIdc ?? 0;
       this.lastWidth = info?.width ?? 0;
@@ -1052,6 +1076,8 @@ export class VideoPipeline {
       decodedCount: this.decodedCount,
       droppedFrames: this.droppedVideo,
       hwAcceleration: this.lastHwAccel,
+      hwModePreference: this.hwMode,
+      reconfigureCount: this.reconfigureCount,
       profile: this.lastProfile ?? 0,
       level: this.lastLevel ?? 0,
       codedWidth: this.lastWidth ?? 0,

@@ -390,6 +390,14 @@ store.testActions.value = {
     store.latencyMs.value = next;
     log(`Latency cycled to ${next}ms (reconnect to apply)`, 'info');
   },
+  setHwMode: (mode) => {
+    if (!video) {
+      log('Cannot switch hw mode — no active VideoPipeline', 'err');
+      return;
+    }
+    video.setHwMode(mode);
+    log(`VideoDecoder hw preference → ${mode} (applies on next feed())`, 'info');
+  },
 };
 
 function handleWorkerMsg(msg: WorkerMsg) {
