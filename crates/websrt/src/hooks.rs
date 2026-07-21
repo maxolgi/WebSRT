@@ -24,6 +24,23 @@
 use subtle::ConstantTimeEq;
 use std::net::SocketAddr;
 
+/// Extract a percent-decoded query parameter value from a `key=value&...`
+/// query string. Returns `None` if the key is absent.
+pub(crate) fn parse_query_param(query: &str, key: &str) -> Option<String> {
+    for kv in query.split('&') {
+        let mut parts = kv.splitn(2, '=');
+        if parts.next() == Some(key) {
+            let val = parts.next().unwrap_or("");
+            return Some(
+                percent_encoding::percent_decode_str(val)
+                    .decode_utf8_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    None
+}
+
 /// Information about an incoming WebTransport session request.
 ///
 /// Built by the gateway from the `wtransport::SessionRequest` and passed to
@@ -123,23 +140,13 @@ pub struct AuthTokenPolicy {
 
 impl SessionPolicy for AuthTokenPolicy {
     fn decide(&self, req: &SessionRequest) -> Decision {
-        let token_valid = req
-            .query
-            .split('&')
-            .find_map(|kv| {
-                let mut parts = kv.splitn(2, '=');
-                if parts.next()? == "token" {
-                    Some(parts.next().unwrap_or(""))
-                } else {
-                    None
-                }
-            })
-            .map(|t| {
-                let decoded = percent_encoding::percent_decode_str(t).decode_utf8_lossy();
-                let matched: bool = decoded.as_bytes().ct_eq(self.expected.as_bytes()).into();
+        let token_valid = match parse_query_param(req.query, "token") {
+            Some(t) => {
+                let matched: bool = t.as_bytes().ct_eq(self.expected.as_bytes()).into();
                 matched
-            })
-            .unwrap_or(false);
+            }
+            None => false,
+        };
         if token_valid {
             Decision::Accept
         } else {
@@ -336,5 +343,28 @@ mod tests {
         let outer = chain(inner, AcceptAll);
         assert_eq!(outer.decide(&req("/wt", "", None)), Decision::Accept);
         assert_eq!(outer.decide(&req("/other", "", None)), Decision::Reject);
+    }
+
+    // parse_query_param
+    #[test]
+    fn parse_query_param_basic() {
+        assert_eq!(parse_query_param("stream=foo&token=abc", "stream"), Some("foo".into()));
+        assert_eq!(parse_query_param("stream=foo&token=abc", "token"), Some("abc".into()));
+        assert_eq!(parse_query_param("stream=foo&token=abc", "missing"), None);
+    }
+
+    #[test]
+    fn parse_query_param_empty_query() {
+        assert_eq!(parse_query_param("", "stream"), None);
+    }
+
+    #[test]
+    fn parse_query_param_percent_decodes() {
+        assert_eq!(parse_query_param("stream=foo%20bar", "stream"), Some("foo bar".into()));
+    }
+
+    #[test]
+    fn parse_query_param_key_without_value() {
+        assert_eq!(parse_query_param("publish", "publish"), Some("".into()));
     }
 }

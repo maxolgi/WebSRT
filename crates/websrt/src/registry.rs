@@ -68,16 +68,9 @@ impl SessionRegistry {
         id
     }
 
-    pub fn remove(&self, session_id: u64) {
+    pub(crate) fn remove(&self, session_id: u64) {
         let mut w = self.entries.write().unwrap();
         w.remove(&session_id);
-    }
-
-    /// Number of active sessions. Currently unused inside the crate; will be
-    /// needed by the `GatewayStatsHandle::stats()` accessor.
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.entries.read().unwrap().len()
     }
 
     /// Snapshot all active session entries. Used by the ticker for iteration
@@ -165,11 +158,5 @@ impl SessionRegistry {
         for id in to_remove {
             self.remove(id);
         }
-    }
-}
-
-impl Default for SessionRegistry {
-    fn default() -> Self {
-        Self::new()
     }
 }

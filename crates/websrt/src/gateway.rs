@@ -237,10 +237,10 @@ impl Gateway {
                     //   ?stream=<name> or ?subscribe=<name> → view this stream
                     //   ?publish=<name>                     → publish this stream
                     // A session may both publish and view (different streams).
-                    let stream_name = parse_query_param(query, "stream")
-                        .or_else(|| parse_query_param(query, "subscribe"))
+                    let stream_name = crate::hooks::parse_query_param(query, "stream")
+                        .or_else(|| crate::hooks::parse_query_param(query, "subscribe"))
                         .unwrap_or_else(|| "default".to_string());
-                    let publish_name = parse_query_param(query, "publish");
+                    let publish_name = crate::hooks::parse_query_param(query, "publish");
 
                     // Pre-accept check: for viewer-only sessions, reject
                     // up-front if the requested stream isn't available (no
@@ -249,7 +249,7 @@ impl Gateway {
                     // the stream after accept.
                     if publish_name.is_none() && !self.inner.streams.is_alive(&stream_name) {
                         tracing::warn!(stream = %stream_name, "session rejected: stream not available");
-                        session_request.too_many_requests().await;
+                        session_request.not_found().await;
                         continue;
                     }
 
@@ -566,19 +566,6 @@ impl GatewaySourceHandle {
     }
 }
 
-/// Extract a percent-decoded query parameter value from a `key=value&...`
-/// query string. Returns `None` if the key is absent.
-fn parse_query_param(query: &str, key: &str) -> Option<String> {
-    for kv in query.split('&') {
-        let mut parts = kv.splitn(2, '=');
-        if parts.next() == Some(key) {
-            let val = parts.next().unwrap_or("");
-            return Some(percent_encoding::percent_decode_str(val).decode_utf8_lossy().into_owned());
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,28 +601,6 @@ mod tests {
     fn build_fails_without_identity() {
         let result = Gateway::builder().build();
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_query_param_basic() {
-        assert_eq!(parse_query_param("stream=foo&token=abc", "stream"), Some("foo".into()));
-        assert_eq!(parse_query_param("stream=foo&token=abc", "token"), Some("abc".into()));
-        assert_eq!(parse_query_param("stream=foo&token=abc", "missing"), None);
-    }
-
-    #[test]
-    fn parse_query_param_empty_query() {
-        assert_eq!(parse_query_param("", "stream"), None);
-    }
-
-    #[test]
-    fn parse_query_param_percent_decodes() {
-        assert_eq!(parse_query_param("stream=foo%20bar", "stream"), Some("foo bar".into()));
-    }
-
-    #[test]
-    fn parse_query_param_key_without_value() {
-        assert_eq!(parse_query_param("publish", "publish"), Some("".into()));
     }
 
     #[tokio::test]
