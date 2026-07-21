@@ -872,6 +872,64 @@ export class VideoPipeline {
     }
   }
 
+  /**
+   * Build a fresh VideoDecoder, call `configure()`, and store the resulting
+   * stats fields. Returns true on success, false on sync configure error.
+   *
+   * Codec-specific code (codec string, description bytes, coded dimensions,
+   * optional pre-probe) is supplied by the caller. The default error callback
+   * just forwards to `cb.onError`; AV1 overrides it to also reset `configured`
+   * and `seenKeyframe` so the next keyframe (which carries a fresh SH)
+   * reconfigures a new decoder.
+   */
+  private applyDecoderConfig(cfg: {
+    codecStr: string;
+    description: Uint8Array;
+    codedWidth?: number;
+    codedHeight?: number;
+    profile: number;
+    level: number;
+    width: number;
+    height: number;
+    onError?: (e: unknown) => void;
+  }): boolean {
+    if (this.decoder) {
+      try { this.decoder.close(); } catch {}
+    }
+    this.decoder = new VideoDecoder({
+      output: (frame) => { this.markDecoded(); this.cb.onFrame(frame); },
+      error: cfg.onError ?? ((e: unknown) => this.cb.onError(e)),
+    });
+    try {
+      this.decoder.configure({
+        codec: cfg.codecStr,
+        description: cfg.description,
+        codedWidth: cfg.codedWidth,
+        codedHeight: cfg.codedHeight,
+        hardwareAcceleration: this.hwMode,
+      } as VideoDecoderConfig);
+    } catch (e) {
+      this.cb.onError(e);
+      this.decoder = null;
+      return false;
+    }
+    this.configured = true;
+    this.seenKeyframe = false;
+    this.lastCodecString = cfg.codecStr;
+    this.lastHwAccel = this.hwMode;
+    this.lastProfile = cfg.profile;
+    this.lastLevel = cfg.level;
+    this.lastWidth = cfg.width;
+    this.lastHeight = cfg.height;
+    this.cb.onConfigured({
+      width: cfg.width,
+      height: cfg.height,
+      profile: cfg.profile,
+      level: cfg.level,
+    });
+    return true;
+  }
+
   private async configureAv1() {
     if (!this.av1ShRaw || this.configuring) return;
     this.configuring = true;
@@ -894,24 +952,6 @@ export class VideoPipeline {
       const preferred = infoValid ? buildAv1CodecString(info!) : null;
       const codedWidth = infoValid ? info!.width : undefined;
       const codedHeight = infoValid ? info!.height : undefined;
-
-      if (this.decoder) {
-        try { this.decoder.close(); } catch {}
-      }
-      this.decoder = new VideoDecoder({
-        output: (frame) => {
-          this.markDecoded();
-          this.cb.onFrame(frame);
-        },
-        // On an async decode error Chrome closes the decoder. Drop configured
-        // so the next keyframe (which carries a fresh SH) reconfigures a new
-        // decoder instead of feeding chunks into a dead one forever.
-        error: (e) => {
-          this.configured = false;
-          this.seenKeyframe = false;
-          this.cb.onError(e);
-        },
-      });
 
       // MUST validate via isConfigSupported: VideoDecoder.configure() does NOT
       // throw synchronously for an unsupported codec — it resolves and then
@@ -949,24 +989,30 @@ export class VideoPipeline {
       if (!chosen) {
         console.warn(`VideoPipeline AV1: no supported codec string (tried ${tried.join(', ')})`);
         this.cb.onError(new Error(`AV1 VideoDecoder not supported (tried ${tried.join(', ')})`));
-        this.decoder = null;
+        if (this.decoder) {
+          try { this.decoder.close(); } catch {}
+          this.decoder = null;
+        }
         return;
       }
 
-      this.decoder.configure(buildCfg(chosen));
-      this.configured = true;
-      this.seenKeyframe = false;
-      this.lastCodecString = chosen;
-      this.lastHwAccel = this.hwMode;
-      this.lastProfile = infoValid ? info!.profile : 0;
-      this.lastLevel = infoValid ? info!.levelIdx : 0;
-      this.lastWidth = infoValid ? info!.width : 0;
-      this.lastHeight = infoValid ? info!.height : 0;
-      this.cb.onConfigured({
-        width: infoValid ? info!.width : 0,
-        height: infoValid ? info!.height : 0,
+      // On an async decode error Chrome closes the decoder. Drop configured
+      // so the next keyframe (which carries a fresh SH) reconfigures a new
+      // decoder instead of feeding chunks into a dead one forever.
+      this.applyDecoderConfig({
+        codecStr: chosen,
+        description,
+        codedWidth,
+        codedHeight,
         profile: infoValid ? info!.profile : 0,
         level: infoValid ? info!.levelIdx : 0,
+        width: infoValid ? info!.width : 0,
+        height: infoValid ? info!.height : 0,
+        onError: (e) => {
+          this.configured = false;
+          this.seenKeyframe = false;
+          this.cb.onError(e);
+        },
       });
     } finally {
       this.configuring = false;
@@ -978,95 +1024,34 @@ export class VideoPipeline {
     this.reconfigureCount++;
     const info = parseSps(this.sps);
     if (!info) return;
-    const avcc = buildAvcC(this.sps, this.pps);
-
-    // Reset if previously configured.
-    if (this.decoder) {
-      try {
-        this.decoder.close();
-      } catch {
-        // ignore
-      }
-    }
-    this.decoder = new VideoDecoder({
-      output: (frame) => {
-        this.markDecoded();
-        this.cb.onFrame(frame);
-      },
-      error: (e) => this.cb.onError(e),
+    const description = buildAvcC(this.sps, this.pps);
+    const codecStr = 'avc1.' + toHex(info.profile) + toHex(info.constraint) + toHex(info.level);
+    this.applyDecoderConfig({
+      codecStr,
+      description,
+      codedWidth: info.width || undefined,
+      codedHeight: info.height || undefined,
+      profile: info.profile,
+      level: info.level,
+      width: info.width,
+      height: info.height,
     });
-
-    try {
-      const codecStr = 'avc1.' + toHex(info.profile) + toHex(info.constraint) + toHex(info.level);
-      this.decoder.configure({
-        codec: codecStr,
-        description: avcc,
-        codedWidth: info.width || undefined,
-        codedHeight: info.height || undefined,
-        hardwareAcceleration: this.hwMode,
-      } as VideoDecoderConfig);
-      this.configured = true;
-      this.seenKeyframe = false;
-      this.lastCodecString = codecStr;
-      this.lastHwAccel = this.hwMode;
-      this.lastProfile = info.profile;
-      this.lastLevel = info.level;
-      this.lastWidth = info.width;
-      this.lastHeight = info.height;
-      this.cb.onConfigured({
-        width: info.width,
-        height: info.height,
-        profile: info.profile,
-        level: info.level,
-      });
-    } catch (e) {
-      this.cb.onError(e);
-      this.decoder = null;
-    }
   }
 
   private configureHevc() {
     if (!this.vps || !this.sps || !this.pps) return;
     this.reconfigureCount++;
     const info = parseHevcSps(this.sps);
-    const hvcc = buildHvcC(this.vps, this.sps, this.pps);
-
-    if (this.decoder) {
-      try { this.decoder.close(); } catch {}
-    }
-    this.decoder = new VideoDecoder({
-      output: (frame) => {
-        this.markDecoded();
-        this.cb.onFrame(frame);
-      },
-      error: (e) => this.cb.onError(e),
+    const description = buildHvcC(this.vps, this.sps, this.pps);
+    const codecStr = info ? buildHevcCodecString(info) : 'hev1.1.6.L0';
+    this.applyDecoderConfig({
+      codecStr,
+      description,
+      profile: info?.profileIdc ?? 0,
+      level: info?.levelIdc ?? 0,
+      width: info?.width ?? 0,
+      height: info?.height ?? 0,
     });
-
-    const codec = info ? buildHevcCodecString(info) : 'hev1.1.6.L0';
-    try {
-      this.decoder.configure({
-        codec,
-        description: hvcc,
-        hardwareAcceleration: this.hwMode,
-      } as VideoDecoderConfig);
-      this.configured = true;
-      this.seenKeyframe = false;
-      this.lastCodecString = codec;
-      this.lastHwAccel = this.hwMode;
-      this.lastProfile = info?.profileIdc ?? 0;
-      this.lastLevel = info?.levelIdc ?? 0;
-      this.lastWidth = info?.width ?? 0;
-      this.lastHeight = info?.height ?? 0;
-      this.cb.onConfigured({
-        width: info?.width ?? 0,
-        height: info?.height ?? 0,
-        profile: info?.profileIdc ?? 0,
-        level: info?.levelIdc ?? 0,
-      });
-    } catch (e) {
-      this.cb.onError(e);
-      this.decoder = null;
-    }
   }
 
   /** Bump decoded-frame counters; refresh decode FPS every 30 outputs. */
