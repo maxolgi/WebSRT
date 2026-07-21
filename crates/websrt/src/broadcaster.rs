@@ -15,16 +15,15 @@ use tokio::sync::broadcast;
 /// SRT sender.
 pub struct ViewerRx {
     rx: broadcast::Receiver<TsMessage>,
-    lag_count: u64,
 }
 
 /// Wraps an Ingester in a many-reader pipeline. The source is read exactly
 /// once; every `ViewerRx` gets its own copy of each message.
 ///
 /// `tx` is held behind a `Mutex<Option<_>>` so the background task can drop
-/// the sender when the source ends, closing the channel and unblocking all
-/// `ViewerRx::recv()` calls. Without this, viewers attached to a dead source
-/// would hang until the SRT idle timeout fires.
+/// the sender when the source ends, closing the channel so viewers attached
+/// to a dead source observe `Closed` on their next `try_recv()` instead of
+/// hanging until the SRT idle timeout fires.
 pub struct Broadcaster {
     tx: Mutex<Option<broadcast::Sender<TsMessage>>>,
     /// Maximum viewers; enforced by `subscribe()`.
@@ -74,8 +73,8 @@ impl Broadcaster {
             }
             alive_task.store(false, Ordering::SeqCst);
             // Drop the task's Sender clone, then clear the Broadcaster's copy so
-            // the broadcast channel closes and every ViewerRx::recv() returns
-            // Ok(None) instead of hanging until the SRT idle timeout.
+            // the broadcast channel closes and every ViewerRx::try_recv()
+            // returns Ok(None) instead of hanging until the SRT idle timeout.
             drop(tx2);
             *bc_clone.tx.lock().unwrap() = None;
             tracing::info!(sent, "broadcaster task exited");
@@ -96,7 +95,6 @@ impl Broadcaster {
         }
         Some(ViewerRx {
             rx: tx.subscribe(),
-            lag_count: 0,
         })
     }
 
@@ -121,34 +119,8 @@ impl ViewerRx {
         match self.rx.try_recv() {
             Ok(m) => Ok(Some(m)),
             Err(broadcast::error::TryRecvError::Empty) => Ok(None),
-            Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                self.lag_count += n;
-                Err(n)
-            }
+            Err(broadcast::error::TryRecvError::Lagged(n)) => Err(n),
             Err(broadcast::error::TryRecvError::Closed) => Ok(None),
         }
-    }
-
-    /// Get the next TS message. Returns `None` only when the source has ended.
-    pub async fn recv(&mut self) -> Result<Option<TsMessage>> {
-        loop {
-            match self.rx.recv().await {
-                Ok(m) => return Ok(Some(m)),
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    self.lag_count += n;
-                    tracing::warn!(
-                        lagged = n,
-                        total_lag = self.lag_count,
-                        "viewer lagged behind; dropped messages"
-                    );
-                    continue;
-                }
-                Err(broadcast::error::RecvError::Closed) => return Ok(None),
-            }
-        }
-    }
-
-    pub fn lag_count(&self) -> u64 {
-        self.lag_count
     }
 }

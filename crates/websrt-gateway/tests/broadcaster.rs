@@ -6,9 +6,9 @@
 //! Note: `Broadcaster` retains a clone of the broadcast `Sender`, so the
 //! channel only closes once the `Broadcaster` itself is dropped. The
 //! background task flips `alive=false` when the ingester returns `Ok(None)`,
-//! but `ViewerRx::recv` will keep blocking until the channel closes. These
-//! tests therefore drain with `try_recv` (non-blocking) after waiting for the
-//! task to exit.
+//! but the underlying broadcast channel stays open until `Broadcaster` is
+//! dropped. These tests therefore drain with `try_recv` (non-blocking) after
+//! waiting for the task to exit.
 
 use bytes::Bytes;
 use std::time::{Duration, Instant};

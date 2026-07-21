@@ -147,6 +147,24 @@ pub(crate) mod tests {
     use bytes::Bytes;
     use std::time::Instant;
 
+    /// Test helper: poll `try_recv` until a message arrives or 500ms elapses.
+    /// Replaces the deleted `ViewerRx::recv` for test ergonomics.
+    async fn recv_one(viewer: &mut ViewerRx) -> Option<TsMessage> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            match viewer.try_recv() {
+                Ok(Some(m)) => return Some(m),
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        return None;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                Err(lag) => panic!("viewer lagged: {}", lag),
+            }
+        }
+    }
+
     /// Minimal ingester that yields a fixed number of messages then ends.
     pub(crate) struct FiniteIngester {
         remaining: u32,
@@ -179,8 +197,7 @@ pub(crate) mod tests {
         let tx = registry.publish("foo");
         let mut viewer = registry.subscribe("foo").expect("stream exists");
         tx.try_send(msg()).unwrap();
-        // Drain the broadcaster task via recv.
-        let received = viewer.recv().await.unwrap();
+        let received = recv_one(&mut viewer).await;
         assert!(received.is_some());
     }
 
@@ -214,7 +231,7 @@ pub(crate) mod tests {
         // Re-publishing replaces; the new sender is the live one.
         tx2.try_send(msg()).unwrap();
         let mut viewer = registry.subscribe("dup").expect("stream exists");
-        let received = viewer.recv().await.unwrap();
+        let received = recv_one(&mut viewer).await;
         assert!(received.is_some());
         // Old sender is orphaned (no receivers) but try_send still buffers.
         let _ = tx1;
@@ -229,10 +246,10 @@ pub(crate) mod tests {
             let mut viewer = registry
                 .subscribe("ephemeral")
                 .expect("stream exists before drain");
-            while viewer.recv().await.ok().flatten().is_some() {}
+            // Give the broadcaster task time to flush + close.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            while viewer.try_recv().ok().flatten().is_some() {}
         }
-        // Give the broadcaster task a moment to mark itself dead.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert!(!registry.is_alive("ephemeral"));
         registry.cleanup();
         assert_eq!(registry.stream_count(), 0);

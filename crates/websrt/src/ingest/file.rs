@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 const TS_PACKET: usize = 188;
-const PAYLOAD_BYTES: usize = 1100; // matches PAYLOAD_SIZE in srt_sender.rs
+const PAYLOAD_BYTES: usize = crate::srt_sender::PAYLOAD_SIZE as usize;
 const PACKETS_PER_MESSAGE: usize = PAYLOAD_BYTES / TS_PACKET; // = 5
 
 pub struct FileIngester {
@@ -36,7 +36,6 @@ pub struct FileIngester {
     bytes_per_sec: f64,
     /// Total bytes emitted so far (loops over).
     emitted: u64,
-    loop_count: u64,
 }
 
 impl FileIngester {
@@ -77,12 +76,11 @@ impl FileIngester {
             start: None,
             bytes_per_sec,
             emitted: 0,
-            loop_count: 0,
         })
     }
 
     /// Per-message byte budget.
-    pub fn message_bytes(&self) -> usize {
+    fn message_bytes(&self) -> usize {
         PACKETS_PER_MESSAGE * TS_PACKET
     }
 }
@@ -95,8 +93,7 @@ impl Ingester for FileIngester {
         // Loop the file if we've reached the end.
         if self.cursor + chunk > self.data.len() {
             self.cursor = 0;
-            self.loop_count += 1;
-            tracing::info!(loop_count = self.loop_count, "fixture looped");
+            tracing::info!("fixture looped");
         }
 
         // First call establishes the start time at "now"; the message's
