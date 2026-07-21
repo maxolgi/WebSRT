@@ -97,7 +97,7 @@ impl LossInjector {
 /// A single browser session: constructs the shared `SessionEntry` and spawns
 /// the per-session `recv_pump`. Sender-side driving is handled centrally by
 /// [`crate::registry::SessionRegistry::tick_all`].
-pub struct BrowserSession;
+pub(crate) struct BrowserSession;
 
 impl BrowserSession {
     /// Dummy socket addresses required by srt-protocol's Connect/Listen state

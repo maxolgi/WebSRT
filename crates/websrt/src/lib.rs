@@ -49,6 +49,5 @@ pub use cert::{Cert, CertSource};
 pub use gateway::{Gateway, GatewayBuilder, GatewaySourceHandle, GatewayStats, GatewayStatsHandle};
 pub use hooks::{Decision, SessionPolicy, SessionRequest};
 pub use ingest::{ChannelIngester, Ingester, TsMessage};
-pub use session::BrowserSession;
-pub use srt_sender::{SenderAction, SrtConfig, SrtInitiator};
+pub use srt_sender::SrtConfig;
 pub use stream_registry::{StreamRegistry, StreamStats};
