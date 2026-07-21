@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Notify;
 use wtransport::Endpoint;
 use wtransport::Identity;
 use wtransport::ServerConfig;
@@ -30,19 +30,13 @@ const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
 /// Build with [`Gateway::builder`], set an ingester via [`Gateway::source_handle`],
 /// then call [`Gateway::run`] to start the accept loop.
 pub struct Gateway {
-    inner: Arc<GatewayInner>,
+    streams: Arc<StreamRegistry>,
     bind_addr: SocketAddr,
     identity: Identity,
     policy: Arc<dyn crate::hooks::SessionPolicy>,
     srt_config: SrtConfig,
-    #[cfg(feature = "sim-loss")]
     sim_loss: u8,
-    #[cfg(feature = "sim-loss")]
     sim_seed: u64,
-}
-
-struct GatewayInner {
-    streams: Arc<StreamRegistry>,
 }
 
 /// Builder for [`Gateway`].
@@ -56,9 +50,7 @@ pub struct GatewayBuilder {
     auth_token: Option<String>,
     allowed_origins: Vec<String>,
     session_policy: Option<Arc<dyn crate::hooks::SessionPolicy>>,
-    #[cfg(feature = "sim-loss")]
     sim_loss: u8,
-    #[cfg(feature = "sim-loss")]
     sim_seed: u64,
 }
 
@@ -68,7 +60,7 @@ pub struct GatewayBuilder {
 /// can be moved into a background task to connect the source asynchronously
 /// (e.g. waiting for OBS to connect).
 pub struct GatewaySourceHandle {
-    inner: Arc<GatewayInner>,
+    streams: Arc<StreamRegistry>,
 }
 
 /// Snapshot of gateway-wide stats. Returned by [`GatewayStatsHandle::stats`].
@@ -94,7 +86,7 @@ pub struct GatewayStats {
 /// owns its own `Arc` clone, so it can be moved into a separate task (e.g. a
 /// health/metrics HTTP server spawned by the embedding application).
 pub struct GatewayStatsHandle {
-    inner: Arc<GatewayInner>,
+    streams: Arc<StreamRegistry>,
 }
 
 impl GatewayStatsHandle {
@@ -102,12 +94,12 @@ impl GatewayStatsHandle {
     /// registry briefly, no I/O.
     pub fn stats(&self) -> GatewayStats {
         GatewayStats {
-            streams: self.inner.streams.stream_count(),
-            alive_streams: self.inner.streams.alive_stream_count(),
-            total_viewers: self.inner.streams.total_viewers(),
-            max_viewers: self.inner.streams.max_viewers(),
-            broadcast_capacity: self.inner.streams.broadcast_capacity(),
-            per_stream: self.inner.streams.snapshot_streams(),
+            streams: self.streams.stream_count(),
+            alive_streams: self.streams.alive_stream_count(),
+            total_viewers: self.streams.total_viewers(),
+            max_viewers: self.streams.max_viewers(),
+            broadcast_capacity: self.streams.broadcast_capacity(),
+            per_stream: self.streams.snapshot_streams(),
         }
     }
 }
@@ -125,10 +117,8 @@ impl Gateway {
             auth_token: None,
             allowed_origins: Vec::new(),
             session_policy: None,
-            #[cfg(feature = "sim-loss")]
             sim_loss: 0,
-            #[cfg(feature = "sim-loss")]
-            sim_seed: 42,
+            sim_seed: 0,
         }
     }
 
@@ -138,7 +128,7 @@ impl Gateway {
     /// can be moved into a separate task.
     pub fn source_handle(&self) -> GatewaySourceHandle {
         GatewaySourceHandle {
-            inner: self.inner.clone(),
+            streams: self.streams.clone(),
         }
     }
 
@@ -148,7 +138,7 @@ impl Gateway {
     /// can be moved into a separate task (e.g. a health/metrics HTTP server).
     pub fn stats_handle(&self) -> GatewayStatsHandle {
         GatewayStatsHandle {
-            inner: self.inner.clone(),
+            streams: self.streams.clone(),
         }
     }
 
@@ -168,15 +158,14 @@ impl Gateway {
             "WebTransport server listening"
         );
 
-        let session_handles: Arc<Mutex<Vec<(Arc<Notify>, tokio::task::JoinHandle<()>)>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let mut session_handles: Vec<(Arc<Notify>, tokio::task::JoinHandle<()>)> = Vec::new();
 
         // Centralized session registry + ticker. ONE ticker task drives all
         // sessions' SRT state machines (~2ms cadence).
         let registry = Arc::new(SessionRegistry::new());
         let ticker_shutdown = Arc::new(Notify::new());
         let ticker_registry = registry.clone();
-        let ticker_streams = self.inner.streams.clone();
+        let ticker_streams = self.streams.clone();
         let ticker_shutdown_for_task = ticker_shutdown.clone();
         let ticker_handle = tokio::spawn(async move {
             run_ticker(ticker_registry, ticker_streams, ticker_shutdown_for_task.notified()).await;
@@ -247,7 +236,7 @@ impl Gateway {
                     // source yet, or source ended). This avoids a wasted WT
                     // handshake. Publishing sessions skip this — they create
                     // the stream after accept.
-                    if publish_name.is_none() && !self.inner.streams.is_alive(&stream_name) {
+                    if publish_name.is_none() && !self.streams.is_alive(&stream_name) {
                         tracing::warn!(stream = %stream_name, "session rejected: stream not available");
                         session_request.not_found().await;
                         continue;
@@ -296,16 +285,16 @@ impl Gateway {
                     let (viewer, publish_tx) = match &publish_name {
                         Some(pub_name) => {
                             // Publishing session: create the stream channel.
-                            let tx = self.inner.streams.publish(pub_name);
+                            let tx = self.streams.publish(pub_name);
                             // Optionally also view a different stream.
                             let view = if pub_name.as_str() != stream_name.as_str() {
-                                self.inner.streams.subscribe(&stream_name)
+                                self.streams.subscribe(&stream_name)
                             } else {
                                 None
                             };
                             (view, Some(tx))
                         }
-                        None => match self.inner.streams.subscribe(&stream_name) {
+                        None => match self.streams.subscribe(&stream_name) {
                             Some(v) => (Some(v), None),
                             None => {
                                 tracing::warn!(
@@ -318,25 +307,15 @@ impl Gateway {
                         },
                     };
 
-                    #[cfg(feature = "sim-loss")]
                     let (entry, handle) = BrowserSession::create(
                         connection, viewer,
                         self.sim_loss, self.sim_seed, self.srt_config.clone(),
                         publish_tx,
                     ).await;
-                    #[cfg(not(feature = "sim-loss"))]
-                    let (entry, handle) = BrowserSession::create(
-                        connection, viewer,
-                        0, 0, self.srt_config.clone(),
-                        publish_tx,
-                    ).await;
                     let session_shutdown = entry.shutdown.clone();
                     registry.insert(entry);
-                    {
-                        let mut handles = session_handles.lock().await;
-                        handles.retain(|(_, h)| !h.is_finished());
-                        handles.push((session_shutdown, handle));
-                    }
+                    session_handles.retain(|(_, h)| !h.is_finished());
+                    session_handles.push((session_shutdown, handle));
                 }
             }
         }
@@ -350,7 +329,7 @@ impl Gateway {
 
         // Graceful drain: signal each session's shutdown Notify, wait up to
         // 3s for it to exit on its own, then fall back to abort.
-        let handles = std::mem::take(&mut *session_handles.lock().await);
+        let handles = std::mem::take(&mut session_handles);
         if !handles.is_empty() {
             tracing::info!(count = handles.len(), "shutting down active sessions");
             // Signal graceful shutdown
@@ -536,14 +515,12 @@ impl GatewayBuilder {
         };
 
         Ok(Gateway {
-            inner: Arc::new(GatewayInner { streams }),
+            streams,
             bind_addr: self.bind_addr,
             identity,
             policy,
             srt_config: self.srt_config,
-            #[cfg(feature = "sim-loss")]
             sim_loss: self.sim_loss,
-            #[cfg(feature = "sim-loss")]
             sim_seed: self.sim_seed,
         })
     }
@@ -555,14 +532,14 @@ impl GatewaySourceHandle {
     /// under `name`. Replaces any previously registered stream of the same
     /// name.
     pub fn publish_stream<I: Ingester + Send + 'static>(&self, name: &str, ingester: I) {
-        self.inner.streams.publish_ingester(name, ingester);
+        self.streams.publish_ingester(name, ingester);
     }
 
     /// Create a channel-backed stream for browser upstream sessions. Returns
     /// the [`mpsc::Sender`] for pushing TS messages into the stream. The stream
     /// is immediately available for viewers to subscribe under `name`.
     pub fn publish_channel(&self, name: &str) -> mpsc::Sender<TsMessage> {
-        self.inner.streams.publish(name)
+        self.streams.publish(name)
     }
 }
 
@@ -576,7 +553,7 @@ mod tests {
             .max_viewers(0)
             .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
         let gateway = builder.build().unwrap();
-        assert_eq!(gateway.inner.streams.max_viewers(), 1);
+        assert_eq!(gateway.streams.max_viewers(), 1);
     }
 
     #[test]
@@ -585,7 +562,7 @@ mod tests {
             .broadcast_capacity(0)
             .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
         let gateway = builder.build().unwrap();
-        assert_eq!(gateway.inner.streams.broadcast_capacity(), 1);
+        assert_eq!(gateway.streams.broadcast_capacity(), 1);
     }
 
     #[test]
