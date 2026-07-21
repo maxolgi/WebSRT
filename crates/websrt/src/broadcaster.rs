@@ -2,7 +2,7 @@
 //! its own receiver. Lagging receivers (slow browsers) miss messages rather
 //! than blocking the source.
 //!
-//! Phase 9: also surfaces a session cap (`max_viewers`).
+//! Also surfaces a session cap (`max_viewers`).
 
 use crate::ingest::{Ingester, TsMessage};
 use anyhow::Result;
@@ -53,39 +53,24 @@ impl Broadcaster {
         let tx2 = tx.clone();
         tokio::spawn(async move {
             let mut sent = 0u64;
-            let mut last_sent = 0u64;
-            let mut heartbeat_at = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
-                let next_msg = ingester.next_message();
-                tokio::pin!(next_msg);
-                tokio::select! {
-                    res = &mut next_msg => match res {
-                        Ok(Some(msg)) => {
-                            sent += 1;
-                            if tx2.send(msg).is_err() {
-                                tracing::debug!(
-                                    rx_count = tx2.receiver_count(),
-                                    "broadcast send failed (no active receivers)"
-                                );
-                            }
+                match ingester.next_message().await {
+                    Ok(Some(msg)) => {
+                        sent += 1;
+                        if tx2.send(msg).is_err() {
+                            tracing::debug!(
+                                rx_count = tx2.receiver_count(),
+                                "broadcast send failed (no active receivers)"
+                            );
                         }
-                        Ok(None) => {
-                            tracing::info!("ingester source ended; broadcaster shutting down");
-                            break;
-                        }
-                        Err(e) => {
-                            tracing::warn!(?e, "ingester error");
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        }
-                    },
-                    _ = tokio::time::sleep_until(heartbeat_at) => {
-                        tracing::info!(
-                            sent, delta = sent - last_sent,
-                            rx_count = tx2.receiver_count(),
-                            "broadcaster heartbeat"
-                        );
-                        last_sent = sent;
-                        heartbeat_at = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+                    }
+                    Ok(None) => {
+                        tracing::info!("ingester source ended; broadcaster shutting down");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(?e, "ingester error");
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     }
                 }
             }
@@ -95,7 +80,7 @@ impl Broadcaster {
             // Ok(None) instead of hanging until the SRT idle timeout.
             drop(tx2);
             *bc_clone.tx.lock().unwrap() = None;
-            tracing::info!("broadcaster task exited");
+            tracing::info!(sent, "broadcaster task exited");
         });
         broadcaster
     }

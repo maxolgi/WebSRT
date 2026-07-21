@@ -6,16 +6,10 @@
 //!   cheap — it blocks on WT datagram receive — so one per session is fine.
 //! - **sender drive** (the centralized ticker in [`crate::registry`]): a
 //!   single shared task ticks every active session's SRT state machine ~2ms
-//!   and pushes viewer data. Replaces the historical per-session sender_pump,
-//!   which at 500+ viewers generated ~250k timer wakeups/sec.
+//!   and pushes viewer data.
 //!
 //! The two halves share `SrtInitiator`, `LossInjector`, the WT `Connection`,
 //! and the shutdown signal via an `Arc<SessionEntry>` (see [`registry`]).
-//!
-//! Phase 5 note: optional `--sim-loss N` drops outgoing data datagrams with
-//! N% probability, exercising NAK/retransmit and TLPKTL. The dropper lives
-//! here so both recv_pump (handshake/ACK replies) and the ticker (data
-//! packets) share one injector per session.
 
 #[cfg(feature = "sim-loss")]
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -132,7 +126,6 @@ impl BrowserSession {
         sim_seed: u64,
         config: SrtConfig,
         publish_tx: Option<tokio::sync::mpsc::Sender<TsMessage>>,
-        streamid: Option<String>,
     ) -> (Arc<SessionEntry>, JoinHandle<()>) {
         let session_id = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
         let peer = conn.remote_address();
@@ -142,7 +135,6 @@ impl BrowserSession {
             Self::DUMMY_LOCAL_ADDR.ip(),
             Self::DUMMY_REMOTE_ADDR,
             &config,
-            streamid,
         )));
         let loss = Arc::new(Mutex::new(LossInjector::new(sim_loss, sim_seed)));
         let shutdown = Arc::new(Notify::new());
@@ -152,21 +144,10 @@ impl BrowserSession {
             initiator: initiator.clone(),
             loss: loss.clone(),
             viewer: StdMutex::new(viewer),
-            // Deadline is now so the ticker's first iteration picks this
-            // session up immediately and runs the induction handshake.
-            next_deadline: StdMutex::new(Instant::now()),
             session_id,
             shutdown: shutdown.clone(),
             finished: AtomicBool::new(false),
             publish_tx,
-            publish_try_send_drops: AtomicU64::new(0),
-            publish_tick_try_send_drops: AtomicU64::new(0),
-            publish_release_total: AtomicU64::new(0),
-            publish_bytes_total: AtomicU64::new(0),
-            viewer_pushed_bytes: AtomicU64::new(0),
-            viewer_sent_datagrams: AtomicU64::new(0),
-            drain_wait_count: AtomicU64::new(0),
-            drain_wait_last_us: AtomicU64::new(0),
         });
 
         // Kick off the handshake immediately so the INDUCTION packet leaves
@@ -224,49 +205,20 @@ impl BrowserSession {
             let payload = d.payload();
             let now = Instant::now();
             let mut should_close = false;
-            let (actions, wait) = {
+            let (actions, _wait) = {
                 let mut init = entry.initiator.lock().await;
                 init.handle_datagram(&payload, now)
             };
-            // Pull in the next deadline so the ticker runs this session's
-            // Timer-driven logic (ACK/NAK/EXP/TSBPD release) promptly.
-            // Without this, publish-only sessions are only ticked at the
-            // periodic interval returned by the last tick(); incoming data
-            // never reschedules it, so the SRT receiver starves and packets
-            // stall then drain in bursts.
-            {
-                let mut nd = entry.next_deadline.lock().unwrap();
-                let candidate = now + wait;
-                if candidate < *nd {
-                    *nd = candidate;
-                }
-            }
             {
                 let mut l = entry.loss.lock().await;
                 for action in actions {
                     match &action {
                         SenderAction::ReleaseData((ts, bytes)) => {
-                            if let Some(tx) = &entry.publish_tx {
-                                entry.publish_release_total.fetch_add(1, Ordering::Relaxed);
-                                entry.publish_bytes_total.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                                if tx.try_send((*ts, bytes.clone())).is_err() {
-                                    entry.publish_try_send_drops.fetch_add(1, Ordering::Relaxed);
-                                    tracing::debug!(
-                                        session_id = entry.session_id,
-                                        queued = tx.capacity(),
-                                        "publish_tx try_send drop in recv_pump"
-                                    );
-                                }
-                            }
+                            route_release_data(&entry, *ts, bytes);
                             continue;
                         }
                         SenderAction::Close => {
                             should_close = true;
-                        }
-                        SenderAction::DrainWait(d) => {
-                            entry.drain_wait_count.fetch_add(1, Ordering::Relaxed);
-                            entry.drain_wait_last_us.store(d.as_micros() as u64, Ordering::Relaxed);
-                            continue;
                         }
                         _ => {}
                     }
@@ -315,12 +267,25 @@ pub(crate) fn send_action(
         SenderAction::Close => {
             tracing::info!("session: Close");
         }
-        SenderAction::Log(s) => {
-            tracing::info!("session: log: {s}");
-        }
-        SenderAction::DrainWait(_) => {
-            // Instrumentation only; handled by caller.
-        }
     }
     Ok(())
+}
+
+/// Route a `ReleaseData` action to the session's publish channel (if any).
+/// Called from both `recv_pump` and `tick_all` — centralizes the routing
+/// logic and the backpressure-debug log.
+pub(crate) fn route_release_data(
+    entry: &SessionEntry,
+    ts: std::time::Instant,
+    bytes: &bytes::Bytes,
+) {
+    if let Some(tx) = &entry.publish_tx {
+        if tx.try_send((ts, bytes.clone())).is_err() {
+            tracing::debug!(
+                session_id = entry.session_id,
+                queued = tx.capacity(),
+                "publish_tx try_send drop"
+            );
+        }
+    }
 }

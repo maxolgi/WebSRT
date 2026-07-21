@@ -100,8 +100,8 @@ struct PcrStats {
     jitter_ms_ema: f64,
 }
 
-// One row in the rolling packet timeline (Commit 3 renders this). The ring is
-// capped at PACKET_RING_CAP entries (~30s of PES at typical OBS rates).
+// One row in the rolling packet timeline. The ring is capped at
+// PACKET_RING_CAP entries (~30s of PES at typical OBS rates).
 #[derive(Clone)]
 struct PacketEntry {
     t_ms: f64,
@@ -112,7 +112,6 @@ struct PacketEntry {
     size: u32,
     ra: bool,
     nal_summary: Vec<u8>,
-    cc_error: bool,
     tei: bool,
     pusi: bool,
 }
@@ -404,7 +403,6 @@ impl TsDemuxer {
             size: 0,
             ra: false,
             nal_summary: Vec::new(),
-            cc_error: false,
             tei: false,
             pusi: false,
         });
@@ -511,7 +509,6 @@ impl TsDemuxer {
             size: payload.len() as u32,
             ra,
             nal_summary,
-            cc_error: false,
             tei,
             pusi,
         });
@@ -603,7 +600,6 @@ impl TsDemuxer {
                     size: 0,
                     ra: true,
                     nal_summary: Vec::new(),
-                    cc_error: false,
                     tei,
                     pusi,
                 });
@@ -643,7 +639,6 @@ impl TsDemuxer {
                         size: 0,
                         ra: false,
                         nal_summary: Vec::new(),
-                        cc_error: false,
                         tei,
                         pusi,
                     });
@@ -703,7 +698,6 @@ impl TsDemuxer {
                     size: 0,
                     ra: false,
                     nal_summary: Vec::new(),
-                    cc_error: false,
                     tei,
                     pusi,
                 });
@@ -736,7 +730,7 @@ impl TsDemuxer {
                 if let Some((hdr, payload, ra)) = flushed {
                     self.finalize_pes(pid, &hdr, &payload, ra, elapsed_ms, tei, pusi, events);
                 }
-                self.maybe_flush(pid, elapsed_ms, tei, pusi, now, events);
+                self.maybe_flush(pid, elapsed_ms, tei, pusi, events);
             }
             TsPayload::PesContinuation(bytes) => {
                 let n = bytes.len() as u64;
@@ -744,7 +738,7 @@ impl TsDemuxer {
                     p.buf.extend_from_slice(bytes);
                 }
                 self.accumulate_bytes(pid_u16, n, now);
-                self.maybe_flush(pid, elapsed_ms, tei, pusi, now, events);
+                self.maybe_flush(pid, elapsed_ms, tei, pusi, events);
             }
             TsPayload::Null(_) | TsPayload::Raw(_) | TsPayload::Section(_) => {
                 // ignore payload, but still record a timeline row for visibility.
@@ -757,7 +751,6 @@ impl TsDemuxer {
                     size: 0,
                     ra: false,
                     nal_summary: Vec::new(),
-                    cc_error: false,
                     tei,
                     pusi,
                 });
@@ -771,7 +764,6 @@ impl TsDemuxer {
         elapsed_ms: f64,
         tei: bool,
         pusi: bool,
-        now: web_time::Instant,
         events: &mut Vec<TsEvent>,
     ) {
         let flush = match self.partials.get(&pid) {
@@ -797,9 +789,9 @@ impl TsDemuxer {
             p.declared_len = None;
             let ra = std::mem::take(&mut p.ra);
             // Bytes already counted incrementally as they arrived; the bitrate
-            // ring uses `now` only to gate bucket rotation, which finalize_pes
-            // doesn't need, so we pass `elapsed_ms` for the timeline stamp.
-            let _ = now;
+            // ring gates bucket rotation inside accumulate_bytes, which
+            // finalize_pes doesn't need, so we pass `elapsed_ms` for the
+            // timeline stamp.
             self.finalize_pes(pid, &hdr, &payload, ra, elapsed_ms, tei, pusi, events);
         }
     }
@@ -862,7 +854,6 @@ pub struct DebugSnapshot {
     ring_dts: Vec<f64>,
     ring_size: Vec<f64>,
     ring_ra: Vec<u8>,
-    ring_cc_err: Vec<u8>,
     ring_tei: Vec<u8>,
     ring_pusi: Vec<u8>,
     ring_nal: Vec<u8>,
@@ -1004,10 +995,6 @@ impl DebugSnapshot {
     pub fn ring_ra(&self) -> Vec<u8> {
         self.ring_ra.clone()
     }
-    #[wasm_bindgen(getter, js_name = ringCcErr)]
-    pub fn ring_cc_err(&self) -> Vec<u8> {
-        self.ring_cc_err.clone()
-    }
     #[wasm_bindgen(getter, js_name = ringTei)]
     pub fn ring_tei(&self) -> Vec<u8> {
         self.ring_tei.clone()
@@ -1136,7 +1123,6 @@ impl TsDemuxer {
         let mut ring_dts = Vec::with_capacity(ring_len);
         let mut ring_size = Vec::with_capacity(ring_len);
         let mut ring_ra = Vec::with_capacity(ring_len);
-        let mut ring_cc_err = Vec::with_capacity(ring_len);
         let mut ring_tei = Vec::with_capacity(ring_len);
         let mut ring_pusi = Vec::with_capacity(ring_len);
         let mut ring_nal = Vec::new();
@@ -1150,7 +1136,6 @@ impl TsDemuxer {
             ring_dts.push(if e.dts < 0 { -1.0 } else { e.dts as f64 });
             ring_size.push(e.size as f64);
             ring_ra.push(e.ra as u8);
-            ring_cc_err.push(e.cc_error as u8);
             ring_tei.push(e.tei as u8);
             ring_pusi.push(e.pusi as u8);
             ring_nal.extend_from_slice(&e.nal_summary);
@@ -1190,7 +1175,6 @@ impl TsDemuxer {
             ring_dts,
             ring_size,
             ring_ra,
-            ring_cc_err,
             ring_tei,
             ring_pusi,
             ring_nal,

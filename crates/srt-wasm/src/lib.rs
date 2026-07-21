@@ -15,12 +15,12 @@
 //! reassembled TS message to the demuxer, signal handshake completion, or wait.
 
 use srt_protocol::connection::{Action, DuplexConnection, Input};
-use srt_protocol::packet::{ControlTypes, Packet};
+use srt_protocol::packet::Packet;
 use srt_protocol::protocol::pending_connection::listen::Listen;
 use srt_protocol::protocol::pending_connection::{ConnectionResult};
 use srt_protocol::settings::ConnInitSettings;
 use srt_protocol::statistics::SocketStatistics;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
@@ -145,13 +145,7 @@ pub struct SrtReceiver {
     state: RefCell<State>,
     epoch: web_time::Instant,
     remote: SocketAddr,
-    ack_seen: Cell<bool>,
     stats: RefCell<SocketStatistics>,
-    // For computing send bandwidth from the tx_bytes delta between
-    // getStats() calls. srt-protocol populates rx_bandwidth but never
-    // tx_bandwidth, so a publishing session (sender) would read 0.
-    prev_tx_bytes: Cell<u64>,
-    prev_stats_time: Cell<web_time::Instant>,
 }
 
 fn now_from_us(epoch: web_time::Instant, now_us: f64) -> web_time::Instant {
@@ -166,7 +160,7 @@ impl SrtReceiver {
     /// Construct a fresh receiver. Local socket id is randomized internally.
     #[wasm_bindgen(constructor)]
     pub fn new() -> SrtReceiver {
-        Self::new_with_seed(0)
+        Self::new_with_latency(120)
     }
 
     /// Construct with a custom TSBPD latency (milliseconds).
@@ -186,18 +180,8 @@ impl SrtReceiver {
             state: RefCell::new(State::Handshaking(listen)),
             epoch: now,
             remote: SocketAddr::from_str(PEER).expect("hardcoded addr"),
-            ack_seen: Cell::new(false),
             stats: RefCell::new(SocketStatistics::new()),
-            prev_tx_bytes: Cell::new(0),
-            prev_stats_time: Cell::new(now),
         }
-    }
-
-    /// `seed` reserved for deterministic local_sockid assignment in tests.
-    /// (For now we just use ConnInitSettings::default which calls OsRng via rand.)
-    #[wasm_bindgen(js_name = newWithSeed)]
-    pub fn new_with_seed(_seed: u32) -> SrtReceiver {
-        Self::new_with_latency(120)
     }
 
     /// Feed an incoming WebTransport datagram (raw SRT packet bytes).
@@ -239,7 +223,7 @@ impl SrtReceiver {
                         let mut duplex = DuplexConnection::new(conn);
                         out.push(SrtAction::hs_done());
                         // drain any post-handshake actions (e.g., initial ACK)
-                        drain(&mut duplex, now, &mut out, &self.ack_seen, &self.stats);
+                        drain(&mut duplex, now, &mut out, &self.stats);
                         *state = State::Connected(duplex);
                     }
                     ConnectionResult::NoAction => {}
@@ -266,7 +250,7 @@ impl SrtReceiver {
             }
             State::Connected(duplex) => {
                 duplex.handle_packet_input(now, Ok((packet, self.remote)));
-                drain(duplex, now, &mut out, &self.ack_seen, &self.stats);
+                drain(duplex, now, &mut out, &self.stats);
                 if !duplex.is_open() {
                     *state = State::Closed;
                 }
@@ -286,7 +270,7 @@ impl SrtReceiver {
             State::Connected(duplex) => {
                 duplex.handle_data_input(now, Some((now, bytes::Bytes::copy_from_slice(bytes))));
                 let mut out: Vec<SrtAction> = Vec::new();
-                drain(duplex, now, &mut out, &self.ack_seen, &self.stats);
+                drain(duplex, now, &mut out, &self.stats);
                 if !duplex.is_open() {
                     *state = State::Closed;
                 }
@@ -304,7 +288,7 @@ impl SrtReceiver {
         let mut state = self.state.borrow_mut();
         match &mut *state {
             State::Connected(duplex) => {
-                drain(duplex, now, &mut out, &self.ack_seen, &self.stats);
+                drain(duplex, now, &mut out, &self.stats);
                 if !duplex.is_open() {
                     *state = State::Closed;
                 }
@@ -333,23 +317,6 @@ impl SrtReceiver {
     #[wasm_bindgen(js_name = getStats)]
     pub fn get_stats(&self) -> SrtStats {
         let s = self.stats.borrow();
-        // srt-protocol computes rx_bandwidth but never tx_bandwidth. Derive
-        // the send rate from the tx_bytes delta since the last getStats()
-        // call so a publishing session reports real throughput.
-        let now = web_time::Instant::now();
-        let prev_bytes = self.prev_tx_bytes.get();
-        let prev_time = self.prev_stats_time.get();
-        let tx_bw = {
-            let dt = (now - prev_time).as_secs_f64();
-            if dt > 0.0 {
-                let delta = s.tx_bytes.saturating_sub(prev_bytes);
-                (delta as f64 * 8.0 / dt) as u64
-            } else {
-                0
-            }
-        };
-        self.prev_tx_bytes.set(s.tx_bytes);
-        self.prev_stats_time.set(now);
         SrtStats {
             elapsed_ms: s.elapsed_time.as_secs_f64() * 1000.0,
             rx_data: s.rx_data,
@@ -360,7 +327,7 @@ impl SrtReceiver {
             rx_ack: s.rx_ack,
             rx_nak: s.rx_nak,
             rtt_ms: s.rx_average_rtt.as_secs_f64() * 1000.0,
-            bandwidth_bps: s.rx_bandwidth.max(tx_bw),
+            bandwidth_bps: s.rx_bandwidth,
             rx_buffered: s.rx_acknowledged_data,
             rx_belated: s.rx_belated_data,
             tx_data: s.tx_data,
@@ -376,7 +343,6 @@ fn drain(
     conn: &mut DuplexConnection,
     now: web_time::Instant,
     out: &mut Vec<SrtAction>,
-    ack_seen: &Cell<bool>,
     stats: &RefCell<SocketStatistics>,
 ) {
     let mut tick = true;
@@ -389,10 +355,6 @@ fn drain(
         };
         match action {
             Action::SendPacket((pkt, _addr)) => {
-                if !ack_seen.get() && is_ack(&pkt) {
-                    ack_seen.set(true);
-                    out.push(SrtAction::log("first ACK emitted"));
-                }
                 out.push(SrtAction::send(serialize_packet(&pkt)));
             }
             Action::ReleaseData((_ts, bytes)) => out.push(SrtAction::deliver(bytes.to_vec())),
@@ -408,14 +370,6 @@ fn drain(
                 break;
             }
         }
-    }
-}
-
-fn is_ack(pkt: &Packet) -> bool {
-    if let Packet::Control(c) = pkt {
-        matches!(c.control_type, ControlTypes::Ack(_))
-    } else {
-        false
     }
 }
 

@@ -1,7 +1,7 @@
 // Node smoke test for srt-wasm + mpeg2ts-wasm.
 //
 // Loads both wasm packages, constructs a TsDemuxer, feeds the fixture .ts file,
-// and reports events. Phase 2 exit criterion: smoke tests pass.
+// and reports events. Smoke test exit criterion: tests pass.
 //
 // Run: node --experimental-fetch web/smoke.mjs (or use a static import fs).
 
@@ -73,7 +73,7 @@ console.log('loaded:', {
   console.log('mpeg2ts-wasm: PASS');
 }
 
-// Test 1b: debug_snapshot() — exercise the Commit 1 analysis surface.
+// Test 1b: debug_snapshot() — exercise the demux analysis surface.
 {
   const demux = new mpeg2ts.TsDemuxer();
   const bytes = fs.readFileSync(FIXTURE);
@@ -140,4 +140,4 @@ console.log('loaded:', {
   console.log('srt-wasm: PASS');
 }
 
-console.log('\nAll Phase 2 smoke tests passed.');
+console.log('\nAll smoke tests passed.');

@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
 use srt_tokio::{SrtIncoming, SrtListener, SrtSocket};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 enum Kind {
     Listener(#[allow(dead_code)] SrtListener, SrtIncoming, Option<String>),
@@ -192,7 +192,7 @@ impl Ingester for SrtIngester {
             };
 
             match result {
-                Ok(Some(Ok(msg))) => return Ok(Some((Instant::now(), msg.1))),
+                Ok(Some(Ok(msg))) => return Ok(Some(msg)),
                 Ok(Some(Err(e))) => {
                     tracing::warn!(?e, "srt recv error; closing socket");
                     self.close_socket().await;

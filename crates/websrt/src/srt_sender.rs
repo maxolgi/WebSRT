@@ -62,10 +62,6 @@ pub enum SenderAction {
     HandshakeComplete,
     /// Connection is closed (peer rejected, errored, or shut down).
     Close,
-    /// Informational log message.
-    Log(String),
-    /// Drain returned WaitForData — used for instrumentation only.
-    DrainWait(std::time::Duration),
 }
 
 /// The gateway-side SRT state machine. Owns Connect during handshake and
@@ -76,11 +72,6 @@ pub struct SrtInitiator {
     #[allow(dead_code)]
     local_addr: IpAddr,
     last_stats: Option<SocketStatistics>,
-    pushed: u64,
-    /// Total ReleaseData actions produced by drain() — independent of the
-    /// session-level pub_release_total counter, to detect counting bugs.
-    pub drain_releases: u64,
-    pub drain_release_bytes: u64,
 }
 
 enum InitiatorState {
@@ -92,7 +83,7 @@ enum InitiatorState {
 }
 
 impl SrtInitiator {
-    pub fn new(local_addr: IpAddr, remote: SocketAddr, config: &SrtConfig, streamid: Option<String>) -> Self {
+    pub fn new(local_addr: IpAddr, remote: SocketAddr, config: &SrtConfig) -> Self {
         let mut settings = ConnInitSettings::default();
         settings.max_packet_size = srt_protocol::options::PacketSize(config.payload_size);
         settings.send_buffer_size = srt_protocol::options::PacketCount(config.send_buffer_size.into());
@@ -101,20 +92,19 @@ impl SrtInitiator {
         settings.send_latency = config.send_latency;
         settings.recv_latency = config.recv_latency;
         settings.too_late_packet_drop = true;
-        Self::new_with_settings(local_addr, remote, settings, streamid)
+        Self::new_with_settings(local_addr, remote, settings)
     }
 
     pub fn new_with_settings(
         local_addr: IpAddr,
         remote: SocketAddr,
         settings: ConnInitSettings,
-        streamid: Option<String>,
     ) -> Self {
         let connect = Connect::new(
             remote,
             local_addr,
             settings,
-            streamid,
+            None,
             SeqNumber::new(0).expect("seq 0"),
         );
         Self {
@@ -122,9 +112,6 @@ impl SrtInitiator {
             remote,
             local_addr,
             last_stats: None,
-            pushed: 0,
-            drain_releases: 0,
-            drain_release_bytes: 0,
         }
     }
 
@@ -159,16 +146,11 @@ impl SrtInitiator {
                         wait = Some(d);
                     }
                     Action::ReleaseData((ts, bytes)) => {
-                        self.drain_releases += 1;
-                        self.drain_release_bytes += bytes.len() as u64;
                         out.push(SenderAction::ReleaseData((ts, bytes)));
                     }
-                    _ => {}
                 }
                 // drain() may overwrite `wait` with a fresher duration.
-                let (drain_out, drain_wait) = drain_with_counts(duplex, now, &mut self.last_stats, &mut self.drain_releases, &mut self.drain_release_bytes);
-                out.extend(drain_out);
-                if let Some(d) = drain_wait {
+                if let Some(d) = drain(duplex, now, &mut out, &mut self.last_stats) {
                     wait = Some(d);
                 }
             }
@@ -187,7 +169,7 @@ impl SrtInitiator {
         let packet = match parse_packet(bytes) {
             Ok(p) => p,
             Err(e) => {
-                out.push(SenderAction::Log(format!("parse error: {e:?}")));
+                tracing::warn!(?e, "parse error");
                 return (out, Duration::from_millis(2));
             }
         };
@@ -199,9 +181,9 @@ impl SrtInitiator {
             }
             InitiatorState::Connected(duplex) => {
                 duplex.handle_packet_input(now, Ok((packet, self.remote)));
-                let (drain_out, drain_wait) = drain_with_counts(duplex, now, &mut self.last_stats, &mut self.drain_releases, &mut self.drain_release_bytes);
-                out.extend(drain_out);
-                wait = drain_wait;
+                if let Some(d) = drain(duplex, now, &mut out, &mut self.last_stats) {
+                    wait = Some(d);
+                }
             }
             InitiatorState::Closed => {}
         }
@@ -215,10 +197,6 @@ impl SrtInitiator {
         let mut out = Vec::new();
         let mut wait: Option<Duration> = None;
         if let InitiatorState::Connected(duplex) = &mut self.state {
-            self.pushed += 1;
-            if self.pushed <= 3 || self.pushed % 100 == 0 {
-                tracing::debug!(pushed = self.pushed, bytes = msg.1.len(), "push_message: to sender");
-            }
             duplex.handle_data_input(now, Some(msg));
             wait = drain(duplex, now, &mut out, &mut self.last_stats);
         }
@@ -229,6 +207,9 @@ impl SrtInitiator {
         matches!(self.state, InitiatorState::Connected(_))
     }
 
+    /// True if the handshake failed (Reject or Failure). Does NOT return true
+    /// for post-handshake Close actions — those are surfaced via
+    /// `SenderAction::Close` and handled by the caller.
     pub fn is_closed(&self) -> bool {
         matches!(self.state, InitiatorState::Closed)
     }
@@ -255,7 +236,6 @@ fn drain(
             }
             Action::UpdateStatistics(s) => { *stats = Some(s.clone()); continue; }
             Action::WaitForData(d) => {
-                out.push(SenderAction::DrainWait(d));
                 return Some(d);
             }
             Action::Close => {
@@ -264,42 +244,6 @@ fn drain(
             }
         }
     }
-}
-
-/// Same as drain() but counts ReleaseData actions into the initiator's counters.
-fn drain_with_counts(
-    duplex: &mut DuplexConnection,
-    now: Instant,
-    stats: &mut Option<SocketStatistics>,
-    release_count: &mut u64,
-    release_bytes: &mut u64,
-) -> (Vec<SenderAction>, Option<Duration>) {
-    let mut out = Vec::new();
-    let mut wait = None;
-    loop {
-        let action = duplex.handle_input(now, Input::DataReleased);
-        match action {
-            Action::SendPacket((pkt, _addr)) => {
-                out.push(SenderAction::SendDatagram(serialize_packet(&pkt)));
-            }
-            Action::ReleaseData((ts, bytes)) => {
-                *release_count += 1;
-                *release_bytes += bytes.len() as u64;
-                out.push(SenderAction::ReleaseData((ts, bytes)));
-            }
-            Action::UpdateStatistics(s) => { *stats = Some(s.clone()); continue; }
-            Action::WaitForData(d) => {
-                out.push(SenderAction::DrainWait(d));
-                wait = Some(d);
-                break;
-            }
-            Action::Close => {
-                out.push(SenderAction::Close);
-                break;
-            }
-        }
-    }
-    (out, wait)
 }
 
 fn process_hs_result(
@@ -320,23 +264,23 @@ fn process_hs_result(
         }
         ConnectionResult::NoAction => {}
         ConnectionResult::NotHandled(e) => {
-            out.push(SenderAction::Log(format!("hs not-handled: {e}")));
+            tracing::warn!(%e, "hs not-handled");
         }
         ConnectionResult::Reject(maybe_pkt, rej) => {
             if let Some((pkt, _)) = maybe_pkt {
                 out.push(SenderAction::SendDatagram(serialize_packet(&pkt)));
             }
-            out.push(SenderAction::Log(format!("rejected: {rej:?}")));
+            tracing::warn!(?rej, "hs rejected");
             *state = InitiatorState::Closed;
             out.push(SenderAction::Close);
         }
         ConnectionResult::Failure(e) => {
-            out.push(SenderAction::Log(format!("hs io failure: {e}")));
+            tracing::warn!(%e, "hs io failure");
             *state = InitiatorState::Closed;
             out.push(SenderAction::Close);
         }
         ConnectionResult::RequestAccess(_) => {
-            out.push(SenderAction::Log("access control (unsupported)".into()));
+            tracing::warn!("access control (unsupported)");
         }
     }
 }

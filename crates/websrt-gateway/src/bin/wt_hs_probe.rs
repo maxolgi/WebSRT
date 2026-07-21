@@ -1,4 +1,4 @@
-//! Phase 5 verification: same as Phase 4 probe, but additionally tracks per-PID
+//! SRT handshake + TS continuity-counter probe: same as the basic WT probe, but additionally tracks per-PID
 //! TS continuity counter gaps to confirm NAK/retransmit keeps the stream
 //! complete under --sim-loss.
 //!

@@ -1,4 +1,4 @@
-//! Standalone WT echo client for Phase 1 verification.
+//! Standalone WT echo client for gateway verification.
 //! Run: cargo run -p websrt-gateway --bin wt_echo_client -- --url https://127.0.0.1:4433/wt --hash <hex>
 //!
 //! (This is a dev/test binary; not the production gateway entrypoint.)

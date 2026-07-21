@@ -13,7 +13,6 @@ use anyhow::Result;
 use percent_encoding::percent_decode_str;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -164,8 +163,7 @@ impl Gateway {
             Arc::new(Mutex::new(Vec::new()));
 
         // Centralized session registry + ticker. ONE ticker task drives all
-        // sessions' SRT state machines, replacing N per-session sender_pump
-        // tasks (each with its own 2ms interval timer).
+        // sessions' SRT state machines (~2ms cadence).
         let registry = Arc::new(SessionRegistry::new());
         let ticker_shutdown = Arc::new(Notify::new());
         let ticker_registry = registry.clone();
@@ -335,13 +333,13 @@ impl Gateway {
                     let (entry, handle) = BrowserSession::create(
                         connection, viewer,
                         self.sim_loss, self.sim_seed, self.srt_config.clone(),
-                        publish_tx, None,
+                        publish_tx,
                     ).await;
                     #[cfg(not(feature = "sim-loss"))]
                     let (entry, handle) = BrowserSession::create(
                         connection, viewer,
                         0, 0, self.srt_config.clone(),
-                        publish_tx, None,
+                        publish_tx,
                     ).await;
                     let session_shutdown = entry.shutdown.clone();
                     registry.insert(entry);
@@ -400,11 +398,7 @@ impl Gateway {
         addr: std::net::SocketAddr,
         inner: &GatewayInner,
     ) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        // Read and discard the HTTP request
-        let mut buf = [0u8; 1024];
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), stream.read(&mut buf)).await;
+        use tokio::io::AsyncWriteExt;
 
         let streams = inner.streams.stream_count();
         let alive_streams = inner.streams.alive_stream_count();
@@ -431,75 +425,17 @@ impl Gateway {
 }
 
 /// Single shared ticker task that drives every active session's SRT state
-/// machine ~every 2ms. Replaces N per-session `sender_pump` tasks. Exits when
-/// `shutdown` completes (signaled from `Gateway::run`'s drain path).
+/// machine ~every 2ms. Exits when `shutdown` completes (signaled from
+/// `Gateway::run`'s drain path).
 async fn run_ticker(registry: Arc<SessionRegistry>, shutdown: impl Future<Output = ()>) {
     let mut ticker = tokio::time::interval(Duration::from_millis(2));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut stats_interval = tokio::time::interval(Duration::from_secs(5));
-    // Consume the immediate first tick so the first stats log is at t+5s.
-    stats_interval.tick().await;
 
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
             biased;
             _ = &mut shutdown => break,
-            _ = stats_interval.tick() => {
-                let active = registry.len();
-                let entries = registry.snapshot();
-                tracing::info!(active, "ticker stats");
-                for e in &entries {
-                    let is_publish = e.publish_tx.is_some();
-                    let viewer_lag = e.viewer.lock().unwrap().as_ref().map(|v| v.lag_count()).unwrap_or(0);
-                    let init = e.initiator.lock().await;
-                    if let Some(s) = init.stats() {
-                        let publish_drops_recv = e.publish_try_send_drops.load(Ordering::Relaxed);
-                        let publish_drops_tick = e.publish_tick_try_send_drops.load(Ordering::Relaxed);
-                        let publish_total = e.publish_release_total.load(Ordering::Relaxed);
-                        let publish_drop_pct = if publish_total > 0 {
-                            ((publish_drops_recv + publish_drops_tick) as f64 / publish_total as f64 * 100.0) as f64
-                        } else {
-                            0.0
-                        };
-                        let publish_bytes = e.publish_bytes_total.load(Ordering::Relaxed);
-                        let viewer_pushed = e.viewer_pushed_bytes.load(Ordering::Relaxed);
-                        let viewer_dgrams = e.viewer_sent_datagrams.load(Ordering::Relaxed);
-                        tracing::info!(
-                            session_id = e.session_id,
-                            publish = is_publish,
-                            rx_data = s.rx_data,
-                            rx_unique = s.rx_unique_data,
-                            rx_loss = s.rx_loss_data,
-                            rx_drop = s.rx_dropped_data,
-                            rx_retransmit = s.rx_retransmit_data,
-                            rx_nak = s.rx_nak,
-                            rx_buf = s.rx_acknowledged_data,
-                            tx_data = s.tx_data,
-                            tx_loss = s.tx_loss_data,
-                            tx_retransmit = s.tx_retransmit_data,
-                            rx_bw_bps = s.rx_bandwidth,
-                            rx_clk_adj = s.rx_clock_adjustments,
-                            rx_clk_drift = s.rx_clock_drift_mean,
-                            rx_clk_stddev = s.rx_clock_drift_stddev,
-                            rx_buf_time = ?s.rx_acknowledged_time,
-                            viewer_lag = viewer_lag,
-                            pub_drops_recv = publish_drops_recv,
-                            pub_drops_tick = publish_drops_tick,
-                            pub_release_total = publish_total,
-                            pub_bytes = publish_bytes,
-                            viewer_pushed_bytes = viewer_pushed,
-                            viewer_sent_dgrams = viewer_dgrams,
-                            drain_waits = e.drain_wait_count.load(Ordering::Relaxed),
-                            drain_wait_us = e.drain_wait_last_us.load(Ordering::Relaxed),
-                            init_releases = init.drain_releases,
-                            init_release_bytes = init.drain_release_bytes,
-                            pub_drop_pct = publish_drop_pct,
-                            "session stats"
-                        );
-                    }
-                }
-            }
             _ = ticker.tick() => {
                 registry.tick_all().await;
             }

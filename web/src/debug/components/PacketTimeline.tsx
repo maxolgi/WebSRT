@@ -245,12 +245,11 @@ function Row({
   const pts = d.ringPts[ringIdx];
   const dtsV = d.ringDts[ringIdx];
   const size = d.ringSize[ringIdx];
-  const ccErr = !!d.ringCcErr[ringIdx];
   const tei = !!d.ringTei[ringIdx];
   const ra = !!d.ringRa[ringIdx];
   const nal = nalSummary(d, ringIdx, codec);
   const cls = rowClass(kind, isVideo);
-  const title = `PID ${pidHex(pid)} (${pid}) • t=${(t / 1000).toFixed(3)}s • kind=${kindName(kind)} • size=${size}B • CC err=${ccErr} • TEI=${tei}`;
+  const title = `PID ${pidHex(pid)} (${pid}) • t=${(t / 1000).toFixed(3)}s • kind=${kindName(kind)} • size=${size}B • TEI=${tei}`;
 
   return (
     <tr
@@ -268,7 +267,6 @@ function Row({
       <td style={{ width: W_SIZE }}>{formatBytes(size)}</td>
       <td class="pkt-c-nal">{nal}</td>
       <td style={{ width: W_FLAGS }}>
-        {ccErr && <span class="pkt-badge pkt-badge-bad">CC</span>}
         {tei && <span class="pkt-badge pkt-badge-bad">TEI</span>}
         {ra && <span class="pkt-badge pkt-badge-good">RA</span>}
       </td>
@@ -304,7 +302,6 @@ function PacketInspector({ d, idx, pidCodec, isVideoPid }: InspectorProps): JSX.
   const pts = d.ringPts[idx];
   const dtsV = d.ringDts[idx];
   const size = d.ringSize[idx];
-  const ccErr = !!d.ringCcErr[idx];
   const tei = !!d.ringTei[idx];
   const pusi = !!d.ringPusi[idx];
   const ra = !!d.ringRa[idx];
@@ -330,7 +327,6 @@ function PacketInspector({ d, idx, pidCodec, isVideoPid }: InspectorProps): JSX.
           <tr><td>Kind</td><td>{kindName(kind)} — {kindDescription(kind, isVid, ra)}</td></tr>
           <tr><td>TEI</td><td class={tei ? 'stat-bad' : ''}>{tei ? 'SET ⚠️' : 'clear'}</td></tr>
           <tr><td>PUSI</td><td>{pusi ? 'SET' : 'clear'}</td></tr>
-          <tr><td>CC</td><td class={ccErr ? 'stat-bad' : 'stat-good'}>{ccErr ? 'DISCONTINUITY ⚠️' : 'ok'}</td></tr>
           <tr><td>Random access</td><td class={ra ? 'stat-good' : ''}>{ra ? 'SET (keyframe)' : 'clear'}</td></tr>
         </tbody>
       </table>
@@ -360,12 +356,11 @@ function PacketInspector({ d, idx, pidCodec, isVideoPid }: InspectorProps): JSX.
         </tbody>
       </table>
 
-      {(ccErr || tei || ptsJumpMs !== null) && (
+      {(tei || ptsJumpMs !== null) && (
         <>
           <h4>Warnings</h4>
           <table>
             <tbody>
-              {ccErr && <tr><td colspan={2} class="pkt-warn">⚠️ Continuity counter discontinuity</td></tr>}
               {tei && <tr><td colspan={2} class="pkt-warn">⚠️ Transport error indicator set</td></tr>}
               {ptsJumpMs !== null && (
                 <tr>
@@ -494,7 +489,6 @@ function copyPacket(d: DemuxStats, idx: number, codec: VideoCodec): void {
     dts: d.ringDts[idx],
     size: d.ringSize[idx],
     ra: !!d.ringRa[idx],
-    ccError: !!d.ringCcErr[idx],
     tei: !!d.ringTei[idx],
     pusi: !!d.ringPusi[idx],
     codec,

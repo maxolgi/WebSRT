@@ -437,7 +437,6 @@ function getDemuxStats(): DemuxStatsMsg | undefined {
       ringDts: snap.ringDts,
       ringSize: snap.ringSize,
       ringRa: snap.ringRa,
-      ringCcErr: snap.ringCcErr,
       ringTei: snap.ringTei,
       ringPusi: snap.ringPusi,
       ringNal: snap.ringNal,

@@ -79,7 +79,6 @@ export interface DemuxStats {
   ringDts: Float64Array;
   ringSize: Float64Array;
   ringRa: Uint8Array;
-  ringCcErr: Uint8Array;
   ringTei: Uint8Array;
   ringPusi: Uint8Array;
   ringNal: Uint8Array;

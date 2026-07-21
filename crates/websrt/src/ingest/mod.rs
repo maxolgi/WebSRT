@@ -1,5 +1,4 @@
 //! Input ingest: produces `(std::time::Instant, bytes::Bytes)` TS messages.
-//! Implemented in Phase 4 (FileIngester) and Phase 8 (SrtIngester).
 
 pub mod channel;
 pub mod file;
@@ -12,7 +11,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use std::time::Instant;
 
-/// One TS message: N × 188-byte TS packets, captured at `capture_time`.
+/// One TS message: N × 188-byte TS packets, with the `Instant` indicating when
+/// this message became available to the gateway. For SRT-backed ingesters
+/// (`SrtIngester`, browser publish path) this is the TSBPD release instant from
+/// the upstream SRT receiver. For synthetic sources (`FileIngester`) it is the
+/// wall-clock emission time. The downstream `SrtInitiator::push_message` stamps
+/// this instant into outgoing SRT data packets.
 pub type TsMessage = (Instant, Bytes);
 
 #[async_trait]

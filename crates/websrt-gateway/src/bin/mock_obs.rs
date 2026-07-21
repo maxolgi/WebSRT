@@ -1,5 +1,5 @@
 //! Mock OBS sender: connect to the gateway's SRT listener and stream the
-//! fixture .ts over SRT/UDP. Used to verify Phase 8 ingester.
+//! fixture .ts over SRT/UDP. Used to verify the SRT ingester without real OBS.
 //!
 //! Usage:
 //!   1. cargo run -p websrt-gateway -- --input srt --srt-port 9000

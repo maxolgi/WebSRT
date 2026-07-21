@@ -1,4 +1,4 @@
-// Wraps the mpeg2ts-wasm pkg. Phase 4: feed SRT-delivered TS message bytes,
+// Wraps the mpeg2ts-wasm pkg. Feed SRT-delivered TS message bytes,
 // collect demux events, hand them to callbacks.
 
 import init, { TsDemuxer, type TsEvent, type DebugSnapshot } from '../wasm/mpeg2ts-wasm/mpeg2ts_wasm.js';

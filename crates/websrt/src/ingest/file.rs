@@ -7,6 +7,11 @@
 //! 64kbps. We compute the wall-clock duration of each message from the byte
 //! position vs. the file's total bitrate; if reading ahead of real-time we
 //! sleep, otherwise we emit immediately. We loop forever.
+//!
+//! `FileIngester` is the one synthetic-time ingester — there is no upstream
+//! SRT clock to honor, so the emitted `Instant` is wall-clock now at emit
+//! time. `SrtIngester` and `ChannelIngester` (browser publish path) preserve
+//! the upstream TSBPD release instant instead.
 
 use super::{Ingester, TsMessage};
 use anyhow::{anyhow, Context, Result};
