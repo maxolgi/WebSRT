@@ -538,7 +538,7 @@ impl GatewaySourceHandle {
     /// Create a channel-backed stream for browser upstream sessions. Returns
     /// the [`mpsc::Sender`] for pushing TS messages into the stream. The stream
     /// is immediately available for viewers to subscribe under `name`.
-    pub fn publish_channel(&self, name: &str) -> mpsc::Sender<TsMessage> {
+    pub fn publish(&self, name: &str) -> mpsc::Sender<TsMessage> {
         self.streams.publish(name)
     }
 }
@@ -591,7 +591,7 @@ mod tests {
         // the broadcaster stays alive while we read stats. (FiniteIngester
         // drains in microseconds, racing the assertion.)
         let source = gateway.source_handle();
-        let _tx = source.publish_channel("test-stream");
+        let _tx = source.publish("test-stream");
 
         // Give the broadcaster task a moment to start.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
