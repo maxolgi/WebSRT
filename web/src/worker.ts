@@ -1,6 +1,8 @@
 import init, { SrtReceiver, type SrtAction, type SrtStats } from '../wasm/srt-wasm/srt_wasm.js';
 import { Demuxer } from './demux';
+import { looksLikeAv1 } from './shared/av1';
 import type { DemuxStats } from './debug/types';
+import { summarizePmt, ST_PRIVATE, type PmtEntry } from './shared/pmt';
 
 export interface StatsMsg {
   elapsedMs: number;
@@ -41,11 +43,6 @@ export type WorkerMsg =
   | { type: 'stats'; stats: StatsMsg; demux?: DemuxStatsMsg }
   | { type: 'close' }
   | { type: 'batch'; msgs: WorkerMsg[] };
-
-const ST_H264 = 0x1b;
-const ST_HEVC = 0x24;
-const ST_AAC = 0x0f;
-const ST_PRIVATE = 0x06;
 
 const VERBOSE = typeof localStorage !== 'undefined' && localStorage.getItem('websrt-debug') === '1';
 
@@ -151,32 +148,22 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
 
     demux = await Demuxer.create({
       onPmt: (entries) => {
+        // Entries with PRIVATE stream type and no recognized format id are
+        // pending content-probe — don't pass them to summarizePmt yet because
+        // they'd be silently dropped.
+        const summary = summarizePmt(entries as PmtEntry[]);
+        videoPid = summary.videoPid >= 0 ? summary.videoPid : null;
+        videoCodecResolved = summary.videoCodec;
+        audioPid = summary.audioPid >= 0 ? summary.audioPid : null;
+        audioStreamType = summary.audioStreamType >= 0 ? summary.audioStreamType : null;
+        // Collect probe-pending PIDs (PRIVATE with no AV01/Opus descriptor).
         for (const e of entries) {
-          if (e.streamType === ST_H264) {
-            videoPid = e.pid;
-            videoCodecResolved = 'h264';
-          } else if (e.streamType === ST_HEVC) {
-            videoPid = e.pid;
-            videoCodecResolved = 'hevc';
-          } else if (e.streamType === ST_AAC) {
-            audioPid = e.pid;
-            audioStreamType = e.streamType;
-          } else if (e.streamType === ST_PRIVATE) {
-            // Disambiguate by registration-descriptor format ID. ffmpeg/OBS
-            // emit AV1 here with NO descriptor → defer to content-probe.
-            if (e.formatId === 'AV01') {
-              videoPid = e.pid;
-              videoCodecResolved = 'av1';
-            } else if (e.formatId === 'Opus') {
-              audioPid = e.pid;
-              audioStreamType = e.streamType;
-            } else {
-              probePids.add(e.pid);
-            }
+          if (e.streamType === ST_PRIVATE && !e.formatId) {
+            probePids.add(e.pid);
           }
         }
-        // Emit PMT once video or audio is resolved. Probe-pending-only PMTs
-        // wait until the probe completes (first PES on the probe PID).
+        // Emit PMT once video or audio is resolved. Probe-pending-only PMTs wait
+        // until the probe completes (first PES on the probe PID).
         if (videoPid !== null || audioPid !== null) {
           queue({
             type: 'pmt',
@@ -342,36 +329,6 @@ function processActions(actions: SrtAction[]) {
       a.free();
     }
   }
-}
-
-/**
- * Content-probe: does this PES payload look like an AV1 low-overhead OBU
- * stream? Used to disambiguate descriptor-less 0x06 PIDs (ffmpeg/OBS emit
- * AV1 with no registration descriptor). Validates the first OBU header
- * (forbidden=0, reserved=0, type ∈ {SH=1, TD=2, Frame=6}, has_size=1) and
- * that its LEB128 size fits the payload. Opus TOC bytes won't pass.
- */
-function looksLikeAv1(payload: Uint8Array): boolean {
-  if (payload.length < 2) return false;
-  const b = payload[0];
-  if ((b & 0x80) !== 0) return false; // forbidden bit
-  if ((b & 0x01) !== 0) return false; // reserved bit
-  const type = (b >> 3) & 0x0f;
-  if (type !== 1 && type !== 2 && type !== 6) return false;
-  const hasSize = (b >> 1) & 0x01;
-  if (hasSize === 0) return false; // low-overhead OBUs always carry size
-  const extFlag = (b >> 2) & 0x01;
-  let p = 1 + extFlag;
-  let size = 0;
-  let shift = 0;
-  while (p < payload.length) {
-    const byte = payload[p++];
-    size |= (byte & 0x7f) << shift;
-    if ((byte & 0x80) === 0) break;
-    shift += 7;
-    if (shift > 28) return false;
-  }
-  return p + size <= payload.length;
 }
 
 function serializeStats(s: SrtStats): StatsMsg {

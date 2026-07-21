@@ -7,11 +7,7 @@ import type { VideoPipeline } from '../decode';
 import type { OpusAudioPipeline, AacAudioPipeline } from '../decode';
 import type { CanvasRenderer } from '../render';
 import type { DemuxStats, TimeSeriesBucket } from './types';
-
-const ST_H264 = 0x1b;
-const ST_HEVC = 0x24;
-const ST_AAC = 0x0f;
-const ST_PRIVATE = 0x06;
+import { summarizePmt, type PmtEntry } from '../shared/pmt';
 
 export interface PipelineRefs {
   video: VideoPipeline | null;
@@ -80,20 +76,17 @@ function summarizeDemux(d: DemuxStats | null): {
   ccErrors: number;
 } {
   if (!d || d.pids.length === 0) return { videoMbps: 0, audioMbps: 0, ccErrors: 0 };
-  let videoPid = -1;
-  let audioPid = -1;
+  const pmtEntries: PmtEntry[] = [];
   for (let i = 0; i < d.pmtPids.length; i++) {
-    const st = d.pmtStreamTypes[i];
-    if (st === ST_H264 || st === ST_HEVC) {
-      videoPid = d.pmtPids[i];
-    } else if (st === ST_AAC) {
-      audioPid = d.pmtPids[i];
-    } else if (st === ST_PRIVATE) {
-      const fmt = d.pmtFormatIds[i];
-      if (fmt === 'AV01') videoPid = d.pmtPids[i];
-      else if (fmt === 'Opus') audioPid = d.pmtPids[i];
-    }
+    pmtEntries.push({
+      pid: d.pmtPids[i],
+      streamType: d.pmtStreamTypes[i],
+      formatId: d.pmtFormatIds[i] || null,
+    });
   }
+  const summary = summarizePmt(pmtEntries);
+  const videoPid = summary.videoPid;
+  const audioPid = summary.audioPid;
   let videoMbps = 0;
   let audioMbps = 0;
   let ccErrors = 0;

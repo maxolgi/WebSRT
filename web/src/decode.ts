@@ -11,6 +11,8 @@
 // every non-IDR slice) is fed as its own EncodedVideoChunk with the NALU
 // payload length-prefixed (4-byte big-endian) instead of Annex B start codes.
 
+import { looksLikeAv1 } from './shared/av1';
+
 export interface DecoderCallbacks {
   onFrame: (frame: VideoFrame) => void;
   onError: (e: unknown) => void;
@@ -34,6 +36,16 @@ const HEVC_CRA = 21;
 const HEVC_VPS = 32;
 const HEVC_SPS = 33;
 const HEVC_PPS = 34;
+
+/**
+ * Convert a PTS value in 90 kHz units (MPEG-TS clock) to microseconds for
+ * WebCodecs `timestamp`. 1 unit @ 90 kHz = 100/9 µs ≈ 11.111 µs. The naive
+ * `pts / 90` produced milliseconds (off by 1000×), which confused WebCodecs's
+ * internal reference-frame / output ordering — fixed once, documented here.
+ */
+export function ptsToUs(pts: number | null): number | undefined {
+  return pts != null ? Math.floor((pts * 100) / 9) : undefined;
+}
 
 interface NalUnit {
   type: number;     // H.264 type: data[0] & 0x1f
@@ -698,7 +710,7 @@ export class VideoPipeline {
       }
       if (this.codec === null) {
         // No NAL recognized — try AV1 OBU sniff (fallback when no PMT hint).
-        if (this.sniffAv1(payload)) {
+        if (looksLikeAv1(payload)) {
           this.codec = 'av1';
           this.feedAv1(payload, pts, isKeyframe);
         }
@@ -770,11 +782,7 @@ export class VideoPipeline {
       return;
     }
     const data = nalusToLengthPrefixed(decodeNalus);
-    // PTS from the demuxer is in 90 kHz units. Convert to microseconds:
-    //   1 unit @ 90 kHz = 1_000_000 / 90_000 µs = 100/9 µs ≈ 11.111 µs.
-    // The previous `pts / 90` produced milliseconds (off by 1000×), which
-    // confused WebCodecs's internal reference-frame / output ordering.
-    const tsUs = pts != null ? Math.floor((pts * 100) / 9) : undefined;
+    const tsUs = ptsToUs(pts);
     const chunk = new EncodedVideoChunk({
       type: hasIdr ? 'key' : 'delta',
       timestamp: tsUs ?? 0,
@@ -796,17 +804,6 @@ export class VideoPipeline {
     } else {
       this.configureAvc();
     }
-  }
-
-  /** Quick structural sniff: does this payload begin with a valid AV1 OBU? */
-  private sniffAv1(payload: Uint8Array): boolean {
-    if (payload.length < 2) return false;
-    const b = payload[0];
-    if ((b & 0x80) !== 0) return false; // forbidden
-    if ((b & 0x01) !== 0) return false; // reserved
-    const type = (b >> 3) & 0x0f;
-    if (type !== OBU_SEQUENCE_HEADER && type !== OBU_TEMPORAL_DELIMITER && type !== OBU_FRAME) return false;
-    return ((b >> 1) & 0x01) === 1; // has_size (low-overhead format)
   }
 
   /** AV1 feed: parse OBUs, (re)configure on Sequence Header, emit access units. */
@@ -861,9 +858,7 @@ export class VideoPipeline {
       }
       return;
     }
-    // PTS from the demuxer is in 90 kHz units — convert to µs (100/9 per unit).
-    // See emitAu for the rationale; the old `pts / 90` was off by 1000×.
-    const tsUs = pts != null ? Math.floor((pts * 100) / 9) : undefined;
+    const tsUs = ptsToUs(pts);
     const chunk = new EncodedVideoChunk({
       type: isKey ? 'key' : 'delta',
       timestamp: tsUs ?? 0,
@@ -1422,9 +1417,7 @@ export class OpusAudioPipeline extends AudioPipelineBase {
     }
     if (!this.decoder || this.decoder.state !== 'configured') return;
 
-    // PTS from the demuxer is in 90 kHz units — convert to µs (100/9 per unit).
-    // See VideoPipeline.emitAu for the rationale; old `pts / 90` was off by 1000×.
-    const tsUs = pts != null ? Math.floor((pts * 100) / 9) : undefined;
+    const tsUs = ptsToUs(pts);
     this.feedFrame(new EncodedAudioChunk({
       type: 'key',
       timestamp: tsUs ?? 0,
@@ -1487,9 +1480,7 @@ export class AacAudioPipeline extends AudioPipelineBase {
     const aacData = payload.subarray(headerSize);
     if (aacData.length === 0) return;
 
-    // PTS from the demuxer is in 90 kHz units — convert to µs (100/9 per unit).
-    // See VideoPipeline.emitAu for the rationale; old `pts / 90` was off by 1000×.
-    const tsUs = pts != null ? Math.floor((pts * 100) / 9) : undefined;
+    const tsUs = ptsToUs(pts);
     this.feedFrame(new EncodedAudioChunk({
       type: 'key',
       timestamp: tsUs ?? 0,

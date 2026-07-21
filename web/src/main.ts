@@ -1,6 +1,7 @@
 import { VideoPipeline, OpusAudioPipeline, AacAudioPipeline } from './decode';
 import { CanvasRenderer } from './render';
 import type { WorkerMsg, StatsMsg, DemuxStatsMsg } from './worker';
+import { summarizePmt, type PmtEntry } from './shared/pmt';
 
 const logEl = document.getElementById('log') as HTMLPreElement;
 const statusEl = document.getElementById('status') as HTMLParagraphElement;
@@ -368,26 +369,20 @@ function updateStats(s: StatsMsg, demux: DemuxStatsMsg | null) {
       : '');
 }
 
-const ST_H264_MAIN = 0x1b;
-const ST_HEVC_MAIN = 0x24;
-const ST_AAC_MAIN = 0x0f;
-const ST_PRIVATE_MAIN = 0x06;
-
 /** Condensed one-line demux summary for the simple stats panel. */
 function formatDemuxLine(d: DemuxStatsMsg | null): string {
   if (!d || d.pids.length === 0) return '';
-  let videoPid = -1;
-  let audioPid = -1;
+  const pmtEntries: PmtEntry[] = [];
   for (let i = 0; i < d.pmtPids.length; i++) {
-    const st = d.pmtStreamTypes[i];
-    if (st === ST_H264_MAIN || st === ST_HEVC_MAIN) videoPid = d.pmtPids[i];
-    else if (st === ST_AAC_MAIN) audioPid = d.pmtPids[i];
-    else if (st === ST_PRIVATE_MAIN) {
-      const fmt = d.pmtFormatIds[i];
-      if (fmt === 'AV01') videoPid = d.pmtPids[i];
-      else if (fmt === 'Opus') audioPid = d.pmtPids[i];
-    }
+    pmtEntries.push({
+      pid: d.pmtPids[i],
+      streamType: d.pmtStreamTypes[i],
+      formatId: d.pmtFormatIds[i] || null,
+    });
   }
+  const summary = summarizePmt(pmtEntries);
+  const videoPid = summary.videoPid;
+  const audioPid = summary.audioPid;
   let videoMbps = 0;
   let audioKbps = 0;
   let ccErrors = 0;
