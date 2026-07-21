@@ -14,7 +14,6 @@ use srt_protocol::packet::SeqNumber;
 use srt_protocol::protocol::pending_connection::connect::Connect;
 use srt_protocol::protocol::pending_connection::ConnectionResult;
 use srt_protocol::settings::ConnInitSettings;
-use srt_protocol::statistics::SocketStatistics;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -69,9 +68,6 @@ pub enum SenderAction {
 pub struct SrtInitiator {
     state: InitiatorState,
     remote: SocketAddr,
-    #[allow(dead_code)]
-    local_addr: IpAddr,
-    last_stats: Option<SocketStatistics>,
 }
 
 enum InitiatorState {
@@ -92,14 +88,6 @@ impl SrtInitiator {
         settings.send_latency = config.send_latency;
         settings.recv_latency = config.recv_latency;
         settings.too_late_packet_drop = true;
-        Self::new_with_settings(local_addr, remote, settings)
-    }
-
-    pub fn new_with_settings(
-        local_addr: IpAddr,
-        remote: SocketAddr,
-        settings: ConnInitSettings,
-    ) -> Self {
         let connect = Connect::new(
             remote,
             local_addr,
@@ -110,8 +98,6 @@ impl SrtInitiator {
         Self {
             state: InitiatorState::Handshaking(connect),
             remote,
-            local_addr,
-            last_stats: None,
         }
     }
 
@@ -139,9 +125,7 @@ impl SrtInitiator {
                     Action::Close => {
                         out.push(SenderAction::Close);
                     }
-                    Action::UpdateStatistics(s) => {
-                        self.last_stats = Some(s.clone());
-                    }
+                    Action::UpdateStatistics(_) => {}
                     Action::WaitForData(d) => {
                         wait = Some(d);
                     }
@@ -150,7 +134,7 @@ impl SrtInitiator {
                     }
                 }
                 // drain() may overwrite `wait` with a fresher duration.
-                if let Some(d) = drain(duplex, now, &mut out, &mut self.last_stats) {
+                if let Some(d) = drain(duplex, now, &mut out) {
                     wait = Some(d);
                 }
             }
@@ -181,7 +165,7 @@ impl SrtInitiator {
             }
             InitiatorState::Connected(duplex) => {
                 duplex.handle_packet_input(now, Ok((packet, self.remote)));
-                if let Some(d) = drain(duplex, now, &mut out, &mut self.last_stats) {
+                if let Some(d) = drain(duplex, now, &mut out) {
                     wait = Some(d);
                 }
             }
@@ -198,7 +182,7 @@ impl SrtInitiator {
         let mut wait: Option<Duration> = None;
         if let InitiatorState::Connected(duplex) = &mut self.state {
             duplex.handle_data_input(now, Some(msg));
-            wait = drain(duplex, now, &mut out, &mut self.last_stats);
+            wait = drain(duplex, now, &mut out);
         }
         (out, wait.unwrap_or_else(|| Duration::from_millis(2)))
     }
@@ -206,24 +190,12 @@ impl SrtInitiator {
     pub fn is_connected(&self) -> bool {
         matches!(self.state, InitiatorState::Connected(_))
     }
-
-    /// True if the handshake failed (Reject or Failure). Does NOT return true
-    /// for post-handshake Close actions — those are surfaced via
-    /// `SenderAction::Close` and handled by the caller.
-    pub fn is_closed(&self) -> bool {
-        matches!(self.state, InitiatorState::Closed)
-    }
-
-    pub fn stats(&self) -> Option<&SocketStatistics> {
-        self.last_stats.as_ref()
-    }
 }
 
 fn drain(
     duplex: &mut DuplexConnection,
     now: Instant,
     out: &mut Vec<SenderAction>,
-    stats: &mut Option<SocketStatistics>,
 ) -> Option<Duration> {
     loop {
         let action = duplex.handle_input(now, Input::DataReleased);
@@ -234,7 +206,7 @@ fn drain(
             Action::ReleaseData((ts, bytes)) => {
                 out.push(SenderAction::ReleaseData((ts, bytes)));
             }
-            Action::UpdateStatistics(s) => { *stats = Some(s.clone()); continue; }
+            Action::UpdateStatistics(_) => { continue; }
             Action::WaitForData(d) => {
                 return Some(d);
             }
