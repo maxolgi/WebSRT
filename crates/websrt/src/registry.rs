@@ -27,6 +27,10 @@ use std::time::Instant;
 use tokio::sync::{Mutex, Notify};
 use wtransport::Connection;
 
+/// Per-tick cap on viewer messages drained into a session's sender. Prevents
+/// one fast session from starving others under bulk backlog.
+const MAX_MSGS_PER_TICK: usize = 32;
+
 /// All per-session state shared between the recv_pump task and the centralized
 /// ticker. Held inside `Arc` so both can reference it concurrently.
 pub(crate) struct SessionEntry {
@@ -96,11 +100,11 @@ impl SessionRegistry {
             // viewer messages that became available. The viewer std Mutex is
             // released before each `push_message` call (push is sync but we
             // keep the critical section tight).
-            let actions = {
+            let (actions, data) = {
                 let mut init = entry.initiator.lock().await;
-                let (mut actions, _wait) = init.tick(now);
+                let (mut actions, mut data) = init.tick(now);
                 if init.is_connected() {
-                    for _ in 0..32 {
+                    for _ in 0..MAX_MSGS_PER_TICK {
                         let maybe_msg = {
                             let mut viewer = entry.viewer.lock().unwrap();
                             // Publish-only session (None) has nothing to drain.
@@ -108,8 +112,9 @@ impl SessionRegistry {
                         };
                         match maybe_msg {
                             Some(Ok(Some(m))) => {
-                                let (a, _w) = init.push_message(m, now);
+                                let (a, d) = init.push_message(m, now);
                                 actions.extend(a);
+                                data.extend(d);
                             }
                             Some(Ok(None)) => break,
                             Some(Err(lag)) => {
@@ -124,8 +129,13 @@ impl SessionRegistry {
                         }
                     }
                 }
-                actions
+                (actions, data)
             };
+
+            // Route released upstream data (browser→gateway) to the publish channel.
+            for (ts, bytes) in data {
+                route_release_data(entry, ts, &bytes);
+            }
 
             // Send the actions out via WebTransport. The loss injector is
             // shared with the recv_pump; the tokio::sync::Mutex serializes
@@ -135,16 +145,9 @@ impl SessionRegistry {
             {
                 let mut loss = entry.loss.lock().await;
                 for action in actions {
-                    match &action {
-                        crate::srt_sender::SenderAction::ReleaseData((ts, bytes)) => {
-                            route_release_data(entry, *ts, bytes);
-                            continue;
-                        }
-                        crate::srt_sender::SenderAction::Close => {
-                            entry.finished.store(true, Ordering::Relaxed);
-                            entry.shutdown.notify_waiters();
-                        }
-                        _ => {}
+                    if matches!(action, crate::srt_sender::SenderAction::Close) {
+                        entry.finished.store(true, Ordering::Relaxed);
+                        entry.shutdown.notify_waiters();
                     }
                     let _ = send_action(&entry.conn, action, &mut loss);
                 }

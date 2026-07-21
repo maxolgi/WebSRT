@@ -15,7 +15,7 @@ use srt_protocol::protocol::pending_connection::connect::Connect;
 use srt_protocol::protocol::pending_connection::ConnectionResult;
 use srt_protocol::settings::ConnInitSettings;
 use std::net::{IpAddr, SocketAddr};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// WebTransport datagram PMTU — must match the wasm-side constant.
 pub const PAYLOAD_SIZE: u64 = 1100;
@@ -55,8 +55,6 @@ impl Default for SrtConfig {
 pub enum SenderAction {
     /// Send these bytes as a WT datagram to the browser.
     SendDatagram(Vec<u8>),
-    /// Upstream data received from the browser via the DuplexConnection's receiver half.
-    ReleaseData((std::time::Instant, bytes::Bytes)),
     /// Handshake completed; we are now in the data plane.
     HandshakeComplete,
     /// Connection is closed (peer rejected, errored, or shut down).
@@ -101,17 +99,14 @@ impl SrtInitiator {
         }
     }
 
-    /// Kick off (or retransmit) the handshake. Also drives the data plane when
-    /// connected (drains pending output packets).
+    /// Drive the SRT state machine: kick off (or retransmit) the handshake,
+    /// and when connected, drain pending output packets.
     ///
-    /// Returns the actions to take and the duration until the SRT state
-    /// machine next needs servicing (from `Action::WaitForData`). When no
-    /// duration is surfaced (handshake state, or `Close`), returns 2ms — the
-    /// historical poll interval — so callers can always schedule the next
-    /// tick uniformly.
-    pub fn tick(&mut self, now: Instant) -> (Vec<SenderAction>, Duration) {
+    /// Returns the actions to take and any upstream data the state machine
+    /// released (browser→gateway publish path).
+    pub fn tick(&mut self, now: Instant) -> (Vec<SenderAction>, Vec<(Instant, Bytes)>) {
         let mut out = Vec::new();
-        let mut wait: Option<Duration> = None;
+        let mut data: Vec<(Instant, Bytes)> = Vec::new();
         match &mut self.state {
             InitiatorState::Handshaking(connect) => {
                 let r = connect.handle_tick(now);
@@ -126,38 +121,32 @@ impl SrtInitiator {
                         out.push(SenderAction::Close);
                     }
                     Action::UpdateStatistics(_) => {}
-                    Action::WaitForData(d) => {
-                        wait = Some(d);
-                    }
+                    Action::WaitForData(_) => {}
                     Action::ReleaseData((ts, bytes)) => {
-                        out.push(SenderAction::ReleaseData((ts, bytes)));
+                        data.push((ts, bytes));
                     }
                 }
-                // drain() may overwrite `wait` with a fresher duration.
-                if let Some(d) = drain(duplex, now, &mut out) {
-                    wait = Some(d);
-                }
+                drain(duplex, now, &mut out, &mut data);
             }
             InitiatorState::Closed => {}
         }
-        (out, wait.unwrap_or_else(|| Duration::from_millis(2)))
+        (out, data)
     }
 
     /// Feed a WT datagram received from the browser (handshake reply or ACK/NAK).
     ///
-    /// Returns the actions to take and the SRT wait duration. The duration is
-    /// surfaced for symmetry with [`tick`]; reactive callers (e.g. recv_pump)
-    /// may ignore it via `let (actions, _) = ...`.
-    pub fn handle_datagram(&mut self, bytes: &[u8], now: Instant) -> (Vec<SenderAction>, Duration) {
+    /// Returns the actions to take and any upstream data the state machine
+    /// released (browser→gateway publish path).
+    pub fn handle_datagram(&mut self, bytes: &[u8], now: Instant) -> (Vec<SenderAction>, Vec<(Instant, Bytes)>) {
         let mut out = Vec::new();
+        let mut data: Vec<(Instant, Bytes)> = Vec::new();
         let packet = match parse_packet(bytes) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(?e, "parse error");
-                return (out, Duration::from_millis(2));
+                return (out, data);
             }
         };
-        let mut wait: Option<Duration> = None;
         match &mut self.state {
             InitiatorState::Handshaking(connect) => {
                 let r = connect.handle_packet(Ok((packet, self.remote)), now);
@@ -165,26 +154,24 @@ impl SrtInitiator {
             }
             InitiatorState::Connected(duplex) => {
                 duplex.handle_packet_input(now, Ok((packet, self.remote)));
-                if let Some(d) = drain(duplex, now, &mut out) {
-                    wait = Some(d);
-                }
+                drain(duplex, now, &mut out, &mut data);
             }
             InitiatorState::Closed => {}
         }
-        (out, wait.unwrap_or_else(|| Duration::from_millis(2)))
+        (out, data)
     }
 
     /// Push a TS message into the sender's queue. No-op before handshake
     /// completes; the message is dropped (call sites should check
     /// `is_connected()` first or accept the drop).
-    pub fn push_message(&mut self, msg: (Instant, Bytes), now: Instant) -> (Vec<SenderAction>, Duration) {
+    pub fn push_message(&mut self, msg: (Instant, Bytes), now: Instant) -> (Vec<SenderAction>, Vec<(Instant, Bytes)>) {
         let mut out = Vec::new();
-        let mut wait: Option<Duration> = None;
+        let mut data: Vec<(Instant, Bytes)> = Vec::new();
         if let InitiatorState::Connected(duplex) = &mut self.state {
             duplex.handle_data_input(now, Some(msg));
-            wait = drain(duplex, now, &mut out);
+            drain(duplex, now, &mut out, &mut data);
         }
-        (out, wait.unwrap_or_else(|| Duration::from_millis(2)))
+        (out, data)
     }
 
     pub fn is_connected(&self) -> bool {
@@ -196,7 +183,8 @@ fn drain(
     duplex: &mut DuplexConnection,
     now: Instant,
     out: &mut Vec<SenderAction>,
-) -> Option<Duration> {
+    data: &mut Vec<(Instant, Bytes)>,
+) {
     loop {
         let action = duplex.handle_input(now, Input::DataReleased);
         match action {
@@ -204,15 +192,15 @@ fn drain(
                 out.push(SenderAction::SendDatagram(serialize_packet(&pkt)));
             }
             Action::ReleaseData((ts, bytes)) => {
-                out.push(SenderAction::ReleaseData((ts, bytes)));
+                data.push((ts, bytes));
             }
             Action::UpdateStatistics(_) => { continue; }
-            Action::WaitForData(d) => {
-                return Some(d);
+            Action::WaitForData(_) => {
+                return;
             }
             Action::Close => {
                 out.push(SenderAction::Close);
-                return None;
+                return;
             }
         }
     }

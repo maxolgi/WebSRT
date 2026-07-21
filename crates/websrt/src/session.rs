@@ -157,7 +157,10 @@ impl BrowserSession {
             let mut init = initiator.lock().await;
             let mut l = loss.lock().await;
             let now = Instant::now();
-            let (actions, _wait) = init.tick(now);
+            let (actions, data) = init.tick(now);
+            for (ts, bytes) in data {
+                route_release_data(&entry, ts, &bytes);
+            }
             for action in actions {
                 if matches!(action, SenderAction::Close) {
                     entry.finished.store(true, Ordering::Relaxed);
@@ -205,22 +208,18 @@ impl BrowserSession {
             let payload = d.payload();
             let now = Instant::now();
             let mut should_close = false;
-            let (actions, _wait) = {
+            let (actions, data) = {
                 let mut init = entry.initiator.lock().await;
                 init.handle_datagram(&payload, now)
             };
+            for (ts, bytes) in data {
+                route_release_data(&entry, ts, &bytes);
+            }
             {
                 let mut l = entry.loss.lock().await;
                 for action in actions {
-                    match &action {
-                        SenderAction::ReleaseData((ts, bytes)) => {
-                            route_release_data(&entry, *ts, bytes);
-                            continue;
-                        }
-                        SenderAction::Close => {
-                            should_close = true;
-                        }
-                        _ => {}
+                    if matches!(action, SenderAction::Close) {
+                        should_close = true;
                     }
                     send_action(&entry.conn, action, &mut l)?;
                 }
@@ -260,9 +259,6 @@ pub(crate) fn send_action(
         }
         SenderAction::HandshakeComplete => {
             tracing::info!("session: HandshakeComplete");
-        }
-        SenderAction::ReleaseData(_) => {
-            // Handled by caller before send_action is invoked.
         }
         SenderAction::Close => {
             tracing::info!("session: Close");
