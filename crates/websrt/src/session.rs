@@ -100,11 +100,10 @@ impl LossInjector {
 pub(crate) struct BrowserSession;
 
 impl BrowserSession {
-    /// Dummy socket addresses required by srt-protocol's Connect/Listen state
-    /// machines. They're never used on the WebTransport path — srt-protocol
-    /// just needs them for internal bookkeeping (socket IDs, etc).
-    const DUMMY_LOCAL_ADDR: SocketAddr =
-        SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0);
+    /// Dummy values required by srt-protocol's Connect/Listen state machines.
+    /// They're never used on the WebTransport path — srt-protocol just needs
+    /// them for internal bookkeeping (socket IDs, etc).
+    const DUMMY_LOCAL_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
     const DUMMY_REMOTE_ADDR: SocketAddr =
         SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 1);
 
@@ -132,7 +131,7 @@ impl BrowserSession {
         tracing::info!(session_id, %peer, sim_loss, "session: starting SRT initiator");
 
         let initiator = Arc::new(Mutex::new(SrtInitiator::new(
-            Self::DUMMY_LOCAL_ADDR.ip(),
+            Self::DUMMY_LOCAL_IP,
             Self::DUMMY_REMOTE_ADDR,
             &config,
         )));
@@ -150,30 +149,9 @@ impl BrowserSession {
             publish_tx,
         });
 
-        // Kick off the handshake immediately so the INDUCTION packet leaves
-        // before the ticker's first iteration. Subsequent handshake replies
-        // from the browser are handled by recv_pump.
-        {
-            let mut init = initiator.lock().await;
-            let mut l = loss.lock().await;
-            let now = Instant::now();
-            let (actions, data) = init.tick(now);
-            for (ts, bytes) in data {
-                route_release_data(&entry, ts, &bytes);
-            }
-            for action in actions {
-                if matches!(action, SenderAction::Close) {
-                    entry.finished.store(true, Ordering::Relaxed);
-                }
-                let _ = send_action(&conn, action, &mut l);
-            }
-        }
-
         let entry_for_task = entry.clone();
         let handle = tokio::spawn(async move {
-            if let Err(e) = Self::recv_pump(entry_for_task.clone()).await {
-                tracing::info!(?e, "browser session recv_pump ended");
-            }
+            Self::recv_pump(entry_for_task.clone()).await;
             // Defensive: ensure finished is set on every exit path so the
             // ticker reclaims the entry on its next sweep.
             entry_for_task.finished.store(true, Ordering::Relaxed);
@@ -183,31 +161,27 @@ impl BrowserSession {
 
     /// Drain incoming WT datagrams (handshake replies, ACK/NAK) into the
     /// initiator and dispatch the resulting sender actions. Exits on
-    /// connection error, `Close` action, or shutdown signal — and marks the
-    /// entry finished so the ticker stops servicing it.
-    async fn recv_pump(entry: Arc<SessionEntry>) -> anyhow::Result<()> {
+    /// connection error, `Close` action, or shutdown signal — and runs a
+    /// single cleanup block (close conn + mark finished + notify ticker).
+    async fn recv_pump(entry: Arc<SessionEntry>) {
         let session_id = entry.session_id;
-        loop {
+        'recv: loop {
             let d = tokio::select! {
                 biased;
                 _ = entry.shutdown.notified() => {
-                    entry.conn.close(0u32.into(), b"shutdown");
-                    return Ok(());
+                    tracing::info!(session_id, "session: shutdown signal received");
+                    break 'recv;
                 }
                 res = entry.conn.receive_datagram() => match res {
                     Ok(d) => d,
                     Err(e) => {
                         tracing::info!(session_id, ?e, "session: recv datagram stream closed");
-                        entry.conn.close(0u32.into(), b"");
-                        entry.finished.store(true, Ordering::Relaxed);
-                        entry.shutdown.notify_waiters();
-                        return Ok(());
+                        break 'recv;
                     }
                 },
             };
             let payload = d.payload();
             let now = Instant::now();
-            let mut should_close = false;
             let (actions, data) = {
                 let mut init = entry.initiator.lock().await;
                 init.handle_datagram(&payload, now)
@@ -218,20 +192,22 @@ impl BrowserSession {
             {
                 let mut l = entry.loss.lock().await;
                 for action in actions {
-                    if matches!(action, SenderAction::Close) {
-                        should_close = true;
+                    let is_close = matches!(action, SenderAction::Close);
+                    if let Err(e) = send_action(&entry.conn, action, &mut l) {
+                        tracing::info!(?e, session_id, "session: send_action failed");
+                        break 'recv;
                     }
-                    send_action(&entry.conn, action, &mut l)?;
+                    if is_close {
+                        tracing::info!(session_id, "session: initiator returned Close");
+                        break 'recv;
+                    }
                 }
             }
-            if should_close {
-                tracing::info!(session_id, "session: initiator returned Close; recv loop exiting");
-                entry.conn.close(0u32.into(), b"close");
-                entry.finished.store(true, Ordering::Relaxed);
-                entry.shutdown.notify_waiters();
-                return Ok(());
-            }
         }
+        // Single cleanup path for all exit conditions.
+        entry.conn.close(0u32.into(), b"close");
+        entry.finished.store(true, Ordering::Relaxed);
+        entry.shutdown.notify_waiters();
     }
 }
 
