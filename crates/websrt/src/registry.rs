@@ -112,6 +112,11 @@ impl SessionRegistry {
                         };
                         match maybe_msg {
                             Some(Ok(Some(m))) => {
+                                // Refresh `now` per push so each packet gets a
+                                // strictly monotonic timestamp. Reusing the
+                                // tick's `now` for all 32 pushes would stamp
+                                // them identically, breaking TSBPD spacing.
+                                let now = Instant::now();
                                 let (a, d) = init.push_message(m, now);
                                 actions.extend(a);
                                 data.extend(d);

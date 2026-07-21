@@ -15,8 +15,15 @@ use std::time::Instant;
 /// this message became available to the gateway. For SRT-backed ingesters
 /// (`SrtIngester`, browser publish path) this is the TSBPD release instant from
 /// the upstream SRT receiver. For synthetic sources (`FileIngester`) it is the
-/// wall-clock emission time. The downstream `SrtInitiator::push_message` stamps
-/// this instant into outgoing SRT data packets.
+/// wall-clock emission time.
+///
+/// NOTE: this Instant is informational only — it is NOT stamped into outgoing
+/// SRT data packets. The gateway→browser SRT session maintains its own TSBPD
+/// timeline, so `SrtInitiator::push_message` ignores `msg.0` and uses the
+/// current gateway `Instant::now()` for the packet timestamp. Using the upstream
+/// release instant would cause browser-side PacketTooLate drops because that
+/// instant is already in the past by the time the packet traverses the
+/// broadcaster + ticker.
 pub type TsMessage = (Instant, Bytes);
 
 #[async_trait]

@@ -170,6 +170,13 @@ impl SrtInitiator {
     /// Push a TS message into the sender's queue. No-op before handshake
     /// completes; the message is dropped (call sites should check
     /// `is_connected()` first or accept the drop).
+    ///
+    /// The gateway→browser SRT session has its own TSBPD timeline, independent
+    /// of when upstream (OBS or browser publisher) released these bytes. We
+    /// therefore stamp the outgoing packet with `now` — not `msg.0` (the
+    /// upstream release instant, which is already in the past by the time the
+    /// packet traverses the broadcaster + ticker). Using `msg.0` causes the
+    /// browser receiver to drop the packet as PacketTooLate.
     pub fn push_message(
         &mut self,
         msg: (Instant, Bytes),
@@ -178,7 +185,8 @@ impl SrtInitiator {
         let mut out = Vec::new();
         let mut data: Vec<(Instant, Bytes)> = Vec::new();
         if let InitiatorState::Connected(duplex) = &mut self.state {
-            duplex.handle_data_input(now, Some(msg));
+            let (_, bytes) = msg;
+            duplex.handle_data_input(now, Some((now, bytes)));
             drain(duplex, now, &mut out, &mut data);
         }
         (out, data)
