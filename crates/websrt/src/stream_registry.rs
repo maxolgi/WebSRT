@@ -48,8 +48,7 @@ impl StreamRegistry {
     pub fn publish(&self, name: &str) -> mpsc::Sender<TsMessage> {
         let (tx, rx) = mpsc::channel(self.broadcast_capacity);
         let ingester = ChannelIngester::new(rx);
-        let broadcaster =
-            Broadcaster::spawn(ingester, self.max_viewers, self.broadcast_capacity);
+        let broadcaster = Broadcaster::spawn(ingester, self.max_viewers, self.broadcast_capacity);
         self.streams
             .lock()
             .unwrap()
@@ -65,8 +64,7 @@ impl StreamRegistry {
     where
         I: Ingester + Send + 'static,
     {
-        let broadcaster =
-            Broadcaster::spawn(ingester, self.max_viewers, self.broadcast_capacity);
+        let broadcaster = Broadcaster::spawn(ingester, self.max_viewers, self.broadcast_capacity);
         self.streams
             .lock()
             .unwrap()

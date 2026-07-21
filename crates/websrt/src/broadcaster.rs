@@ -93,9 +93,7 @@ impl Broadcaster {
         if tx.receiver_count() >= self.max_viewers {
             return None;
         }
-        Some(ViewerRx {
-            rx: tx.subscribe(),
-        })
+        Some(ViewerRx { rx: tx.subscribe() })
     }
 
     pub fn is_alive(&self) -> bool {

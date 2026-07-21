@@ -168,7 +168,12 @@ impl Gateway {
         let ticker_streams = self.streams.clone();
         let ticker_shutdown_for_task = ticker_shutdown.clone();
         let ticker_handle = tokio::spawn(async move {
-            run_ticker(ticker_registry, ticker_streams, ticker_shutdown_for_task.notified()).await;
+            run_ticker(
+                ticker_registry,
+                ticker_streams,
+                ticker_shutdown_for_task.notified(),
+            )
+            .await;
         });
 
         tokio::pin!(shutdown);
@@ -430,7 +435,11 @@ impl GatewayBuilder {
 
     pub fn path(mut self, path: impl Into<String>) -> Self {
         let p = path.into();
-        self.path = if p.starts_with('/') { p } else { format!("/{p}") };
+        self.path = if p.starts_with('/') {
+            p
+        } else {
+            format!("/{p}")
+        };
         self
     }
 
@@ -482,8 +491,13 @@ impl GatewayBuilder {
 
     /// Build the gateway. Returns error if identity was not set.
     pub fn build(self) -> Result<Gateway> {
-        let identity = self.identity.ok_or_else(|| anyhow::anyhow!("identity must be set"))?;
-        let streams = Arc::new(StreamRegistry::new(self.max_viewers, self.broadcast_capacity));
+        let identity = self
+            .identity
+            .ok_or_else(|| anyhow::anyhow!("identity must be set"))?;
+        let streams = Arc::new(StreamRegistry::new(
+            self.max_viewers,
+            self.broadcast_capacity,
+        ));
 
         // Construct the session policy. If `session_policy` was explicitly set,
         // use it directly. Otherwise build a default chain from path/origin/auth_token.
@@ -601,7 +615,10 @@ mod tests {
         assert!(stats.streams >= 1, "should report at least one stream");
         assert!(stats.alive_streams >= 1, "stream should be alive");
         let test_stream = stats.per_stream.iter().find(|s| s.name == "test-stream");
-        assert!(test_stream.is_some(), "test-stream should be in the snapshot");
+        assert!(
+            test_stream.is_some(),
+            "test-stream should be in the snapshot"
+        );
         assert!(test_stream.unwrap().alive, "test-stream should be alive");
     }
 }

@@ -21,8 +21,8 @@
 //! For arbitrary logic (per-stream tokens, rate limits, JWT validation, etc.),
 //! implement [`SessionPolicy`] directly on your own type.
 
-use subtle::ConstantTimeEq;
 use std::net::SocketAddr;
+use subtle::ConstantTimeEq;
 
 /// Extract a percent-decoded query parameter value from a `key=value&...`
 /// query string. Returns `None` if the key is absent.
@@ -178,7 +178,10 @@ impl<A: SessionPolicy, B: SessionPolicy> SessionPolicy for Chain<A, B> {
 
 /// Compose two policies: accepts only if both accept.
 pub fn chain<A: SessionPolicy, B: SessionPolicy>(a: A, b: B) -> impl SessionPolicy {
-    Chain { first: a, second: b }
+    Chain {
+        first: a,
+        second: b,
+    }
 }
 
 /// Always-accept policy. Useful as a default or for testing.
@@ -252,14 +255,20 @@ mod tests {
     #[test]
     fn origin_allowlist_empty_list_rejects_everything() {
         let p = origin_allowlist_policy(vec![]);
-        assert_eq!(p.decide(&req("/wt", "", Some("https://example.com"))), Decision::Reject);
+        assert_eq!(
+            p.decide(&req("/wt", "", Some("https://example.com"))),
+            Decision::Reject
+        );
     }
 
     // AuthTokenPolicy
     #[test]
     fn auth_token_accepts_correct_token() {
         let p = auth_token_policy("s3cret".into());
-        assert_eq!(p.decide(&req("/wt", "token=s3cret", None)), Decision::Accept);
+        assert_eq!(
+            p.decide(&req("/wt", "token=s3cret", None)),
+            Decision::Accept
+        );
     }
 
     #[test]
@@ -292,7 +301,10 @@ mod tests {
     #[test]
     fn auth_token_percent_decodes_value() {
         let p = auth_token_policy("s3cret pass".into());
-        assert_eq!(p.decide(&req("/wt", "token=s3cret%20pass", None)), Decision::Accept);
+        assert_eq!(
+            p.decide(&req("/wt", "token=s3cret%20pass", None)),
+            Decision::Accept
+        );
     }
 
     // Chain
@@ -325,7 +337,10 @@ mod tests {
             ),
         );
         // Wrong path → reject without checking origin/token.
-        assert_eq!(p.decide(&req("/other", "token=t", Some("https://x.test"))), Decision::Reject);
+        assert_eq!(
+            p.decide(&req("/other", "token=t", Some("https://x.test"))),
+            Decision::Reject
+        );
     }
 
     // AcceptAll
@@ -339,7 +354,8 @@ mod tests {
     #[test]
     fn arc_dyn_policy_satisfies_trait() {
         // Verify Arc<dyn SessionPolicy> can be wrapped in another policy.
-        let inner: std::sync::Arc<dyn SessionPolicy> = std::sync::Arc::new(path_policy("/wt".into()));
+        let inner: std::sync::Arc<dyn SessionPolicy> =
+            std::sync::Arc::new(path_policy("/wt".into()));
         let outer = chain(inner, AcceptAll);
         assert_eq!(outer.decide(&req("/wt", "", None)), Decision::Accept);
         assert_eq!(outer.decide(&req("/other", "", None)), Decision::Reject);
@@ -348,8 +364,14 @@ mod tests {
     // parse_query_param
     #[test]
     fn parse_query_param_basic() {
-        assert_eq!(parse_query_param("stream=foo&token=abc", "stream"), Some("foo".into()));
-        assert_eq!(parse_query_param("stream=foo&token=abc", "token"), Some("abc".into()));
+        assert_eq!(
+            parse_query_param("stream=foo&token=abc", "stream"),
+            Some("foo".into())
+        );
+        assert_eq!(
+            parse_query_param("stream=foo&token=abc", "token"),
+            Some("abc".into())
+        );
         assert_eq!(parse_query_param("stream=foo&token=abc", "missing"), None);
     }
 
@@ -360,7 +382,10 @@ mod tests {
 
     #[test]
     fn parse_query_param_percent_decodes() {
-        assert_eq!(parse_query_param("stream=foo%20bar", "stream"), Some("foo bar".into()));
+        assert_eq!(
+            parse_query_param("stream=foo%20bar", "stream"),
+            Some("foo bar".into())
+        );
     }
 
     #[test]

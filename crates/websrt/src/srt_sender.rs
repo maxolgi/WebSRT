@@ -80,8 +80,10 @@ impl SrtInitiator {
     pub fn new(local_addr: IpAddr, remote: SocketAddr, config: &SrtConfig) -> Self {
         let mut settings = ConnInitSettings::default();
         settings.max_packet_size = srt_protocol::options::PacketSize(config.payload_size);
-        settings.send_buffer_size = srt_protocol::options::PacketCount(config.send_buffer_size.into());
-        settings.recv_buffer_size = srt_protocol::options::PacketCount(config.recv_buffer_size.into());
+        settings.send_buffer_size =
+            srt_protocol::options::PacketCount(config.send_buffer_size.into());
+        settings.recv_buffer_size =
+            srt_protocol::options::PacketCount(config.recv_buffer_size.into());
         settings.peer_idle_timeout = config.peer_idle_timeout;
         settings.send_latency = config.send_latency;
         settings.recv_latency = config.recv_latency;
@@ -137,7 +139,11 @@ impl SrtInitiator {
     ///
     /// Returns the actions to take and any upstream data the state machine
     /// released (browser→gateway publish path).
-    pub fn handle_datagram(&mut self, bytes: &[u8], now: Instant) -> (Vec<SenderAction>, Vec<(Instant, Bytes)>) {
+    pub fn handle_datagram(
+        &mut self,
+        bytes: &[u8],
+        now: Instant,
+    ) -> (Vec<SenderAction>, Vec<(Instant, Bytes)>) {
         let mut out = Vec::new();
         let mut data: Vec<(Instant, Bytes)> = Vec::new();
         let packet = match parse_packet(bytes) {
@@ -164,7 +170,11 @@ impl SrtInitiator {
     /// Push a TS message into the sender's queue. No-op before handshake
     /// completes; the message is dropped (call sites should check
     /// `is_connected()` first or accept the drop).
-    pub fn push_message(&mut self, msg: (Instant, Bytes), now: Instant) -> (Vec<SenderAction>, Vec<(Instant, Bytes)>) {
+    pub fn push_message(
+        &mut self,
+        msg: (Instant, Bytes),
+        now: Instant,
+    ) -> (Vec<SenderAction>, Vec<(Instant, Bytes)>) {
         let mut out = Vec::new();
         let mut data: Vec<(Instant, Bytes)> = Vec::new();
         if let InitiatorState::Connected(duplex) = &mut self.state {
@@ -194,7 +204,9 @@ fn drain(
             Action::ReleaseData((ts, bytes)) => {
                 data.push((ts, bytes));
             }
-            Action::UpdateStatistics(_) => { continue; }
+            Action::UpdateStatistics(_) => {
+                continue;
+            }
             Action::WaitForData(_) => {
                 return;
             }

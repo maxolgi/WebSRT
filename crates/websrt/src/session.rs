@@ -90,8 +90,12 @@ pub(crate) struct LossInjector;
 
 #[cfg(not(feature = "sim-loss"))]
 impl LossInjector {
-    fn new(_pct: u8, _seed: u64) -> Self { Self }
-    fn should_drop(&mut self, _bytes: &[u8]) -> bool { false }
+    fn new(_pct: u8, _seed: u64) -> Self {
+        Self
+    }
+    fn should_drop(&mut self, _bytes: &[u8]) -> bool {
+        false
+    }
 }
 
 /// A single browser session: constructs the shared `SessionEntry` and spawns
@@ -226,7 +230,10 @@ pub(crate) fn send_action(
                 return Ok(());
             }
             if bytes.len() > 1200 {
-                tracing::warn!(len = bytes.len(), "outgoing datagram > 1200B; QUIC may reject");
+                tracing::warn!(
+                    len = bytes.len(),
+                    "outgoing datagram > 1200B; QUIC may reject"
+                );
             }
             if let Err(e) = conn.send_datagram(bytes) {
                 tracing::warn!(?e, "send_datagram failed; closing session");
