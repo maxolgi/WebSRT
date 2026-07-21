@@ -404,6 +404,15 @@ root `Cargo.toml`. Cargo fetches them automatically at build time — they are
   1. `ts/reader.rs`: unknown PIDs return Raw bytes instead of erroring,
      preventing byte-stream misalignment when the receiver joins mid-stream.
 
+## Standards alignment
+
+WebSRT implements [draft-sharabayko-srt-over-quic](https://haivision.github.io/srt-rfc/draft-sharabayko-srt-over-quic.html):
+
+- **§4.2 Packet integrity** — satisfied. Each SRT packet is sent as exactly one WebTransport datagram; the underlying transport preserves packet boundaries.
+- **§4.3 Connection establishment** — 1-RTT handshake. Because WebTransport already provides TLS-level authentication and return-routability, the SRT induction phase (whose only purpose is DoS protection via cookie) is redundant. WebSRT skips induction and runs a 2-packet handshake: the gateway sends CONCLUSION directly, the browser responds with CONCLUSION-RESP. This saves one RTT (~50-200 ms) on every viewer join.
+- **§4.7 Connection migration** — inherited from QUIC via WebTransport. Mobile viewers can hand off between networks (cellular → WiFi) without rejoining the stream.
+- **§4.8 Datagram vs H3 Datagram** — WebTransport uses H3 Datagram semantics, the load-balancer-compatible choice the draft recommends.
+
 ## Build commands
 
 `./build.sh` wraps every common build step. Run `./build.sh --help` for the
