@@ -69,7 +69,7 @@ pub struct SrtInitiator {
 }
 
 enum InitiatorState {
-    /// INDUCTION has not yet been sent (or is in-flight and may be re-sent).
+    /// CONCLUSION has not yet been sent (or is in-flight and may be re-sent).
     Handshaking(Connect),
     /// HSv5 complete; data plane running.
     Connected(DuplexConnection),
@@ -88,12 +88,13 @@ impl SrtInitiator {
         settings.send_latency = config.send_latency;
         settings.recv_latency = config.recv_latency;
         settings.too_late_packet_drop = true;
-        let connect = Connect::new(
+        let connect = Connect::new_skip_induction(
             remote,
             local_addr,
             settings,
             None,
             SeqNumber::new(0).expect("seq 0"),
+            Instant::now(),
         );
         Self {
             state: InitiatorState::Handshaking(connect),

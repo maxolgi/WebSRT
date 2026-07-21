@@ -174,7 +174,8 @@ impl SrtReceiver {
         init.send_latency = std::time::Duration::from_millis(latency_ms as u64);
         init.recv_latency = std::time::Duration::from_millis(latency_ms as u64);
         init.too_late_packet_drop = true;
-        let listen = Listen::new(init, false);
+        let mut listen = Listen::new(init, false);
+        listen.allow_skip_induction(true);
         let now = web_time::Instant::now();
         SrtReceiver {
             state: RefCell::new(State::Handshaking(listen)),
