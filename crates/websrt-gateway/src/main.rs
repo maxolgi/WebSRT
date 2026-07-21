@@ -106,6 +106,10 @@ pub struct Cli {
     #[arg(long, default_value_t = 0u16)]
     pub health_port: u16,
 
+    /// Bind address for the HTTP health/metrics server (when --health-port > 0).
+    #[arg(long, default_value = "127.0.0.1")]
+    pub health_bind: String,
+
     /// Auth token for viewer connections. If set, browsers must pass ?token=<value>.
     /// If not set, authentication is disabled.
     #[arg(long)]
@@ -181,8 +185,7 @@ async fn main() -> Result<()> {
     #[cfg_attr(not(feature = "sim-loss"), allow(unused_mut))]
     let mut builder = Gateway::builder()
         .bind_addr(format!("{}:{}", cli.bind, cli.wt_port).parse::<std::net::SocketAddr>()?)
-        .identity(cert.identity.clone_identity())
-        .health_port(cli.health_port);
+        .identity(cert.identity.clone_identity());
 
     #[cfg(feature = "sim-loss")]
     {
@@ -194,6 +197,51 @@ async fn main() -> Result<()> {
     }
 
     let gateway = builder.build()?;
+
+    // Spawn the demo health/metrics server. The library no longer owns this;
+    // each embedding application is responsible for its own exposition format.
+    if cli.health_port > 0 {
+        let stats_handle = gateway.stats_handle();
+        let bind = cli.health_bind.clone();
+        let port = cli.health_port;
+        tokio::spawn(async move {
+            let listener = match tokio::net::TcpListener::bind((bind.as_str(), port)).await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!(?e, port, "health server bind failed");
+                    return;
+                }
+            };
+            tracing::info!(port, "health server listening");
+            loop {
+                match listener.accept().await {
+                    Ok((mut stream, _addr)) => {
+                        let stats = stats_handle.stats();
+                        let json = format!(
+                            r#"{{"status":"{}","streams":{},"alive_streams":{},"viewers":{},"max_viewers":{}}}"#,
+                            if stats.alive_streams > 0 { "ok" } else { "no_source" },
+                            stats.streams,
+                            stats.alive_streams,
+                            stats.total_viewers,
+                            stats.max_viewers,
+                        );
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            json.len(),
+                            json,
+                        );
+                        use tokio::io::AsyncWriteExt;
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        let _ = stream.flush().await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(?e, "health accept error");
+                        continue;
+                    }
+                }
+            }
+        });
+    }
 
     // Setup ingester
     match cli.input {

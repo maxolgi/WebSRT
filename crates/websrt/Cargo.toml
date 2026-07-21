@@ -18,6 +18,7 @@ tracing.workspace = true
 tokio.workspace = true
 srt-protocol.workspace = true
 srt-tokio.workspace = true
+subtle.workspace = true
 wtransport.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true

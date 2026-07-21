@@ -13,6 +13,17 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
+/// Snapshot of one stream's state for health/stats reporting.
+#[derive(Debug, Clone)]
+pub struct StreamStats {
+    /// Stream name (route key).
+    pub name: String,
+    /// True if the source is still producing.
+    pub alive: bool,
+    /// Current viewer count.
+    pub viewers: usize,
+}
+
 pub struct StreamRegistry {
     streams: Mutex<HashMap<String, Arc<Broadcaster>>>,
     max_viewers: usize,
@@ -87,6 +98,22 @@ impl StreamRegistry {
         streams.values().map(|b| b.viewer_count()).sum()
     }
 
+    /// Snapshot all streams' state, sorted by name for stable output.
+    /// Used by [`crate::gateway::GatewayStatsHandle`] for health/stats reporting.
+    pub fn snapshot_streams(&self) -> Vec<StreamStats> {
+        let streams = self.streams.lock().unwrap();
+        let mut entries: Vec<StreamStats> = streams
+            .iter()
+            .map(|(name, bc)| StreamStats {
+                name: name.clone(),
+                alive: bc.is_alive(),
+                viewers: bc.viewer_count(),
+            })
+            .collect();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        entries
+    }
+
     /// Number of streams whose source is still alive.
     pub fn alive_stream_count(&self) -> usize {
         let streams = self.streams.lock().unwrap();
@@ -114,19 +141,19 @@ impl StreamRegistry {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::ingest::TsMessage;
     use bytes::Bytes;
     use std::time::Instant;
 
     /// Minimal ingester that yields a fixed number of messages then ends.
-    struct FiniteIngester {
+    pub(crate) struct FiniteIngester {
         remaining: u32,
     }
 
     impl FiniteIngester {
-        fn new(n: u32) -> Self {
+        pub(crate) fn new(n: u32) -> Self {
             Self { remaining: n }
         }
     }

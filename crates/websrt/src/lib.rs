@@ -37,6 +37,7 @@
 pub mod broadcaster;
 pub mod cert;
 pub mod gateway;
+pub mod hooks;
 pub mod ingest;
 mod registry;
 pub mod session;
@@ -45,8 +46,9 @@ pub mod stream_registry;
 
 pub use broadcaster::{Broadcaster, ViewerRx};
 pub use cert::{Cert, CertSource};
-pub use gateway::{Gateway, GatewayBuilder, GatewaySourceHandle};
+pub use gateway::{Gateway, GatewayBuilder, GatewaySourceHandle, GatewayStats, GatewayStatsHandle};
+pub use hooks::{Decision, SessionPolicy, SessionRequest};
 pub use ingest::{ChannelIngester, Ingester, TsMessage};
 pub use session::BrowserSession;
 pub use srt_sender::{SenderAction, SrtConfig, SrtInitiator};
-pub use stream_registry::StreamRegistry;
+pub use stream_registry::{StreamRegistry, StreamStats};

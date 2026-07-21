@@ -8,9 +8,8 @@ use crate::ingest::{Ingester, TsMessage};
 use crate::registry::SessionRegistry;
 use crate::session::BrowserSession;
 use crate::srt_sender::SrtConfig;
-use crate::stream_registry::StreamRegistry;
+use crate::stream_registry::{StreamRegistry, StreamStats};
 use anyhow::Result;
-use percent_encoding::percent_decode_str;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -34,12 +33,8 @@ pub struct Gateway {
     inner: Arc<GatewayInner>,
     bind_addr: SocketAddr,
     identity: Identity,
-    path: String,
-    auth_token: Option<String>,
-    allowed_origins: Vec<String>,
+    policy: Arc<dyn crate::hooks::SessionPolicy>,
     srt_config: SrtConfig,
-    health_port: u16,
-    health_bind_addr: String,
     #[cfg(feature = "sim-loss")]
     sim_loss: u8,
     #[cfg(feature = "sim-loss")]
@@ -60,8 +55,7 @@ pub struct GatewayBuilder {
     path: String,
     auth_token: Option<String>,
     allowed_origins: Vec<String>,
-    health_port: u16,
-    health_bind_addr: String,
+    session_policy: Option<Arc<dyn crate::hooks::SessionPolicy>>,
     #[cfg(feature = "sim-loss")]
     sim_loss: u8,
     #[cfg(feature = "sim-loss")]
@@ -77,6 +71,47 @@ pub struct GatewaySourceHandle {
     inner: Arc<GatewayInner>,
 }
 
+/// Snapshot of gateway-wide stats. Returned by [`GatewayStatsHandle::stats`].
+#[derive(Debug, Clone)]
+pub struct GatewayStats {
+    /// Total registered streams (alive or dead).
+    pub streams: usize,
+    /// Streams whose source is still producing.
+    pub alive_streams: usize,
+    /// Sum of viewer counts across all streams.
+    pub total_viewers: usize,
+    /// Configured per-stream viewer cap.
+    pub max_viewers: usize,
+    /// Configured broadcast ring-buffer depth.
+    pub broadcast_capacity: usize,
+    /// Per-stream snapshot, sorted by name.
+    pub per_stream: Vec<StreamStats>,
+}
+
+/// Handle for reading gateway stats after [`Gateway::run`] has consumed the gateway.
+///
+/// Obtained via [`Gateway::stats_handle`] before calling `run`. The handle
+/// owns its own `Arc` clone, so it can be moved into a separate task (e.g. a
+/// health/metrics HTTP server spawned by the embedding application).
+pub struct GatewayStatsHandle {
+    inner: Arc<GatewayInner>,
+}
+
+impl GatewayStatsHandle {
+    /// Read the current gateway stats. Cheap to call — locks the stream
+    /// registry briefly, no I/O.
+    pub fn stats(&self) -> GatewayStats {
+        GatewayStats {
+            streams: self.inner.streams.stream_count(),
+            alive_streams: self.inner.streams.alive_stream_count(),
+            total_viewers: self.inner.streams.total_viewers(),
+            max_viewers: self.inner.streams.max_viewers(),
+            broadcast_capacity: self.inner.streams.broadcast_capacity(),
+            per_stream: self.inner.streams.snapshot_streams(),
+        }
+    }
+}
+
 impl Gateway {
     /// Create a new builder.
     pub fn builder() -> GatewayBuilder {
@@ -89,8 +124,7 @@ impl Gateway {
             path: "/wt".to_string(),
             auth_token: None,
             allowed_origins: Vec::new(),
-            health_port: 0,
-            health_bind_addr: "127.0.0.1".to_string(),
+            session_policy: None,
             #[cfg(feature = "sim-loss")]
             sim_loss: 0,
             #[cfg(feature = "sim-loss")]
@@ -108,6 +142,16 @@ impl Gateway {
         }
     }
 
+    /// Get a handle for reading gateway stats.
+    ///
+    /// Call this before `run()`. The handle owns its own `Arc` clone, so it
+    /// can be moved into a separate task (e.g. a health/metrics HTTP server).
+    pub fn stats_handle(&self) -> GatewayStatsHandle {
+        GatewayStatsHandle {
+            inner: self.inner.clone(),
+        }
+    }
+
     /// Run the WebTransport accept loop until `shutdown` completes.
     pub async fn run(self, shutdown: impl Future<Output = ()>) -> Result<()> {
         let config = ServerConfig::builder()
@@ -121,43 +165,8 @@ impl Gateway {
 
         tracing::info!(
             addr = %self.bind_addr,
-            path = %self.path,
             "WebTransport server listening"
         );
-
-        let mut health_server_handle: Option<tokio::task::JoinHandle<()>> = None;
-        if self.health_port > 0 {
-            let inner = self.inner.clone();
-            let health_port = self.health_port;
-            let health_bind = self.health_bind_addr.clone();
-            let health_handle = tokio::spawn(async move {
-                let listener = match tokio::net::TcpListener::bind(
-                    format!("{}:{}", health_bind, health_port)
-                ).await {
-                    Ok(l) => l,
-                    Err(e) => {
-                        tracing::warn!(?e, port = health_port, "health server bind failed");
-                        return;
-                    }
-                };
-                tracing::info!(port = health_port, "health server listening");
-                loop {
-                    match listener.accept().await {
-                        Ok((stream, addr)) => {
-                            let inner = inner.clone();
-                            tokio::spawn(async move {
-                                Self::handle_health(stream, addr, &inner).await;
-                            });
-                        }
-                        Err(e) => {
-                            tracing::warn!(?e, "health accept error");
-                            continue;
-                        }
-                    }
-                }
-            });
-            health_server_handle = Some(health_handle);
-        }
 
         let session_handles: Arc<Mutex<Vec<(Arc<Notify>, tokio::task::JoinHandle<()>)>>> =
             Arc::new(Mutex::new(Vec::new()));
@@ -167,9 +176,10 @@ impl Gateway {
         let registry = Arc::new(SessionRegistry::new());
         let ticker_shutdown = Arc::new(Notify::new());
         let ticker_registry = registry.clone();
+        let ticker_streams = self.inner.streams.clone();
         let ticker_shutdown_for_task = ticker_shutdown.clone();
         let ticker_handle = tokio::spawn(async move {
-            run_ticker(ticker_registry, ticker_shutdown_for_task.notified()).await;
+            run_ticker(ticker_registry, ticker_streams, ticker_shutdown_for_task.notified()).await;
         });
 
         tokio::pin!(shutdown);
@@ -201,44 +211,23 @@ impl Gateway {
                         "WT session request"
                     );
 
-                    if path_only != self.path {
-                        session_request.not_found().await;
-                        continue;
-                    }
-
-                    // Origin allowlist check
-                    if !self.allowed_origins.is_empty() {
-                        let origin_ok = session_request
-                            .origin()
-                            .map(|o| self.allowed_origins.iter().any(|allowed| allowed == o))
-                            .unwrap_or(false);
-                        if !origin_ok {
-                            tracing::warn!("session rejected: origin not allowed");
-                            session_request.not_found().await;
-                            continue;
-                        }
-                    }
-
-                    // Auth check
-                    if let Some(ref expected_token) = self.auth_token {
-                        let token_valid = query
-                            .split('&')
-                            .find_map(|kv| {
-                                let mut parts = kv.splitn(2, '=');
-                                if parts.next()? == "token" {
-                                    Some(parts.next().unwrap_or(""))
-                                } else {
-                                    None
-                                }
-                            })
-                            .map(|t| {
-                                let decoded = percent_decode_str(t).decode_utf8_lossy();
-                                constant_time_eq(decoded.as_bytes(), expected_token.as_bytes())
-                            })
-                            .unwrap_or(false);
-
-                        if !token_valid {
-                            tracing::warn!(path = %path_only, "session rejected: invalid or missing auth token");
+                    // Build a SessionRequest and ask the policy.
+                    let origin_header = session_request.origin();
+                    let session_req = crate::hooks::SessionRequest {
+                        path: path_only,
+                        query,
+                        origin: origin_header,
+                        authority: session_request.authority(),
+                        remote_address: session_request.remote_address(),
+                    };
+                    match self.policy.decide(&session_req) {
+                        crate::hooks::Decision::Accept => {}
+                        crate::hooks::Decision::Reject => {
+                            tracing::info!(
+                                path = path_only,
+                                origin = ?origin_header,
+                                "session rejected by policy"
+                            );
                             session_request.not_found().await;
                             continue;
                         }
@@ -386,56 +375,37 @@ impl Gateway {
             tracing::info!("shutdown complete");
         }
 
-        if let Some(h) = health_server_handle {
-            h.abort();
-        }
-
         Ok(())
-    }
-
-    async fn handle_health(
-        mut stream: tokio::net::TcpStream,
-        addr: std::net::SocketAddr,
-        inner: &GatewayInner,
-    ) {
-        use tokio::io::AsyncWriteExt;
-
-        let streams = inner.streams.stream_count();
-        let alive_streams = inner.streams.alive_stream_count();
-        let viewers = inner.streams.total_viewers();
-        let max_viewers = inner.streams.max_viewers();
-
-        let json = format!(
-            r#"{{"status":"{}","streams":{},"alive_streams":{},"viewers":{},"max_viewers":{}}}"#,
-            if alive_streams > 0 { "ok" } else { "no_source" },
-            streams,
-            alive_streams,
-            viewers,
-            max_viewers,
-        );
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            json.len(),
-            json,
-        );
-        let _ = stream.write_all(response.as_bytes()).await;
-        let _ = stream.flush().await;
-        let _ = addr;
     }
 }
 
 /// Single shared ticker task that drives every active session's SRT state
-/// machine ~every 2ms. Exits when `shutdown` completes (signaled from
-/// `Gateway::run`'s drain path).
-async fn run_ticker(registry: Arc<SessionRegistry>, shutdown: impl Future<Output = ()>) {
+/// machine ~every 2ms. Also periodically prunes dead streams from the
+/// registry. Exits when `shutdown` completes (signaled from `Gateway::run`'s
+/// drain path).
+async fn run_ticker(
+    registry: Arc<SessionRegistry>,
+    streams: Arc<StreamRegistry>,
+    shutdown: impl Future<Output = ()>,
+) {
     let mut ticker = tokio::time::interval(Duration::from_millis(2));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut cleanup_interval = tokio::time::interval(Duration::from_secs(60));
+    cleanup_interval.tick().await; // consume immediate first tick
 
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
             biased;
             _ = &mut shutdown => break,
+            _ = cleanup_interval.tick() => {
+                let before = streams.stream_count();
+                streams.cleanup();
+                let after = streams.stream_count();
+                if before != after {
+                    tracing::info!(before, after, "stream registry cleanup removed dead streams");
+                }
+            }
             _ = ticker.tick() => {
                 registry.tick_all().await;
             }
@@ -498,15 +468,28 @@ impl GatewayBuilder {
         self
     }
 
-    /// Set the HTTP health/metrics port (0 to disable).
-    pub fn health_port(mut self, port: u16) -> Self {
-        self.health_port = port;
-        self
-    }
-
-    /// Set the bind address for the HTTP health/metrics server.
-    pub fn health_bind_addr(mut self, addr: impl Into<String>) -> Self {
-        self.health_bind_addr = addr.into();
+    /// Set a custom session-acceptance policy. When set, this REPLACES the
+    /// default path/origin/auth_token checks — call `chain()` yourself if you
+    /// want to layer your policy on top of the built-ins.
+    ///
+    /// ```no_run
+    /// use websrt::Gateway;
+    /// use websrt::hooks::{chain, path_policy, auth_token_policy};
+    /// use wtransport::Identity;
+    ///
+    /// # fn main() -> anyhow::Result<()> {
+    /// let gateway = Gateway::builder()
+    ///     .identity(Identity::self_signed(&["localhost".to_string()])?)
+    ///     .session_policy(chain(
+    ///         path_policy("/wt".into()),
+    ///         auth_token_policy("s3cret".into()),
+    ///     ))
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn session_policy<P: crate::hooks::SessionPolicy>(mut self, policy: P) -> Self {
+        self.session_policy = Some(Arc::new(policy));
         self
     }
 
@@ -522,16 +505,42 @@ impl GatewayBuilder {
     pub fn build(self) -> Result<Gateway> {
         let identity = self.identity.ok_or_else(|| anyhow::anyhow!("identity must be set"))?;
         let streams = Arc::new(StreamRegistry::new(self.max_viewers, self.broadcast_capacity));
+
+        // Construct the session policy. If `session_policy` was explicitly set,
+        // use it directly. Otherwise build a default chain from path/origin/auth_token.
+        let policy: Arc<dyn crate::hooks::SessionPolicy> = match self.session_policy {
+            Some(p) => p,
+            None => {
+                // Always check the path.
+                let base: Arc<dyn crate::hooks::SessionPolicy> =
+                    Arc::new(crate::hooks::path_policy(self.path.clone()));
+                // Conditionally add origin allowlist.
+                let base = if self.allowed_origins.is_empty() {
+                    base
+                } else {
+                    Arc::new(crate::hooks::chain(
+                        base,
+                        crate::hooks::origin_allowlist_policy(self.allowed_origins.clone()),
+                    ))
+                };
+                // Conditionally add auth token.
+                let base = match self.auth_token {
+                    Some(token) => Arc::new(crate::hooks::chain(
+                        base,
+                        crate::hooks::auth_token_policy(token),
+                    )),
+                    None => base,
+                };
+                base
+            }
+        };
+
         Ok(Gateway {
             inner: Arc::new(GatewayInner { streams }),
             bind_addr: self.bind_addr,
             identity,
-            path: self.path,
-            auth_token: self.auth_token,
-            allowed_origins: self.allowed_origins,
+            policy,
             srt_config: self.srt_config,
-            health_port: self.health_port,
-            health_bind_addr: self.health_bind_addr,
             #[cfg(feature = "sim-loss")]
             sim_loss: self.sim_loss,
             #[cfg(feature = "sim-loss")]
@@ -557,19 +566,6 @@ impl GatewaySourceHandle {
     }
 }
 
-/// Constant-time byte comparison to prevent timing side-channel attacks
-/// on auth token validation.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut result: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        result |= x ^ y;
-    }
-    result == 0
-}
-
 /// Extract a percent-decoded query parameter value from a `key=value&...`
 /// query string. Returns `None` if the key is absent.
 fn parse_query_param(query: &str, key: &str) -> Option<String> {
@@ -577,7 +573,7 @@ fn parse_query_param(query: &str, key: &str) -> Option<String> {
         let mut parts = kv.splitn(2, '=');
         if parts.next() == Some(key) {
             let val = parts.next().unwrap_or("");
-            return Some(percent_decode_str(val).decode_utf8_lossy().into_owned());
+            return Some(percent_encoding::percent_decode_str(val).decode_utf8_lossy().into_owned());
         }
     }
     None
@@ -586,26 +582,6 @@ fn parse_query_param(query: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn constant_time_eq_equal() {
-        assert!(constant_time_eq(b"hello", b"hello"));
-    }
-
-    #[test]
-    fn constant_time_eq_different() {
-        assert!(!constant_time_eq(b"hello", b"world"));
-    }
-
-    #[test]
-    fn constant_time_eq_different_lengths() {
-        assert!(!constant_time_eq(b"short", b"longer_string"));
-    }
-
-    #[test]
-    fn constant_time_eq_empty() {
-        assert!(constant_time_eq(b"", b""));
-    }
 
     #[test]
     fn builder_max_viewers_clamps_to_1() {
@@ -635,35 +611,9 @@ mod tests {
     }
 
     #[test]
-    fn builder_path_prepends_slash() {
-        let builder = Gateway::builder()
-            .path("stream")
-            .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
-        let gateway = builder.build().unwrap();
-        assert_eq!(gateway.path, "/stream");
-    }
-
-    #[test]
-    fn builder_path_with_slash_unchanged() {
-        let builder = Gateway::builder()
-            .path("/stream")
-            .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
-        let gateway = builder.build().unwrap();
-        assert_eq!(gateway.path, "/stream");
-    }
-
-    #[test]
     fn build_fails_without_identity() {
         let result = Gateway::builder().build();
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn health_bind_addr_defaults_to_localhost() {
-        let builder = Gateway::builder()
-            .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
-        let gateway = builder.build().unwrap();
-        assert_eq!(gateway.health_bind_addr, "127.0.0.1");
     }
 
     #[test]
@@ -686,5 +636,30 @@ mod tests {
     #[test]
     fn parse_query_param_key_without_value() {
         assert_eq!(parse_query_param("publish", "publish"), Some("".into()));
+    }
+
+    #[tokio::test]
+    async fn stats_handle_reports_streams_and_viewers() {
+        let gateway = Gateway::builder()
+            .identity(Identity::self_signed(&["localhost".to_string()]).unwrap())
+            .build()
+            .unwrap();
+
+        // Publish a stream via the source handle, keeping the Sender alive so
+        // the broadcaster stays alive while we read stats. (FiniteIngester
+        // drains in microseconds, racing the assertion.)
+        let source = gateway.source_handle();
+        let _tx = source.publish_channel("test-stream");
+
+        // Give the broadcaster task a moment to start.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let stats_handle = gateway.stats_handle();
+        let stats = stats_handle.stats();
+        assert!(stats.streams >= 1, "should report at least one stream");
+        assert!(stats.alive_streams >= 1, "stream should be alive");
+        let test_stream = stats.per_stream.iter().find(|s| s.name == "test-stream");
+        assert!(test_stream.is_some(), "test-stream should be in the snapshot");
+        assert!(test_stream.unwrap().alive, "test-stream should be alive");
     }
 }

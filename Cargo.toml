@@ -23,6 +23,7 @@ sha2 = "0.10"
 hex = "0.4"
 srt-protocol = "0.4.4"
 srt-tokio = "0.4.4"
+subtle = "2"
 mpeg2ts = "0.6.0"
 wtransport = { version = "0.7", features = ["self-signed"] }
 rcgen = "0.14"

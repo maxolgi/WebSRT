@@ -1933,6 +1933,7 @@ dependencies = [
  "rand 0.8.7",
  "srt-protocol",
  "srt-tokio",
+ "subtle",
  "tokio",
  "tracing",
  "wtransport",
