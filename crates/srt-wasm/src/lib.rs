@@ -20,7 +20,7 @@ use srt_protocol::protocol::pending_connection::listen::Listen;
 use srt_protocol::protocol::pending_connection::{ConnectionResult};
 use srt_protocol::settings::ConnInitSettings;
 use srt_protocol::statistics::SocketStatistics;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
@@ -146,6 +146,8 @@ pub struct SrtReceiver {
     epoch: web_time::Instant,
     remote: SocketAddr,
     stats: RefCell<SocketStatistics>,
+    prev_tx_bytes: Cell<u64>,
+    prev_stats_time: Cell<web_time::Instant>,
 }
 
 fn now_from_us(epoch: web_time::Instant, now_us: f64) -> web_time::Instant {
@@ -196,6 +198,8 @@ impl SrtReceiver {
             epoch: now,
             remote: SocketAddr::from_str(PEER).expect("hardcoded addr"),
             stats: RefCell::new(SocketStatistics::new()),
+            prev_tx_bytes: Cell::new(0),
+            prev_stats_time: Cell::new(now),
         }
     }
 
@@ -332,6 +336,23 @@ impl SrtReceiver {
     #[wasm_bindgen(js_name = getStats)]
     pub fn get_stats(&self) -> SrtStats {
         let s = self.stats.borrow();
+        // srt-protocol computes rx_bandwidth but never tx_bandwidth. Derive
+        // the send rate from the tx_bytes delta since the last getStats()
+        // call so a publishing session reports real throughput.
+        let now = web_time::Instant::now();
+        let prev_bytes = self.prev_tx_bytes.get();
+        let prev_time = self.prev_stats_time.get();
+        let tx_bw = {
+            let dt = (now - prev_time).as_secs_f64();
+            if dt > 0.0 {
+                let delta = s.tx_bytes.saturating_sub(prev_bytes);
+                (delta as f64 * 8.0 / dt) as u64
+            } else {
+                0
+            }
+        };
+        self.prev_tx_bytes.set(s.tx_bytes);
+        self.prev_stats_time.set(now);
         SrtStats {
             elapsed_ms: s.elapsed_time.as_secs_f64() * 1000.0,
             rx_data: s.rx_data,
@@ -342,7 +363,7 @@ impl SrtReceiver {
             rx_ack: s.rx_ack,
             rx_nak: s.rx_nak,
             rtt_ms: s.rx_average_rtt.as_secs_f64() * 1000.0,
-            bandwidth_bps: s.rx_bandwidth,
+            bandwidth_bps: s.rx_bandwidth.max(tx_bw),
             rx_buffered: s.rx_acknowledged_data,
             rx_belated: s.rx_belated_data,
             tx_data: s.tx_data,
