@@ -362,7 +362,7 @@ impl SrtReceiver {
             rx_dropped: s.rx_dropped_data,
             rx_ack: s.rx_ack,
             rx_nak: s.rx_nak,
-            rtt_ms: s.rx_average_rtt.as_secs_f64() * 1000.0,
+            rtt_ms: s.rx_average_rtt.max(s.tx_average_rtt).as_secs_f64() * 1000.0,
             bandwidth_bps: s.rx_bandwidth.max(tx_bw),
             rx_buffered: s.rx_acknowledged_data,
             rx_belated: s.rx_belated_data,
