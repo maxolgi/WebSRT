@@ -94,7 +94,7 @@ When reviewing, hardening, or auditing code, prioritize by layer:
 
 ## Forked crates (patched, not upstream)
 
-- `maxolgi/srt-rs` (main) — forked from `russelltg/srt-rs` v0.4.4 (commit `d4c08ac`). Eight patches:
+- `maxolgi/srt-rs` (main) — forked from `russelltg/srt-rs` v0.4.4 (commit `d4c08ac`). Ten patches:
   1. `std::time::Instant` → `web_time::Instant` across all source files (WASM compat; no-op on native).
   2. `TimeBase::adjust()` sign flip: upstream applies `-drift` which doubles TSBPD clock error every sync; changed to `+drift`.
   3. TLPKTL `checked_sub` in `protocol/receiver/buffer.rs` to prevent underflow panic early in page life.
@@ -103,6 +103,8 @@ When reviewing, hardening, or auditing code, prioritize by layer:
   6. `packet/time.rs` `Sub<TimeSpan>`: `unwrap_or(self)` → `unwrap()` to surface errors.
   7. `protocol/pending_connection/listen.rs`: `Listen::allow_skip_induction` flag + branch in `wait_for_induction` that accepts a Conclusion-first handshake (skips Induction phase for 1-RTT over WebTransport).
   8. `protocol/pending_connection/connect.rs`: `Connect::new_skip_induction` constructor that starts in `ConclusionResponseWait` with a pre-built Conclusion packet (cookie=0, HSREQ extensions).
+  9. `settings/connection.rs` + `protocol/time/rtt.rs` + `protocol/receiver/arq.rs` + `protocol/sender/buffer.rs`: `ConnInitSettings.initial_rtt: Option<Duration>` field that seeds `SendBuffer.rtt` and `ARQ.rtt` via `Rtt::from_mean_duration` (variance = mean/4). Repurposes the dead `ConnectionSettings.rtt` field.
+  10. `protocol/sender/buffer.rs`: CC-aware retransmit skip in `send_next_lost_packet` — if `now + rtt.mean()` exceeds the packet's TSBPD deadline (`timestamp + latency_window`), the retransmit is skipped (receiver will drop it as too-late anyway).
 - `maxolgi/mpeg2ts` (master) — forked from `sile/mpeg2ts` v0.6.0 (commit `82e68d4`). One patch:
   1. `ts/reader.rs`: unknown PIDs return Raw bytes instead of erroring, preventing byte-stream misalignment when the receiver joins mid-stream.
 - Both wired via `[patch.crates-io]` in root `Cargo.toml`.
@@ -112,6 +114,8 @@ When reviewing, hardening, or auditing code, prioritize by layer:
 - **Connection migration (§4.7):** WebTransport inherits QUIC's connection migration. A browser that switches networks (cellular → WiFi) keeps the WebTransport session alive; the SRT layer pauses briefly while packets queue, then resumes. No code change required.
 - **Pacing / TSBPD interaction (§4.6):** WebTransport's built-in pacing may delay packets past SRT's TSBPD latency under congestion. The browser's SRT receiver drops those packets as "too late" — correct behavior for live streaming, not a bug.
 - **1-RTT handshake (§4.3):** WebSRT skips the SRT Induction phase entirely. WebTransport's TLS layer provides the DoS protection that the SRT cookie mechanism was designed for, so the gateway sends a Conclusion handshake directly. Both `SrtInitiator` (gateway) and `Listen` (browser WASM) use the skip-induction code paths. Saves one RTT (~50-200 ms) on every viewer join.
+- **RTT seeding (§4.5):** The gateway reads QUIC's smoothed RTT via `wtransport::Connection::rtt()` and seeds SRT's EWMA via `ConnInitSettings.initial_rtt`. The browser reads `WebTransport.getStats().smoothedRtt`. Both seed SRT's `SendBuffer.rtt` and `ARQ.rtt` for accurate cold-start retransmit timing and congestion window estimation.
+- **CC-aware retransmit (§4.5):** The SRT sender skips NAK-triggered retransmits whose predicted arrival time (`now + RTT`) exceeds the packet's TSBPD deadline. Prevents wasting bandwidth on retransmits the receiver will drop as too-late. Combined with RTT seeding, implements the "transport-aware retransmission decisions" the draft recommends.
 
 ## Architecture
 
@@ -163,6 +167,7 @@ Gateway runs under supervisord:
 - **Demux debug tab** requires the `mpeg2ts-wasm` rebuild (it consumes `debug_snapshot()`). On stale WASM, the tab renders empty tables — no crash. The old 6-counter `__demuxStats` global is deleted; all demux analysis lives in the `TsDemuxer` WASM struct.
 - **Packet inspector hex dump** is deferred — `debug_snapshot()` doesn't include raw packet bytes (memory cost). The inspector shows decoded fields + NAL summary but not a hex dump. Adding it requires a WASM change (`ringHex` field) + rebuild.
 - `DebugSnapshot` is a wasm-bindgen struct — **cannot be structured-cloned** across the worker `postMessage` boundary. `worker.ts:getDemuxStats()` reads every field into a POJO and calls `snap.free()` in a `finally` block. Any new snapshot fields must follow this pattern.
+- **QUIC stats** require the `quinn` feature on `wtransport` (enabled in root `Cargo.toml`). The gateway logs per-session QUIC stats (cwnd, rtt, lost_packets, congestion_events) at session start and close.
 
 ## Testing
 
