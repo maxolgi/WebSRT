@@ -138,7 +138,6 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
     doStop();
     await init();
     if (myGen !== gen) return;
-    rx = SrtReceiver.newWithLatency(latencyMs);
     epoch = performance.now();
     videoPid = null;
     videoCodecResolved = null;
@@ -216,6 +215,19 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
     wt = new WebTransport(url, opts);
     await wt.ready;
     if (myGen !== gen) { try { wt.close({}); } catch {} return; }
+
+    // Seed SRT's RTT from QUIC's smoothed RTT for accurate cold-start
+    // retransmit timing (draft-sharabayko-srt-over-quic §4.5).
+    let initialRttMs: number | undefined;
+    try {
+      const stats = await (wt as any).getStats();
+      if (stats && typeof stats.smoothedRtt === 'number') {
+        initialRttMs = stats.smoothedRtt;
+      }
+    } catch { /* getStats not supported — proceed with default RTT */ }
+    rx = initialRttMs !== undefined
+      ? SrtReceiver.newWithLatencyAndRtt(latencyMs, initialRttMs)
+      : SrtReceiver.newWithLatency(latencyMs);
     reader = wt.datagrams.readable.getReader();
     writer = wt.datagrams.writable.getWriter();
     wt.closed

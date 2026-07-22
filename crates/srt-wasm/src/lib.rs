@@ -160,12 +160,23 @@ impl SrtReceiver {
     /// Construct a fresh receiver. Local socket id is randomized internally.
     #[wasm_bindgen(constructor)]
     pub fn new() -> SrtReceiver {
-        Self::new_with_latency(120)
+        Self::new_inner(120, None)
     }
 
     /// Construct with a custom TSBPD latency (milliseconds).
     #[wasm_bindgen(js_name = newWithLatency)]
     pub fn new_with_latency(latency_ms: u32) -> SrtReceiver {
+        Self::new_inner(latency_ms, None)
+    }
+
+    /// Construct with TSBPD latency and initial RTT estimate (milliseconds).
+    /// The RTT seeds SRT's EWMA for accurate cold-start retransmit timing.
+    #[wasm_bindgen(js_name = newWithLatencyAndRtt)]
+    pub fn new_with_latency_and_rtt(latency_ms: u32, initial_rtt_ms: f64) -> SrtReceiver {
+        Self::new_inner(latency_ms, Some(initial_rtt_ms))
+    }
+
+    fn new_inner(latency_ms: u32, initial_rtt_ms: Option<f64>) -> SrtReceiver {
         console_error_panic_hook::set_once();
         let mut init = ConnInitSettings::default();
         init.send_buffer_size = srt_protocol::options::PacketCount(8192);
@@ -174,6 +185,9 @@ impl SrtReceiver {
         init.send_latency = std::time::Duration::from_millis(latency_ms as u64);
         init.recv_latency = std::time::Duration::from_millis(latency_ms as u64);
         init.too_late_packet_drop = true;
+        if let Some(rtt) = initial_rtt_ms {
+            init.initial_rtt = Some(std::time::Duration::from_millis(rtt as u64));
+        }
         let mut listen = Listen::new(init, false);
         listen.allow_skip_induction(true);
         let now = web_time::Instant::now();

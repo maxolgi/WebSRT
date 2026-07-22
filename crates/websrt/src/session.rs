@@ -132,12 +132,20 @@ impl BrowserSession {
     ) -> (Arc<SessionEntry>, JoinHandle<()>) {
         let session_id = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
         let peer = conn.remote_address();
-        tracing::info!(session_id, %peer, sim_loss, "session: starting SRT initiator");
+        let quic_rtt = conn.rtt();
+        let quic_stats = conn.quic_connection().stats().path;
+        tracing::info!(
+            session_id, %peer, sim_loss,
+            ?quic_rtt,
+            cwnd_bytes = quic_stats.cwnd,
+            "session: starting SRT initiator"
+        );
 
         let initiator = Arc::new(Mutex::new(SrtInitiator::new(
             Self::DUMMY_LOCAL_IP,
             Self::DUMMY_REMOTE_ADDR,
             &config,
+            quic_rtt,
         )));
         let loss = Arc::new(Mutex::new(LossInjector::new(sim_loss, sim_seed)));
         let shutdown = Arc::new(Notify::new());
@@ -209,6 +217,15 @@ impl BrowserSession {
             }
         }
         // Single cleanup path for all exit conditions.
+        let final_stats = entry.conn.quic_connection().stats().path;
+        tracing::info!(
+            session_id,
+            rtt = ?entry.conn.rtt(),
+            cwnd = final_stats.cwnd,
+            lost_packets = final_stats.lost_packets,
+            congestion_events = final_stats.congestion_events,
+            "session: closing — final QUIC stats"
+        );
         entry.conn.close(0u32.into(), b"close");
         entry.finished.store(true, Ordering::Relaxed);
         entry.shutdown.notify_waiters();

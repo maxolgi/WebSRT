@@ -77,7 +77,12 @@ enum InitiatorState {
 }
 
 impl SrtInitiator {
-    pub fn new(local_addr: IpAddr, remote: SocketAddr, config: &SrtConfig) -> Self {
+    pub fn new(
+        local_addr: IpAddr,
+        remote: SocketAddr,
+        config: &SrtConfig,
+        initial_rtt: std::time::Duration,
+    ) -> Self {
         let mut settings = ConnInitSettings::default();
         settings.max_packet_size = srt_protocol::options::PacketSize(config.payload_size);
         settings.send_buffer_size =
@@ -88,6 +93,7 @@ impl SrtInitiator {
         settings.send_latency = config.send_latency;
         settings.recv_latency = config.recv_latency;
         settings.too_late_packet_drop = true;
+        settings.initial_rtt = Some(initial_rtt);
         let connect = Connect::new_skip_induction(
             remote,
             local_addr,

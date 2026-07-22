@@ -25,7 +25,7 @@ srt-protocol = "0.4.4"
 srt-tokio = "0.4.4"
 subtle = "2"
 mpeg2ts = "0.6.0"
-wtransport = { version = "0.7", features = ["self-signed"] }
+wtransport = { version = "0.7", features = ["self-signed", "quinn"] }
 rcgen = "0.14"
 rand = "0.8"
 anyhow = "1"
