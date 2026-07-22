@@ -386,7 +386,7 @@ root `Cargo.toml`. Cargo fetches them automatically at build time — they are
 **not** submodules or vendored copies.
 
 - **[`maxolgi/srt-rs`](https://github.com/maxolgi/srt-rs)** (main) — fork of
-  `srt-protocol` 0.4.4. Six patches:
+  `srt-protocol` 0.4.4. Ten patches:
   1. Uses `web_time::Instant` instead of `std::time::Instant` (WASM compat).
   2. `TimeBase::adjust()` sign flip — upstream applies `-drift` which doubles
      TSBPD clock error every sync cycle; changed to `+drift`.
@@ -398,6 +398,19 @@ root `Cargo.toml`. Cargo fetches them automatically at build time — they are
      `number_of_unacked_packets`).
   6. `packet/time.rs` `Sub<TimeSpan>`: `unwrap_or(self)` → `unwrap()` to
      surface errors.
+  7. `protocol/pending_connection/listen.rs`: `Listen::allow_skip_induction`
+     flag + branch in `wait_for_induction` that accepts a Conclusion-first
+     handshake (skips Induction phase for 1-RTT over WebTransport).
+  8. `protocol/pending_connection/connect.rs`: `Connect::new_skip_induction`
+     constructor that starts in `ConclusionResponseWait` with a pre-built
+     Conclusion packet (cookie=0, HSREQ extensions).
+  9. `ConnInitSettings.initial_rtt: Option<Duration>` field that seeds
+     `SendBuffer.rtt` and `ARQ.rtt` via `Rtt::from_mean_duration`
+     (variance = mean/4). Repurposes the dead `ConnectionSettings.rtt` field.
+  10. `protocol/sender/buffer.rs`: CC-aware retransmit skip in
+      `send_next_lost_packet` — if `now + rtt.mean()` exceeds the packet's
+      TSBPD deadline, the retransmit is skipped (receiver will drop it as
+      too-late anyway).
 
 - **[`maxolgi/mpeg2ts`](https://github.com/maxolgi/mpeg2ts)** (master) — fork
   of `mpeg2ts` 0.6.0. One patch:
