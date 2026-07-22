@@ -94,7 +94,7 @@ When reviewing, hardening, or auditing code, prioritize by layer:
 
 ## Forked crates (patched, not upstream)
 
-- `maxolgi/srt-rs` (main) — forked from `russelltg/srt-rs` v0.4.4 (commit `d4c08ac`). Ten patches:
+- `maxolgi/srt-rs` (main) — forked from `russelltg/srt-rs` v0.4.4 (commit `d4c08ac`). Eleven patches:
   1. `std::time::Instant` → `web_time::Instant` across all source files (WASM compat; no-op on native).
   2. `TimeBase::adjust()` sign flip: upstream applies `-drift` which doubles TSBPD clock error every sync; changed to `+drift`.
   3. TLPKTL `checked_sub` in `protocol/receiver/buffer.rs` to prevent underflow panic early in page life.
@@ -105,6 +105,7 @@ When reviewing, hardening, or auditing code, prioritize by layer:
   8. `protocol/pending_connection/connect.rs`: `Connect::new_skip_induction` constructor that starts in `ConclusionResponseWait` with a pre-built Conclusion packet (cookie=0, HSREQ extensions).
   9. `settings/connection.rs` + `protocol/time/rtt.rs` + `protocol/receiver/arq.rs` + `protocol/sender/buffer.rs`: `ConnInitSettings.initial_rtt: Option<Duration>` field that seeds `SendBuffer.rtt` and `ARQ.rtt` via `Rtt::from_mean_duration` (variance = mean/4). Repurposes the dead `ConnectionSettings.rtt` field.
   10. `protocol/sender/buffer.rs`: CC-aware retransmit skip in `send_next_lost_packet` — if `now + rtt.mean()` exceeds the packet's TSBPD deadline (`timestamp + latency_window`), the retransmit is skipped (receiver will drop it as too-late anyway).
+  11. `protocol/sender/buffer.rs` + `protocol/sender/mod.rs` + `connection/mod.rs`: Populate `SocketStatistics.tx_average_rtt` from `SendBuffer.rtt` in `update_statistics`. The field was declared but never assigned — only `rx_average_rtt` was populated. Without this, publisher-side stats show RTT=0 because the receiver half is idle.
 - `maxolgi/mpeg2ts` (master) — forked from `sile/mpeg2ts` v0.6.0 (commit `82e68d4`). One patch:
   1. `ts/reader.rs`: unknown PIDs return Raw bytes instead of erroring, preventing byte-stream misalignment when the receiver joins mid-stream.
 - Both wired via `[patch.crates-io]` in root `Cargo.toml`.

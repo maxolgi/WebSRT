@@ -386,7 +386,7 @@ root `Cargo.toml`. Cargo fetches them automatically at build time — they are
 **not** submodules or vendored copies.
 
 - **[`maxolgi/srt-rs`](https://github.com/maxolgi/srt-rs)** (main) — fork of
-  `srt-protocol` 0.4.4. Ten patches:
+  `srt-protocol` 0.4.4. Eleven patches:
   1. Uses `web_time::Instant` instead of `std::time::Instant` (WASM compat).
   2. `TimeBase::adjust()` sign flip — upstream applies `-drift` which doubles
      TSBPD clock error every sync cycle; changed to `+drift`.
@@ -411,6 +411,9 @@ root `Cargo.toml`. Cargo fetches them automatically at build time — they are
       `send_next_lost_packet` — if `now + rtt.mean()` exceeds the packet's
       TSBPD deadline, the retransmit is skipped (receiver will drop it as
       too-late anyway).
+  11. Populate `SocketStatistics.tx_average_rtt` from `SendBuffer.rtt` in
+      `update_statistics`. The field was declared but never assigned, so
+      publisher-side stats showed RTT=0.
 
 - **[`maxolgi/mpeg2ts`](https://github.com/maxolgi/mpeg2ts)** (master) — fork
   of `mpeg2ts` 0.6.0. One patch:
