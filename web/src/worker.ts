@@ -221,7 +221,7 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
     let initialRttMs: number | undefined;
     try {
       const stats = await (wt as any).getStats();
-      if (stats && typeof stats.smoothedRtt === 'number') {
+      if (stats && typeof stats.smoothedRtt === 'number' && stats.smoothedRtt > 0) {
         initialRttMs = stats.smoothedRtt;
       }
     } catch { /* getStats not supported — proceed with default RTT */ }
