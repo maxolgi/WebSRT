@@ -1471,7 +1471,7 @@ dependencies = [
 [[package]]
 name = "srt-protocol"
 version = "0.4.4"
-source = "git+https://github.com/maxolgi/srt-rs.git#f8a9e911a62217ce3c61ce775248ab05cad33214"
+source = "git+https://github.com/maxolgi/srt-rs.git?rev=f8a9e911a62217ce3c61ce775248ab05cad33214#f8a9e911a62217ce3c61ce775248ab05cad33214"
 dependencies = [
  "aes",
  "array-init",
