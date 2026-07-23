@@ -20,13 +20,7 @@ const fullscreenBtn = document.getElementById('fullscreen-btn') as HTMLButtonEle
 const pubStatus = document.getElementById('pub-status') as HTMLDivElement;
 const pubStatsText = document.getElementById('pub-stats-text') as HTMLDivElement;
 
-const tabAudioChk = document.getElementById('tab-audio-chk') as HTMLInputElement;
-const tabVolume = document.getElementById('tab-volume') as HTMLInputElement;
-const tabVolumeLabel = document.getElementById('tab-volume-label') as HTMLSpanElement;
-const micChk = document.getElementById('mic-chk') as HTMLInputElement;
-const micSelect = document.getElementById('mic-select') as HTMLSelectElement;
-const micVolume = document.getElementById('mic-volume') as HTMLInputElement;
-const micVolumeLabel = document.getElementById('mic-volume-label') as HTMLSpanElement;
+const audioSourceSelect = document.getElementById('audio-source') as HTMLSelectElement;
 
 const debugRoot = document.getElementById('debug-root') as HTMLDivElement;
 
@@ -114,11 +108,6 @@ let detectedCodecLabel = '';
 // Audio
 let audioCtx: AudioContext | null = null;
 let workletNode: AudioWorkletNode | null = null;
-let tabSource: MediaStreamAudioSourceNode | null = null;
-let tabGain: GainNode | null = null;
-let micStream: MediaStream | null = null;
-let micSource: MediaStreamAudioSourceNode | null = null;
-let micGain: GainNode | null = null;
 let workletReady = false;
 
 // ─── Codec auto-detection ─────────────────────────────────────────
@@ -168,39 +157,40 @@ function populateCodecSelect() {
   codecSelect.value = 'auto';
 }
 
-// ─── Volume slider helpers ────────────────────────────────────────
+// ─── Audio source population ──────────────────────────────────────
 
-tabVolume.addEventListener('input', () => {
-  const v = +tabVolume.value / 100;
-  tabVolumeLabel.textContent = `${tabVolume.value}%`;
-  if (tabGain) tabGain.gain.value = v;
-});
-micVolume.addEventListener('input', () => {
-  const v = +micVolume.value / 100;
-  micVolumeLabel.textContent = `${micVolume.value}%`;
-  if (micGain) micGain.gain.value = v;
-});
+function populateAudioSources() {
+  const current = audioSourceSelect.value;
+  audioSourceSelect.innerHTML = '';
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = '(none)';
+  audioSourceSelect.appendChild(none);
+  if (captureStream && captureStream.getAudioTracks().length > 0) {
+    const opt = document.createElement('option');
+    opt.value = '__tab__';
+    opt.textContent = 'Tab / System Audio';
+    audioSourceSelect.appendChild(opt);
+  }
+  for (const opt of micOptions) {
+    audioSourceSelect.appendChild(opt.cloneNode(true) as HTMLOptionElement);
+  }
+  audioSourceSelect.value = current || '';
+}
 
-// ─── Device enumeration ───────────────────────────────────────────
+let micOptions: HTMLOptionElement[] = [];
 
 async function enumerateMics() {
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
     const mics = devices.filter((d) => d.kind === 'audioinput');
-    micSelect.innerHTML = '';
-    if (mics.length === 0) {
-      const opt = document.createElement('option');
-      opt.value = '';
-      opt.textContent = '\u2014 no device \u2014';
-      micSelect.appendChild(opt);
-      return;
-    }
-    for (const m of mics) {
+    micOptions = mics.map((m) => {
       const opt = document.createElement('option');
       opt.value = m.deviceId;
       opt.textContent = m.label || `Device ${m.deviceId.slice(0, 8)}`;
-      micSelect.appendChild(opt);
-    }
+      return opt;
+    });
+    populateAudioSources();
   } catch { /* ignore */ }
 }
 
@@ -256,60 +246,44 @@ async function setupAudioGraph(): Promise<void> {
     numberOfOutputs: 1,
     outputChannelCount: [2],
   });
-  // Connect to a zero-gain node → destination so the worklet stays alive
-  // without producing local audio output (prevents echo).
   const silence = audioCtx.createGain();
   silence.gain.value = 0;
   workletNode.connect(silence);
   silence.connect(audioCtx.destination);
 }
 
-function connectTabAudio() {
-  if (!audioCtx || !workletNode || !captureStream) return;
-  const audioTracks = captureStream.getAudioTracks();
-  if (audioTracks.length === 0) return;
-  tabSource = audioCtx.createMediaStreamSource(new MediaStream(audioTracks));
-  tabGain = audioCtx.createGain();
-  tabGain.gain.value = +tabVolume.value / 100;
-  tabSource.connect(tabGain);
-  tabGain.connect(workletNode);
-}
+let audioSourceNode: MediaStreamAudioSourceNode | null = null;
+let micStream: MediaStream | null = null;
 
-function disconnectTabAudio() {
-  try { tabSource?.disconnect(); } catch {}
-  try { tabGain?.disconnect(); } catch {}
-  tabSource = null;
-  tabGain = null;
-}
-
-async function connectMic() {
+async function connectAudioSource() {
   if (!audioCtx || !workletNode) return;
-  const deviceId = micSelect.value;
-  if (!deviceId) return;
+  const src = audioSourceSelect.value;
+  if (!src) return;
   try {
-    micStream = await navigator.mediaDevices.getUserMedia({
-      audio: { deviceId: { exact: deviceId } },
-    });
-    micSource = audioCtx.createMediaStreamSource(micStream);
-    micGain = audioCtx.createGain();
-    micGain.gain.value = +micVolume.value / 100;
-    micSource.connect(micGain);
-    micGain.connect(workletNode);
+    if (src === '__tab__') {
+      if (!captureStream) return;
+      const tracks = captureStream.getAudioTracks();
+      if (tracks.length === 0) return;
+      audioSourceNode = audioCtx.createMediaStreamSource(new MediaStream(tracks));
+    } else {
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { deviceId: { exact: src } },
+      });
+      audioSourceNode = audioCtx.createMediaStreamSource(micStream);
+    }
+    audioSourceNode.connect(workletNode);
   } catch (e) {
-    log(`Mic access failed: ${e}`, 'err');
-    micChk.checked = false;
+    log(`Audio source failed: ${e}`, 'err');
   }
 }
 
-function disconnectMic() {
-  try { micSource?.disconnect(); } catch {}
-  try { micGain?.disconnect(); } catch {}
+function disconnectAudioSource() {
+  try { audioSourceNode?.disconnect(); } catch {}
+  audioSourceNode = null;
   if (micStream) {
     micStream.getTracks().forEach((t) => t.stop());
     micStream = null;
   }
-  micSource = null;
-  micGain = null;
 }
 
 // ─── Screen capture ───────────────────────────────────────────────
@@ -324,12 +298,7 @@ shareBtn.addEventListener('click', async () => {
     previewEl.srcObject = stream;
     await previewEl.play();
 
-    // Tab/system audio checkbox
-    const hasAudio = stream.getAudioTracks().length > 0;
-    tabAudioChk.disabled = !hasAudio;
-    if (!hasAudio) tabAudioChk.checked = false;
-
-    // Re-enumerate labels (now that we have permission)
+    // Tab/system audio now appears in the dropdown
     await enumerateMics();
 
     shareBtn.disabled = true;
@@ -417,14 +386,13 @@ publishBtn.addEventListener('click', async () => {
   const isAv1 = chosenCodec.startsWith('av01');
 
   // Determine audio config
-  const audioEnabled = tabAudioChk.checked || micChk.checked;
-  const audioCfg = audioEnabled ? { bitrate: 128000, channels: 2 } : null;
+  const audioSource = audioSourceSelect.value;
+  const audioCfg = audioSource ? { bitrate: 128000, channels: 2 } : null;
 
   // Setup audio graph if needed
-  if (audioEnabled) {
+  if (audioSource) {
     await setupAudioGraph();
-    if (tabAudioChk.checked) connectTabAudio();
-    if (micChk.checked) await connectMic();
+    await connectAudioSource();
     if (audioCtx?.state === 'suspended') await audioCtx.resume();
   }
 
@@ -464,7 +432,7 @@ publishBtn.addEventListener('click', async () => {
   worker.postMessage(cmd, transfer);
 
   // Transfer audio port
-  if (audioEnabled && workletNode) {
+  if (audioSource && workletNode) {
     const port = workletNode.port;
     worker.postMessage({ cmd: 'audio-port', port } as PublishCmd, [port]);
   }
@@ -483,8 +451,7 @@ function stopAll() {
     worker.terminate();
     worker = null;
   }
-  disconnectTabAudio();
-  disconnectMic();
+  disconnectAudioSource();
   if (audioCtx) {
     try { audioCtx.close(); } catch {}
     audioCtx = null;
@@ -564,19 +531,7 @@ function hexToBytes(hex: string): Uint8Array {
   return out;
 }
 
-// ─── Checkbox / select handlers ───────────────────────────────────
-
-tabAudioChk.addEventListener('change', () => {
-  if (!audioCtx || !workletNode) return;
-  if (tabAudioChk.checked) connectTabAudio();
-  else disconnectTabAudio();
-});
-
-micChk.addEventListener('change', async () => {
-  if (!audioCtx || !workletNode) return;
-  if (micChk.checked) await connectMic();
-  else disconnectMic();
-});
+// ─── Misc handlers ────────────────────────────────────────────────
 
 fullscreenBtn.addEventListener('click', () => {
   if (document.fullscreenElement) document.exitFullscreen();

@@ -126,19 +126,9 @@
         <button id="fullscreen-btn">fullscreen</button>
       </div>
 
-      <h2>Audio Sources</h2>
+      <h2>Audio</h2>
       <div class="audio-section">
-        <div class="audio-row">
-          <label><input type="checkbox" id="tab-audio-chk" disabled /> Tab/System</label>
-          <input type="range" id="tab-volume" min="0" max="100" value="80" />
-          <span id="tab-volume-label" style="font-size: 12px; color: #999; min-width: 36px;">80%</span>
-        </div>
-        <div class="audio-row">
-          <label><input type="checkbox" id="mic-chk" /> Microphone:</label>
-          <select id="mic-select"><option value="">&mdash; no device &mdash;</option></select>
-          <input type="range" id="mic-volume" min="0" max="100" value="60" />
-          <span id="mic-volume-label" style="font-size: 12px; color: #999; min-width: 36px;">60%</span>
-        </div>
+        <label>source: <select id="audio-source"><option value="">(none)</option></select></label>
       </div>
 
       <div id="pub-status">idle</div>
