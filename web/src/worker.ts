@@ -55,6 +55,8 @@ let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
 let gen = 0;
 let epoch = 0;
 let pollMaxMs = 0;
+let prevRxLoss = 0;
+let prevRxDropped = 0;
 let statsTimer: ReturnType<typeof setInterval> | null = null;
 let videoPid: number | null = null;
 let videoCodecResolved: 'av1' | 'h264' | 'hevc' | null = null;
@@ -100,6 +102,7 @@ self.onmessage = async (e: MessageEvent) => {
           if (!rx || !inited) return;
           const s = rx.getStats();
           if (!s) return;
+          emitLossEvents(s);
           if (VERBOSE) console.debug('srt stats', serializeStats(s));
           queue({ type: 'stats', stats: serializeStats(s), demux: getDemuxStats() });
           flushOutgoing();
@@ -242,6 +245,7 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
       if (!rx || !inited) return;
       const s = rx.getStats();
       if (!s) return;
+      emitLossEvents(s);
       if (VERBOSE) console.debug('srt stats', serializeStats(s));
       queue({ type: 'stats', stats: serializeStats(s), demux: getDemuxStats() });
       flushOutgoing();
@@ -259,6 +263,8 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
 function doStop() {
   if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
   pollMaxMs = 0;
+  prevRxLoss = 0;
+  prevRxDropped = 0;
   const w = wt;
   wt = null;
   reader = null;
@@ -363,6 +369,19 @@ function processActions(actions: SrtAction[]) {
       a.free();
     }
   }
+}
+
+function emitLossEvents(s: SrtStats) {
+  const newLoss = s.rxLoss - prevRxLoss;
+  const newDropped = s.rxDropped - prevRxDropped;
+  if (newLoss > 0) {
+    queue({ type: 'log', msg: `SRT loss: ${newLoss} packets (total ${s.rxLoss})`, cls: 'err' });
+  }
+  if (newDropped > 0) {
+    queue({ type: 'log', msg: `SRT dropped (too late): ${newDropped} packets (total ${s.rxDropped})`, cls: 'err' });
+  }
+  prevRxLoss = s.rxLoss;
+  prevRxDropped = s.rxDropped;
 }
 
 function serializeStats(s: SrtStats): StatsMsg {
