@@ -2,8 +2,14 @@ use super::{Ingester, TsMessage};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
+use srt_protocol::options::ByteCount;
 use srt_tokio::{SrtIncoming, SrtListener, SrtSocket};
 use std::time::Duration;
+
+/// UDP socket buffer size for the OBS SRT connection (8 MB). The srt-protocol
+/// default is only 64 KB, which holds ~57ms of OBS data — easily overflowed
+/// when the tokio runtime is briefly starved on a loaded machine.
+const UDP_BUF_SIZE: ByteCount = ByteCount(8_388_608);
 
 enum Kind {
     Listener(#[allow(dead_code)] SrtListener, SrtIncoming, Option<String>),
@@ -37,6 +43,10 @@ impl SrtIngester {
     ) -> Result<Self> {
         let (listener, mut incoming) = SrtListener::builder()
             .latency(latency)
+            .set(|o| {
+                o.connect.udp_recv_buffer_size = UDP_BUF_SIZE;
+                o.connect.udp_send_buffer_size = UDP_BUF_SIZE;
+            })
             .bind(addr.as_ref())
             .await
             .map_err(|e| anyhow!("srt listener bind: {e}"))?;
@@ -109,11 +119,15 @@ impl SrtIngester {
         let socket_addr: srt_protocol::options::SocketAddress = addr
             .try_into()
             .map_err(|e| anyhow!("invalid SRT address {addr}: {e:?}"))?;
-        let socket = SrtSocket::builder()
-            .latency(latency)
-            .call(socket_addr, streamid.as_deref())
-            .await
-            .map_err(|e| anyhow!("srt call to {addr}: {e}"))?;
+    let socket = SrtSocket::builder()
+        .latency(latency)
+        .set(|o| {
+            o.connect.udp_recv_buffer_size = UDP_BUF_SIZE;
+            o.connect.udp_send_buffer_size = UDP_BUF_SIZE;
+        })
+        .call(socket_addr, streamid.as_deref())
+        .await
+        .map_err(|e| anyhow!("srt call to {addr}: {e}"))?;
         tracing::info!(addr, "SRT caller: connected to OBS");
         Ok(socket)
     }
