@@ -144,6 +144,10 @@ fullscreenBtn.addEventListener('click', () => {
   else canvas.requestFullscreen();
 });
 
+document.getElementById('debug-toggle')?.addEventListener('click', () => {
+  setPanelVisible(!store.panelVisible.value);
+});
+
 document.addEventListener('visibilitychange', () => {
   viewer.onVisibilityChange(!document.hidden);
 });

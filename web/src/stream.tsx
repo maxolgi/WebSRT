@@ -538,6 +538,10 @@ fullscreenBtn.addEventListener('click', () => {
   else previewEl.requestFullscreen();
 });
 
+document.getElementById('debug-toggle')?.addEventListener('click', () => {
+  setPanelVisible(!store.panelVisible.value);
+});
+
 // ─── Init ─────────────────────────────────────────────────────────
 
 populateCodecSelect();
