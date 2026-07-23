@@ -243,6 +243,8 @@ async function setupAudioGraph(): Promise<void> {
     numberOfInputs: 1,
     numberOfOutputs: 1,
     outputChannelCount: [2],
+    channelCount: 2,
+    channelCountMode: 'explicit',
   });
   const silence = audioCtx.createGain();
   silence.gain.value = 0;
