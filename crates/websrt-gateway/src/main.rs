@@ -10,6 +10,7 @@ use tracing_subscriber::EnvFilter;
 use websrt::cert::{Cert, CertSource};
 use websrt::ingest::file::FileIngester;
 use websrt::ingest::srt::SrtIngester;
+use websrt::ingest::TsContinuityChecker;
 use websrt::Gateway;
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
@@ -251,7 +252,9 @@ async fn main() -> Result<()> {
                 e
             })?;
             tracing::info!(fixture = ?cli.fixture, "file ingester ready");
-            gateway.source_handle().publish_stream("default", ingester);
+            gateway
+                .source_handle()
+                .publish_stream("default", TsContinuityChecker::new(ingester));
         }
         InputMode::Srt => {
             let source = gateway.source_handle();
@@ -297,7 +300,10 @@ async fn main() -> Result<()> {
                             })
                             .unwrap_or_else(|| "default".to_string());
                         tracing::info!("OBS connected; starting broadcaster");
-                        source.publish_stream(&stream_name, ingester);
+                        source.publish_stream(
+                            &stream_name,
+                            TsContinuityChecker::new(ingester),
+                        );
                     }
                     Err(e) => {
                         tracing::error!(?e, "SRT ingester setup failed");

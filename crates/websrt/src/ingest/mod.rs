@@ -1,10 +1,12 @@
 //! Input ingest: produces `(std::time::Instant, bytes::Bytes)` TS messages.
 
 pub mod channel;
+pub mod continuity;
 pub mod file;
 pub mod srt;
 
 pub use channel::ChannelIngester;
+pub use continuity::TsContinuityChecker;
 
 use anyhow::Result;
 use async_trait::async_trait;
