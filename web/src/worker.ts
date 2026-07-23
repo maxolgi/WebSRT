@@ -22,6 +22,7 @@ export interface StatsMsg {
   txRetransmit: number;
   txLoss: number;
   txBuffered: number;
+  pollMaxMs: number;
 }
 
 export type DemuxStatsMsg = DemuxStats;
@@ -53,7 +54,7 @@ let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
 let gen = 0;
 let epoch = 0;
-let pollTimer: ReturnType<typeof setInterval> | null = null;
+let pollMaxMs = 0;
 let statsTimer: ReturnType<typeof setInterval> | null = null;
 let videoPid: number | null = null;
 let videoCodecResolved: 'av1' | 'h264' | 'hevc' | null = null;
@@ -235,15 +236,7 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
       .catch((e) => { if (myGen === gen) { queue({ type: 'wtClosed', error: String(e) }); flushOutgoing(); } });
     queue({ type: 'wtReady' });
     flushOutgoing();
-    startReaderLoop(myGen);
-
-    pollTimer = setInterval(() => {
-      if (!rx || !inited) return;
-      const nowUs = (performance.now() - epoch) * 1000;
-      const actions = rx.poll(nowUs);
-      processActions(actions);
-      flushOutgoing();
-    }, 10);
+    runSrtLoop(myGen);
 
     statsTimer = setInterval(() => {
       if (!rx || !inited) return;
@@ -264,8 +257,8 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
 }
 
 function doStop() {
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+  pollMaxMs = 0;
   const w = wt;
   wt = null;
   reader = null;
@@ -290,24 +283,53 @@ function writeDatagram(bytes: Uint8Array) {
   }
 }
 
-async function startReaderLoop(myGen: number) {
+async function runSrtLoop(myGen: number) {
   const r = reader;
   if (!r) return;
+  let readPromise = r.read();
+  let lastCycle = performance.now();
+
   for (;;) {
-    let value: Uint8Array | undefined;
-    try {
-      const res = await r.read();
-      if (res.done) break;
-      value = res.value;
-    } catch (e) {
-      if (myGen === gen) { queue({ type: 'log', msg: `wt read: ${e}`, cls: 'err' }); flushOutgoing(); }
+    if (myGen !== gen || !rx || !inited) break;
+
+    const POLL_MS = 5;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const readWithLabel = readPromise.then(
+      (res) => ({ kind: 'dgram' as const, res }),
+      (err: unknown) => ({ kind: 'read_error' as const, err }),
+    );
+    const tickPromise = new Promise<{ kind: 'tick' }>((resolve) => {
+      timeoutId = setTimeout(() => resolve({ kind: 'tick' }), POLL_MS);
+    });
+
+    const winner = await Promise.race([readWithLabel, tickPromise]);
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+
+    if (myGen !== gen || !rx || !inited) break;
+
+    const nowUs = (performance.now() - epoch) * 1000;
+
+    if (winner.kind === 'dgram') {
+      if (winner.res.done) break;
+      const value = winner.res.value;
+      if (!value) break;
+      if (VERBOSE) console.debug('wt datagram', value.byteLength, 'bytes');
+      processActions(rx.handle_datagram(value, nowUs));
+      readPromise = r.read();
+    } else if (winner.kind === 'read_error') {
+      if (myGen === gen) {
+        queue({ type: 'log', msg: `wt read: ${winner.err}`, cls: 'err' });
+        flushOutgoing();
+      }
       break;
     }
-    if (myGen !== gen || !rx || !inited) break;
-    if (VERBOSE) console.debug('wt datagram', value.byteLength, 'bytes');
-    const nowUs = (performance.now() - epoch) * 1000;
-    processActions(rx.handle_datagram(value, nowUs));
+
+    processActions(rx.poll(nowUs));
     flushOutgoing();
+
+    const cycleMs = performance.now() - lastCycle;
+    lastCycle = performance.now();
+    if (cycleMs > pollMaxMs) pollMaxMs = cycleMs;
   }
 }
 
@@ -344,7 +366,7 @@ function processActions(actions: SrtAction[]) {
 }
 
 function serializeStats(s: SrtStats): StatsMsg {
-  return {
+  const msg: StatsMsg = {
     elapsedMs: s.elapsedMs,
     rttMs: s.rttMs,
     bandwidthBps: s.bandwidthBps,
@@ -362,7 +384,10 @@ function serializeStats(s: SrtStats): StatsMsg {
     txRetransmit: s.txRetransmit,
     txLoss: s.txLoss,
     txBuffered: s.txBuffered,
+    pollMaxMs: pollMaxMs,
   };
+  pollMaxMs = 0;
+  return msg;
 }
 
 function getDemuxStats(): DemuxStatsMsg | undefined {

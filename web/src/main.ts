@@ -103,6 +103,7 @@ function updateStats(s: StatsMsg, demux: DemuxStatsMsg | null) {
     `belated  ${s.rxBelated}\n` +
     `buf'd    ${s.rxBuffered}\n` +
     `ACK/NAK  ${s.rxAck}/${s.rxNak}` +
+    `\npoll max ${s.pollMaxMs.toFixed(1)}ms` +
     (dmx ? `\ndemux    ${dmx}` : '') +
     (latestDriftMs !== null
       ? `\ndrift    ${latestDriftMs >= 0 ? '+' : ''}${latestDriftMs.toFixed(0)}ms (video vs audio)`

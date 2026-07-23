@@ -50,6 +50,7 @@ export function SrtTab({ store }: Props): JSX.Element {
             {row('Buffered', `${srt.rxBuffered}`)}
             {row('ACK count', `${srt.rxAck}`)}
             {row('NAK count', `${srt.rxNak}`)}
+            {row('Poll Max', `${srt.pollMaxMs.toFixed(1)} ms`)}
           </tbody>
         </table>
       </div>
