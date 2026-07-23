@@ -26,6 +26,7 @@ export default defineConfig({
       input: {
         main: resolve(__dirname, 'index.html'),
         simple: resolve(__dirname, 'simple.html'),
+        stream: resolve(__dirname, 'stream.html'),
       },
     },
   },
