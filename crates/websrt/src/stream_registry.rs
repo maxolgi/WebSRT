@@ -22,6 +22,10 @@ pub struct StreamStats {
     pub alive: bool,
     /// Current viewer count.
     pub viewers: usize,
+    /// Messages pulled from the ingester and offered to viewers.
+    pub messages_sent: u64,
+    /// Offered messages dropped because no viewer was subscribed.
+    pub send_failures: u64,
 }
 
 pub struct StreamRegistry {
@@ -106,6 +110,8 @@ impl StreamRegistry {
                 name: name.clone(),
                 alive: bc.is_alive(),
                 viewers: bc.viewer_count(),
+                messages_sent: bc.messages_sent(),
+                send_failures: bc.send_failures(),
             })
             .collect();
         entries.sort_by(|a, b| a.name.cmp(&b.name));

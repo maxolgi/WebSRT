@@ -11,9 +11,34 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 const TS_PACKET_SIZE: usize = 188;
 const TS_SYNC_BYTE: u8 = 0x47;
+
+/// Cloneable view onto a [`TsContinuityChecker`]'s counters. The checker is
+/// moved into the broadcaster pipeline; this handle lets the embedding
+/// application (e.g. a health endpoint) keep reading the live counters.
+#[derive(Clone)]
+pub struct TsStatsHandle {
+    pub cc_gaps: Arc<AtomicU64>,
+    pub cc_checks: Arc<AtomicU64>,
+    pub messages_seen: Arc<AtomicU64>,
+}
+
+impl TsStatsHandle {
+    pub fn cc_gaps(&self) -> u64 {
+        self.cc_gaps.load(Ordering::Relaxed)
+    }
+
+    pub fn cc_checks(&self) -> u64 {
+        self.cc_checks.load(Ordering::Relaxed)
+    }
+
+    pub fn messages_seen(&self) -> u64 {
+        self.messages_seen.load(Ordering::Relaxed)
+    }
+}
 
 /// Read-only TS continuity counter probe. Wraps an [`Ingester`] and checks
 /// CC continuity on every 188-byte TS packet in each delivered message.
@@ -22,9 +47,9 @@ pub struct TsContinuityChecker<I> {
     inner: I,
     last_cc: HashMap<u16, u8>,
     warned_pids: HashSet<u16>,
-    cc_gaps: AtomicU64,
-    cc_checks: AtomicU64,
-    messages_seen: AtomicU64,
+    cc_gaps: Arc<AtomicU64>,
+    cc_checks: Arc<AtomicU64>,
+    messages_seen: Arc<AtomicU64>,
 }
 
 impl<I> TsContinuityChecker<I> {
@@ -33,9 +58,19 @@ impl<I> TsContinuityChecker<I> {
             inner,
             last_cc: HashMap::new(),
             warned_pids: HashSet::new(),
-            cc_gaps: AtomicU64::new(0),
-            cc_checks: AtomicU64::new(0),
-            messages_seen: AtomicU64::new(0),
+            cc_gaps: Arc::new(AtomicU64::new(0)),
+            cc_checks: Arc::new(AtomicU64::new(0)),
+            messages_seen: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Cloneable handle to the live counters. Keep this before moving the
+    /// checker into the broadcaster pipeline.
+    pub fn stats_handle(&self) -> TsStatsHandle {
+        TsStatsHandle {
+            cc_gaps: self.cc_gaps.clone(),
+            cc_checks: self.cc_checks.clone(),
+            messages_seen: self.messages_seen.clone(),
         }
     }
 

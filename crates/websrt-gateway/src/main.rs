@@ -6,11 +6,12 @@
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tracing_subscriber::EnvFilter;
 use websrt::cert::{Cert, CertSource};
 use websrt::ingest::file::FileIngester;
 use websrt::ingest::srt::SrtIngester;
-use websrt::ingest::TsContinuityChecker;
+use websrt::ingest::{TsContinuityChecker, TsStatsHandle};
 use websrt::Gateway;
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
@@ -199,12 +200,19 @@ async fn main() -> Result<()> {
 
     let gateway = builder.build()?;
 
+    // Shared slot for the ingester's CC-probe counters. The TsContinuityChecker
+    // is moved into the broadcaster pipeline; this handle lets the health
+    // endpoint keep reading its live counters. Populated when the ingester is
+    // wired (synchronously for --input file, inside the SRT setup task otherwise).
+    let ts_stats: Arc<Mutex<Option<TsStatsHandle>>> = Arc::new(Mutex::new(None));
+
     // Spawn the demo health/metrics server. The library no longer owns this;
     // each embedding application is responsible for its own exposition format.
     if cli.health_port > 0 {
         let stats_handle = gateway.stats_handle();
         let bind = cli.health_bind.clone();
         let port = cli.health_port;
+        let ts_stats = ts_stats.clone();
         tokio::spawn(async move {
             let listener = match tokio::net::TcpListener::bind((bind.as_str(), port)).await {
                 Ok(l) => l,
@@ -218,13 +226,39 @@ async fn main() -> Result<()> {
                 match listener.accept().await {
                     Ok((mut stream, _addr)) => {
                         let stats = stats_handle.stats();
+                        let per_stream: String = stats
+                            .per_stream
+                            .iter()
+                            .map(|s| {
+                                format!(
+                                    r#"{{"name":"{}","alive":{},"viewers":{},"messages_sent":{},"send_failures":{}}}"#,
+                                    json_escape(&s.name),
+                                    s.alive,
+                                    s.viewers,
+                                    s.messages_sent,
+                                    s.send_failures,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let ingester_json = match ts_stats.lock().unwrap().as_ref() {
+                            Some(h) => format!(
+                                r#"{{"cc_gaps":{},"cc_checks":{},"messages_seen":{}}}"#,
+                                h.cc_gaps(),
+                                h.cc_checks(),
+                                h.messages_seen(),
+                            ),
+                            None => "null".to_string(),
+                        };
                         let json = format!(
-                            r#"{{"status":"{}","streams":{},"alive_streams":{},"viewers":{},"max_viewers":{}}}"#,
+                            r#"{{"status":"{}","streams":{},"alive_streams":{},"viewers":{},"max_viewers":{},"per_stream":[{}],"ingester":{}}}"#,
                             if stats.alive_streams > 0 { "ok" } else { "no_source" },
                             stats.streams,
                             stats.alive_streams,
                             stats.total_viewers,
                             stats.max_viewers,
+                            per_stream,
+                            ingester_json,
                         );
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -252,9 +286,9 @@ async fn main() -> Result<()> {
                 e
             })?;
             tracing::info!(fixture = ?cli.fixture, "file ingester ready");
-            gateway
-                .source_handle()
-                .publish_stream("default", TsContinuityChecker::new(ingester));
+            let checker = TsContinuityChecker::new(ingester);
+            *ts_stats.lock().unwrap() = Some(checker.stats_handle());
+            gateway.source_handle().publish_stream("default", checker);
         }
         InputMode::Srt => {
             let source = gateway.source_handle();
@@ -263,6 +297,7 @@ async fn main() -> Result<()> {
             let call_addr = cli.srt_call.clone();
             let streamid = cli.srt_streamid.clone();
             let latency_ms = cli.latency;
+            let ts_stats = ts_stats.clone();
             tokio::spawn(async move {
                 let result = match srt_mode {
                     SrtMode::Listener => {
@@ -300,10 +335,9 @@ async fn main() -> Result<()> {
                             })
                             .unwrap_or_else(|| "default".to_string());
                         tracing::info!("OBS connected; starting broadcaster");
-                        source.publish_stream(
-                            &stream_name,
-                            TsContinuityChecker::new(ingester),
-                        );
+                        let checker = TsContinuityChecker::new(ingester);
+                        *ts_stats.lock().unwrap() = Some(checker.stats_handle());
+                        source.publish_stream(&stream_name, checker);
                     }
                     Err(e) => {
                         tracing::error!(?e, "SRT ingester setup failed");
@@ -319,4 +353,20 @@ async fn main() -> Result<()> {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await
+}
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }

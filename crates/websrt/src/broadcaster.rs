@@ -6,7 +6,7 @@
 
 use crate::ingest::{Ingester, TsMessage};
 use anyhow::Result;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
@@ -29,6 +29,11 @@ pub struct Broadcaster {
     /// Maximum viewers; enforced by `subscribe()`.
     pub max_viewers: usize,
     alive: Arc<AtomicBool>,
+    /// Number of messages pulled from the source and offered to the broadcast
+    /// channel (i.e. ingester attempts, regardless of receiver count).
+    messages_sent: AtomicU64,
+    /// Number of offered messages that had no active receiver (dropped).
+    send_failures: AtomicU64,
 }
 
 impl Broadcaster {
@@ -45,6 +50,8 @@ impl Broadcaster {
             tx: Mutex::new(Some(tx.clone())),
             max_viewers,
             alive,
+            messages_sent: AtomicU64::new(0),
+            send_failures: AtomicU64::new(0),
         });
         let bc_clone = broadcaster.clone();
         let tx2 = tx.clone();
@@ -54,7 +61,9 @@ impl Broadcaster {
                 match ingester.next_message().await {
                     Ok(Some(msg)) => {
                         sent += 1;
+                        bc_clone.messages_sent.fetch_add(1, Ordering::Relaxed);
                         if tx2.send(msg).is_err() {
+                            bc_clone.send_failures.fetch_add(1, Ordering::Relaxed);
                             tracing::debug!(
                                 rx_count = tx2.receiver_count(),
                                 "broadcast send failed (no active receivers)"
@@ -107,6 +116,16 @@ impl Broadcaster {
             .as_ref()
             .map(|t| t.receiver_count())
             .unwrap_or(0)
+    }
+
+    /// Messages pulled from the ingester and offered to the broadcast channel.
+    pub fn messages_sent(&self) -> u64 {
+        self.messages_sent.load(Ordering::Relaxed)
+    }
+
+    /// Offered messages dropped because no viewer was subscribed.
+    pub fn send_failures(&self) -> u64 {
+        self.send_failures.load(Ordering::Relaxed)
     }
 }
 

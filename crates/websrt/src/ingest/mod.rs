@@ -6,7 +6,7 @@ pub mod file;
 pub mod srt;
 
 pub use channel::ChannelIngester;
-pub use continuity::TsContinuityChecker;
+pub use continuity::{TsContinuityChecker, TsStatsHandle};
 
 use anyhow::Result;
 use async_trait::async_trait;
