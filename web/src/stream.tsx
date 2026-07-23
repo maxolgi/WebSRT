@@ -18,6 +18,7 @@ const bitrateNum = document.getElementById('bitrate-num') as HTMLInputElement;
 const framerateSelect = document.getElementById('framerate-select') as HTMLSelectElement;
 const fullscreenBtn = document.getElementById('fullscreen-btn') as HTMLButtonElement;
 const pubStatsText = document.getElementById('pub-stats-text') as HTMLDivElement;
+const viewerLink = document.getElementById('viewer-link') as HTMLAnchorElement;
 const audioSourceSelect = document.getElementById('audio-source') as HTMLSelectElement;
 
 const debugRoot = document.getElementById('debug-root') as HTMLDivElement;
@@ -373,6 +374,9 @@ publishBtn.addEventListener('click', async () => {
   publishing = true;
   publishBtn.disabled = true;
   stopBtn.disabled = false;
+  viewerLink.style.display = '';
+  const sn = streamNameInput.value || 'default';
+  viewerLink.href = `/?stream=${encodeURIComponent(sn)}`;
   setStatus('starting\u2026');
 
   // Determine codec
@@ -446,6 +450,7 @@ stopBtn.addEventListener('click', () => stopAll());
 function stopAll() {
   publishing = false;
   stopFramePump();
+  viewerLink.style.display = 'none';
   if (worker) {
     worker.postMessage({ cmd: 'stop' } as PublishCmd);
     worker.terminate();
