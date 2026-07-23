@@ -400,6 +400,7 @@ function onAudioOutput(chunk: EncodedAudioChunk) {
 
 function flushTsToSrt() {
   if (!muxer || !rx || !inited) return;
+  if (!rx.isHandshakeComplete()) return;
 
   const tsBytes = muxer.poll();
   if (tsBytes.length === 0) return;
@@ -472,6 +473,7 @@ function processActions(actions: SrtAction[]) {
           break;
         case 2:
           queue({ type: 'handshakeComplete' });
+          flushTsToSrt();
           break;
         case 3:
           break;
