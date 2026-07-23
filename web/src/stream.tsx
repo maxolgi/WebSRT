@@ -548,7 +548,7 @@ populateCodecSelect();
 enumerateMics();
 navigator.mediaDevices?.addEventListener('devicechange', enumerateMics);
 
-setPanelVisible(true);
+setPanelVisible(false);
 
 if ((window as any).CERT_HASH !== undefined) {
   if ((window as any).CERT_HASH) {
