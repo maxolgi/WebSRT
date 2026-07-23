@@ -145,6 +145,9 @@ export interface TimeSeriesBucket {
   videoMbps: number;
   audioMbps: number;
   ccErrors: number;
+  srtLoss: number;
+  srtDropped: number;
+  pollMaxMs: number;
 }
 
 export interface DebugDiagnostics {

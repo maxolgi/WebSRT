@@ -17,6 +17,9 @@ export interface PipelineRefs {
 
 const SAMPLE_INTERVAL_MS = 100;
 
+let prevRxLoss = 0;
+let prevRxDropped = 0;
+
 export function startSampler(
   store: DebugStore,
   getRefs: () => PipelineRefs,
@@ -43,6 +46,10 @@ export function startSampler(
     if (srt) {
       const totalPkts = srt.rxData + srt.rxLoss;
       const { videoMbps, audioMbps, ccErrors } = summarizeDemux(demux);
+      const srtLoss = Math.max(0, srt.rxLoss - prevRxLoss);
+      const srtDropped = Math.max(0, srt.rxDropped - prevRxDropped);
+      prevRxLoss = srt.rxLoss;
+      prevRxDropped = srt.rxDropped;
       const bucket: TimeSeriesBucket = {
         t: performance.now(),
         rttMs: srt.rttMs,
@@ -55,6 +62,9 @@ export function startSampler(
         videoMbps,
         audioMbps,
         ccErrors,
+        srtLoss,
+        srtDropped,
+        pollMaxMs: srt.pollMaxMs,
       };
       store.pushHistory(bucket);
     }

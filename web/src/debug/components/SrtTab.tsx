@@ -4,6 +4,7 @@ import type { DebugStore } from '../store';
 import { TimeSeriesChart } from './charts/TimeSeriesChart';
 import { FrameTimeline } from './charts/FrameTimeline';
 import { LossHeatmap } from './charts/LossHeatmap';
+import { LossCorrelationChart } from './charts/LossCorrelationChart';
 
 interface Props {
   store: DebugStore;
@@ -24,6 +25,12 @@ export function SrtTab({ store }: Props): JSX.Element {
   const lossRate = total > 0 ? (srt.rxLoss / total) * 100 : 0;
   const lossClass =
     lossRate <= 1 ? 'stat-good' : lossRate <= 5 ? 'stat-warn' : 'stat-bad';
+
+  const lastBucket = store.history.value[store.history.value.length - 1];
+  const lastCcErrors = lastBucket?.ccErrors ?? 0;
+  const lastSrtLoss = lastBucket?.srtLoss ?? 0;
+  const lastSrtDropped = lastBucket?.srtDropped ?? 0;
+  const orphanCc = lastCcErrors > 0 && lastSrtLoss === 0;
 
   const row = (label: string, value: string, cls?: string) => (
     <tr>
@@ -104,6 +111,18 @@ export function SrtTab({ store }: Props): JSX.Element {
         <div>
           <div style={{ color: '#999', fontSize: '11px', marginBottom: '2px' }}>Packet Loss Heatmap</div>
           <LossHeatmap store={store} height={40} />
+        </div>
+        <div>
+          <div style={{ color: '#999', fontSize: '11px', marginBottom: '2px' }}>Loss Correlation</div>
+          <LossCorrelationChart store={store} height={80} />
+          <div style={{ fontSize: '11px', marginTop: '4px' }}>
+            CC errors (this period): {lastCcErrors} | SRT loss: {lastSrtLoss} | SRT dropped: {lastSrtDropped}
+          </div>
+          {orphanCc && (
+            <div style={{ color: '#f66', fontSize: '11px', marginTop: '2px' }}>
+              CC errors without SRT loss — investigate TS byte dropping
+            </div>
+          )}
         </div>
       </div>
     </>
