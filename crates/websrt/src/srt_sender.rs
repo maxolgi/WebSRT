@@ -14,6 +14,7 @@ use srt_protocol::packet::SeqNumber;
 use srt_protocol::protocol::pending_connection::connect::Connect;
 use srt_protocol::protocol::pending_connection::ConnectionResult;
 use srt_protocol::settings::ConnInitSettings;
+use srt_protocol::statistics::SocketStatistics;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
@@ -66,6 +67,7 @@ pub enum SenderAction {
 pub struct SrtInitiator {
     state: InitiatorState,
     remote: SocketAddr,
+    last_stats: Option<SocketStatistics>,
 }
 
 enum InitiatorState {
@@ -105,6 +107,7 @@ impl SrtInitiator {
         Self {
             state: InitiatorState::Handshaking(connect),
             remote,
+            last_stats: None,
         }
     }
 
@@ -116,6 +119,7 @@ impl SrtInitiator {
     pub fn tick(&mut self, now: Instant) -> (Vec<SenderAction>, Vec<(Instant, Bytes)>) {
         let mut out = Vec::new();
         let mut data: Vec<(Instant, Bytes)> = Vec::new();
+        let mut new_stats: Option<SocketStatistics> = None;
         match &mut self.state {
             InitiatorState::Handshaking(connect) => {
                 let r = connect.handle_tick(now);
@@ -129,16 +133,17 @@ impl SrtInitiator {
                     Action::Close => {
                         out.push(SenderAction::Close);
                     }
-                    Action::UpdateStatistics(_) => {}
+                    Action::UpdateStatistics(s) => { new_stats = Some(s.clone()); }
                     Action::WaitForData(_) => {}
                     Action::ReleaseData((ts, bytes)) => {
                         data.push((ts, bytes));
                     }
                 }
-                drain(duplex, now, &mut out, &mut data);
+                drain(duplex, now, &mut out, &mut data, &mut new_stats);
             }
             InitiatorState::Closed => {}
         }
+        if new_stats.is_some() { self.last_stats = new_stats; }
         (out, data)
     }
 
@@ -153,6 +158,7 @@ impl SrtInitiator {
     ) -> (Vec<SenderAction>, Vec<(Instant, Bytes)>) {
         let mut out = Vec::new();
         let mut data: Vec<(Instant, Bytes)> = Vec::new();
+        let mut new_stats: Option<SocketStatistics> = None;
         let packet = match parse_packet(bytes) {
             Ok(p) => p,
             Err(e) => {
@@ -167,10 +173,11 @@ impl SrtInitiator {
             }
             InitiatorState::Connected(duplex) => {
                 duplex.handle_packet_input(now, Ok((packet, self.remote)));
-                drain(duplex, now, &mut out, &mut data);
+                drain(duplex, now, &mut out, &mut data, &mut new_stats);
             }
             InitiatorState::Closed => {}
         }
+        if new_stats.is_some() { self.last_stats = new_stats; }
         (out, data)
     }
 
@@ -191,16 +198,22 @@ impl SrtInitiator {
     ) -> (Vec<SenderAction>, Vec<(Instant, Bytes)>) {
         let mut out = Vec::new();
         let mut data: Vec<(Instant, Bytes)> = Vec::new();
+        let mut new_stats: Option<SocketStatistics> = None;
         if let InitiatorState::Connected(duplex) = &mut self.state {
             let (_, bytes) = msg;
             duplex.handle_data_input(now, Some((now, bytes)));
-            drain(duplex, now, &mut out, &mut data);
+            drain(duplex, now, &mut out, &mut data, &mut new_stats);
         }
+        if new_stats.is_some() { self.last_stats = new_stats; }
         (out, data)
     }
 
     pub fn is_connected(&self) -> bool {
         matches!(self.state, InitiatorState::Connected(_))
+    }
+
+    pub fn stats(&self) -> Option<&SocketStatistics> {
+        self.last_stats.as_ref()
     }
 }
 
@@ -209,6 +222,7 @@ fn drain(
     now: Instant,
     out: &mut Vec<SenderAction>,
     data: &mut Vec<(Instant, Bytes)>,
+    stats: &mut Option<SocketStatistics>,
 ) {
     loop {
         let action = duplex.handle_input(now, Input::DataReleased);
@@ -219,7 +233,8 @@ fn drain(
             Action::ReleaseData((ts, bytes)) => {
                 data.push((ts, bytes));
             }
-            Action::UpdateStatistics(_) => {
+            Action::UpdateStatistics(s) => {
+                *stats = Some(s.clone());
                 continue;
             }
             Action::WaitForData(_) => {

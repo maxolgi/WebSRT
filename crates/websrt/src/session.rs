@@ -159,6 +159,9 @@ impl BrowserSession {
             shutdown: shutdown.clone(),
             finished: AtomicBool::new(false),
             publish_tx,
+            messages_pushed: AtomicU64::new(0),
+            viewer_lag_count: AtomicU64::new(0),
+            last_srt_stats: StdMutex::new(None),
         });
 
         let entry_for_task = entry.clone();

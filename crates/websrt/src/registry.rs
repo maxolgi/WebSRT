@@ -20,10 +20,11 @@ use crate::broadcaster::ViewerRx;
 use crate::ingest::TsMessage;
 use crate::session::{route_release_data, send_action, LossInjector};
 use crate::srt_sender::SrtInitiator;
+use srt_protocol::statistics::SocketStatistics;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 use wtransport::Connection;
 
@@ -47,18 +48,25 @@ pub(crate) struct SessionEntry {
     /// Channel for routing upstream data (browser→gateway) to a broadcaster.
     /// None for viewer-only sessions.
     pub publish_tx: Option<tokio::sync::mpsc::Sender<TsMessage>>,
+    /// Diagnostic counters, updated by the ticker.
+    pub messages_pushed: AtomicU64,
+    pub viewer_lag_count: AtomicU64,
+    /// Last SRT stats snapshot, refreshed each tick for periodic logging.
+    pub last_srt_stats: StdMutex<Option<SocketStatistics>>,
 }
 
 /// Central registry of active sessions, polled once per ~2ms by a single
 /// ticker task spawned in [`crate::gateway::Gateway::run`].
 pub(crate) struct SessionRegistry {
     entries: RwLock<HashMap<u64, Arc<SessionEntry>>>,
+    last_stats_log: StdMutex<Option<Instant>>,
 }
 
 impl SessionRegistry {
     pub fn new() -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
+            last_stats_log: StdMutex::new(None),
         }
     }
 
@@ -90,16 +98,19 @@ impl SessionRegistry {
         let entries = self.snapshot();
         let mut to_remove: Vec<u64> = Vec::new();
 
+        let should_log_stats = {
+            let mut last = self.last_stats_log.lock().unwrap();
+            let should = last.map(|t| now.duration_since(t) >= Duration::from_secs(5)).unwrap_or(true);
+            if should { *last = Some(now); }
+            should
+        };
+
         for entry in &entries {
             if entry.finished.load(Ordering::Relaxed) {
                 to_remove.push(entry.session_id);
                 continue;
             }
 
-            // Lock the initiator, drive the SRT state machine, and push any
-            // viewer messages that became available. The viewer std Mutex is
-            // released before each `push_message` call (push is sync but we
-            // keep the critical section tight).
             let (actions, data) = {
                 let mut init = entry.initiator.lock().await;
                 let (mut actions, mut data) = init.tick(now);
@@ -107,19 +118,15 @@ impl SessionRegistry {
                     for _ in 0..MAX_MSGS_PER_TICK {
                         let maybe_msg = {
                             let mut viewer = entry.viewer.lock().unwrap();
-                            // Publish-only session (None) has nothing to drain.
                             viewer.as_mut().map(|v| v.try_recv())
                         };
                         match maybe_msg {
                             Some(Ok(Some(m))) => {
-                                // Refresh `now` per push so each packet gets a
-                                // strictly monotonic timestamp. Reusing the
-                                // tick's `now` for all 32 pushes would stamp
-                                // them identically, breaking TSBPD spacing.
                                 let now = Instant::now();
                                 let (a, d) = init.push_message(m, now);
                                 actions.extend(a);
                                 data.extend(d);
+                                entry.messages_pushed.fetch_add(1, Ordering::Relaxed);
                             }
                             Some(Ok(None)) => break,
                             Some(Err(lag)) => {
@@ -128,25 +135,23 @@ impl SessionRegistry {
                                     lag,
                                     "viewer lagged; messages dropped"
                                 );
+                                entry.viewer_lag_count.fetch_add(1, Ordering::Relaxed);
                                 break;
                             }
                             None => break,
                         }
                     }
                 }
+                if let Some(s) = init.stats() {
+                    *entry.last_srt_stats.lock().unwrap() = Some(s.clone());
+                }
                 (actions, data)
             };
 
-            // Route released upstream data (browser→gateway) to the publish channel.
             for (ts, bytes) in data {
                 route_release_data(entry, ts, &bytes);
             }
 
-            // Send the actions out via WebTransport. The loss injector is
-            // shared with the recv_pump; the tokio::sync::Mutex serializes
-            // access. `send_action` errors (e.g. WT connection closed) are
-            // ignored here — the recv_pump will observe the failure and mark
-            // the session finished.
             {
                 let mut loss = entry.loss.lock().await;
                 for action in actions {
@@ -160,6 +165,27 @@ impl SessionRegistry {
 
             if entry.finished.load(Ordering::Relaxed) {
                 to_remove.push(entry.session_id);
+            }
+        }
+
+        if should_log_stats {
+            for entry in &entries {
+                if entry.finished.load(Ordering::Relaxed) { continue; }
+                let guard = entry.last_srt_stats.lock().unwrap();
+                if let Some(s) = guard.as_ref() {
+                    tracing::info!(
+                        session_id = entry.session_id,
+                        tx_data = s.tx_data,
+                        tx_retransmit = s.tx_retransmit_data,
+                        tx_loss = s.tx_loss_data,
+                        tx_buffered = s.tx_buffered_data,
+                        rx_rtt = ?s.rx_average_rtt,
+                        tx_rtt = ?s.tx_average_rtt,
+                        messages_pushed = entry.messages_pushed.load(Ordering::Relaxed),
+                        viewer_lag = entry.viewer_lag_count.load(Ordering::Relaxed),
+                        "per-session SRT stats"
+                    );
+                }
             }
         }
 
