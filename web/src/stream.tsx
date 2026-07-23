@@ -17,9 +17,7 @@ const codecSelect = document.getElementById('codec-select') as HTMLSelectElement
 const bitrateNum = document.getElementById('bitrate-num') as HTMLInputElement;
 const framerateSelect = document.getElementById('framerate-select') as HTMLSelectElement;
 const fullscreenBtn = document.getElementById('fullscreen-btn') as HTMLButtonElement;
-const pubStatus = document.getElementById('pub-status') as HTMLDivElement;
 const pubStatsText = document.getElementById('pub-stats-text') as HTMLDivElement;
-
 const audioSourceSelect = document.getElementById('audio-source') as HTMLSelectElement;
 
 const debugRoot = document.getElementById('debug-root') as HTMLDivElement;
@@ -75,7 +73,7 @@ let panelMounted = false;
 let consoleCleanup: (() => void) | null = null;
 
 function log(msg: string, cls = '') { store.pushLog(msg, cls); }
-function setStatus(s: string) { store.status.value = s; pubStatus.textContent = s; }
+function setStatus(s: string) { store.status.value = s; }
 
 function setPanelVisible(visible: boolean) {
   store.panelVisible.value = visible;

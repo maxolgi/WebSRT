@@ -121,16 +121,11 @@
         <label>codec: <select id="codec-select"><option value="auto">auto</option></select></label>
         <label>bitrate: <input type="number" id="bitrate-num" min="0.5" max="50" step="0.5" value="4" />Mbps</label>
         <label>framerate: <select id="framerate-select"><option>30</option><option>60</option></select></label>
+        <label>audio: <select id="audio-source"><option value="">(none)</option></select></label>
         <button id="fullscreen-btn">fullscreen</button>
         <button id="debug-toggle">debug</button>
       </div>
 
-      <h2>Audio</h2>
-      <div class="audio-section">
-        <label>source: <select id="audio-source"><option value="">(none)</option></select></label>
-      </div>
-
-      <div id="pub-status">idle</div>
       <div class="pub-stats" id="pub-stats-text"></div>
     </div>
     <div id="debug-root"></div>
