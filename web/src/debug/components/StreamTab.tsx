@@ -34,6 +34,8 @@ export function StreamTab({ store }: Props): JSX.Element {
 
       {srt && <SrtStatsTable srt={srt} drift={drift} />}
 
+      <CcErrorCounter store={store} />
+
       <div class="debug-section">
         <h3>Event Log ({entries.length})</h3>
         <div style={{ maxHeight: '300px', overflowY: 'auto', fontSize: '11px', lineHeight: '1.4' }}>
@@ -49,6 +51,37 @@ export function StreamTab({ store }: Props): JSX.Element {
         </div>
       </div>
     </>
+  )
+}
+
+function CcErrorCounter({ store }: { store: DebugStore }): JSX.Element {
+  const [baseline, setBaseline] = useState(0)
+  const [, forceRender] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => forceRender((n) => n + 1), 250)
+    return () => clearInterval(id)
+  }, [])
+
+  const demux = store.demuxStats.value
+  let total = 0
+  if (demux) {
+    for (let i = 0; i < demux.ccErrors.length; i++) total += demux.ccErrors[i]
+  }
+  const display = Math.max(0, total - baseline)
+  const cls = display > 0 ? 'stat-bad' : 'stat-good'
+
+  return (
+    <div class="debug-section">
+      <h3>Continuity Counter Errors</h3>
+      <table class="debug-table">
+        <tr>
+          <td>total</td>
+          <td class={cls} style={{ cursor: 'pointer' }} onClick={() => setBaseline(total)} title="click to reset">
+            {display}
+          </td>
+        </tr>
+      </table>
+    </div>
   )
 }
 
