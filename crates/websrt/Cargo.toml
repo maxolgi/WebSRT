@@ -26,3 +26,9 @@ futures.workspace = true
 rand = { workspace = true, optional = true }
 percent-encoding.workspace = true
 parking_lot.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+# Required so integration tests can exercise the forked srt-protocol internals
+# directly (it is only a transitive dependency of websrt).
+srt-protocol.workspace = true
