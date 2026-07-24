@@ -209,6 +209,15 @@ async fn main() -> Result<()> {
     // Spawn the demo health/metrics server. The library no longer owns this;
     // each embedding application is responsible for its own exposition format.
     if cli.health_port > 0 {
+        let bind_addr: Option<std::net::IpAddr> = cli.health_bind.parse().ok();
+        if let Some(ip) = bind_addr {
+            if !ip.is_loopback() {
+                tracing::warn!(
+                    bind = %cli.health_bind,
+                    "health server binding to non-loopback address; metrics will be visible on the network"
+                );
+            }
+        }
         let stats_handle = gateway.stats_handle();
         let bind = cli.health_bind.clone();
         let port = cli.health_port;
@@ -261,7 +270,7 @@ async fn main() -> Result<()> {
                             ingester_json,
                         );
                         let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                             json.len(),
                             json,
                         );
