@@ -51,6 +51,44 @@ impl Default for SrtConfig {
     }
 }
 
+impl SrtConfig {
+    /// Validate all fields. Returns an error with a descriptive message if any
+    /// field is out of its safe range.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.payload_size < 100 {
+            anyhow::bail!("payload_size must be >= 100, got {}", self.payload_size);
+        }
+        if self.payload_size > 1456 {
+            anyhow::bail!("payload_size must be <= 1456, got {}", self.payload_size);
+        }
+        if self.send_buffer_size == 0 {
+            anyhow::bail!("send_buffer_size must be >= 1");
+        }
+        if self.recv_buffer_size == 0 {
+            anyhow::bail!("recv_buffer_size must be >= 1");
+        }
+        if self.peer_idle_timeout < std::time::Duration::from_secs(1) {
+            anyhow::bail!(
+                "peer_idle_timeout must be >= 1s, got {:?}",
+                self.peer_idle_timeout
+            );
+        }
+        if self.send_latency < std::time::Duration::from_millis(1) {
+            anyhow::bail!(
+                "send_latency must be >= 1ms, got {:?}",
+                self.send_latency
+            );
+        }
+        if self.recv_latency < std::time::Duration::from_millis(1) {
+            anyhow::bail!(
+                "recv_latency must be >= 1ms, got {:?}",
+                self.recv_latency
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Outgoing actions the gateway must take when driving the sender.
 #[derive(Debug)]
 pub enum SenderAction {
@@ -296,4 +334,77 @@ fn serialize_packet(pkt: &Packet) -> Vec<u8> {
     let mut buf = BytesMut::with_capacity(pkt.wire_size());
     pkt.serialize(&mut buf);
     buf.to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_is_valid() {
+        assert!(SrtConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn payload_size_too_small() {
+        let mut c = SrtConfig::default();
+        c.payload_size = 50;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn payload_size_too_large() {
+        let mut c = SrtConfig::default();
+        c.payload_size = 2000;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn send_buffer_zero_rejected() {
+        let mut c = SrtConfig::default();
+        c.send_buffer_size = 0;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn recv_buffer_zero_rejected() {
+        let mut c = SrtConfig::default();
+        c.recv_buffer_size = 0;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn idle_timeout_below_1s_rejected() {
+        let mut c = SrtConfig::default();
+        c.peer_idle_timeout = std::time::Duration::from_millis(500);
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn send_latency_zero_rejected() {
+        let mut c = SrtConfig::default();
+        c.send_latency = std::time::Duration::from_millis(0);
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn recv_latency_zero_rejected() {
+        let mut c = SrtConfig::default();
+        c.recv_latency = std::time::Duration::from_millis(0);
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn payload_size_boundary_100_ok() {
+        let mut c = SrtConfig::default();
+        c.payload_size = 100;
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn payload_size_boundary_1456_ok() {
+        let mut c = SrtConfig::default();
+        c.payload_size = 1456;
+        assert!(c.validate().is_ok());
+    }
 }
