@@ -45,7 +45,7 @@ pub(crate) struct LossInjector {
 
 #[cfg(feature = "sim-loss")]
 impl LossInjector {
-    fn new(pct: u8, seed: u64) -> Self {
+    pub(crate) fn new(pct: u8, seed: u64) -> Self {
         Self {
             enabled: pct > 0,
             pct,
@@ -91,7 +91,7 @@ pub(crate) struct LossInjector;
 
 #[cfg(not(feature = "sim-loss"))]
 impl LossInjector {
-    fn new(_pct: u8, _seed: u64) -> Self {
+    pub(crate) fn new(_pct: u8, _seed: u64) -> Self {
         Self
     }
     fn should_drop(&mut self, _bytes: &[u8]) -> bool {
@@ -164,6 +164,7 @@ impl BrowserSession {
             publish_tx,
             messages_pushed: AtomicU64::new(0),
             viewer_lag_count: AtomicU64::new(0),
+            publish_dropped: AtomicU64::new(0),
             last_srt_stats: StdMutex::new(None),
             guard,
             peer,
@@ -296,7 +297,8 @@ pub(crate) fn route_release_data(
 ) {
     if let Some(tx) = &entry.publish_tx {
         if tx.try_send((ts, bytes.clone())).is_err() {
-            tracing::debug!(
+            entry.publish_dropped.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
                 session_id = entry.session_id,
                 queued = tx.capacity(),
                 "publish_tx try_send drop"
