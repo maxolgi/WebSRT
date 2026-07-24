@@ -165,6 +165,7 @@ impl BrowserSession {
             messages_pushed: AtomicU64::new(0),
             viewer_lag_count: AtomicU64::new(0),
             publish_dropped: AtomicU64::new(0),
+            publish_first_drop_logged: AtomicBool::new(false),
             last_srt_stats: StdMutex::new(None),
             guard,
             peer,
@@ -298,11 +299,23 @@ pub(crate) fn route_release_data(
     if let Some(tx) = &entry.publish_tx {
         if tx.try_send((ts, bytes.clone())).is_err() {
             entry.publish_dropped.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(
-                session_id = entry.session_id,
-                queued = tx.capacity(),
-                "publish_tx try_send drop"
-            );
+            let is_first = entry
+                .publish_first_drop_logged
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok();
+            if is_first {
+                tracing::warn!(
+                    session_id = entry.session_id,
+                    capacity = tx.capacity(),
+                    "publish_tx try_send drop (first)"
+                );
+            } else {
+                tracing::debug!(
+                    session_id = entry.session_id,
+                    capacity = tx.capacity(),
+                    "publish_tx try_send drop"
+                );
+            }
         }
     }
 }

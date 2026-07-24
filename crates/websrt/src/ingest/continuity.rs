@@ -145,6 +145,7 @@ impl<I: Ingester> Ingester for TsContinuityChecker<I> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn make_ts_packet(pid: u16, cc: u8, afc: u8) -> [u8; 188] {
         let mut pkt = [0u8; 188];
@@ -254,5 +255,52 @@ mod tests {
         checker.scan(&pkt);
         assert_eq!(checker.cc_checks(), 0);
         assert_eq!(checker.cc_gaps(), 0);
+    }
+
+    proptest! {
+        #[test]
+        fn cc_counters_bounded_by_payload_bearing_packets(
+            packets in proptest::collection::vec(
+                (0x100u16..0x200u16, 0u8..16u8, 0u8..4u8, any::<bool>()),
+                1..=100usize,
+            ),
+        ) {
+            let mut checker = TsContinuityChecker::<()>::new(());
+            let mut buf = Vec::new();
+            let mut payload_bearing = 0u64;
+
+            for (pid, cc, afc, disc) in &packets {
+                let mut pkt = [0u8; 188];
+                pkt[0] = TS_SYNC_BYTE;
+                pkt[1] = ((pid >> 8) & 0x1F) as u8;
+                pkt[2] = (pid & 0xFF) as u8;
+                pkt[3] = (afc << 4) | (cc & 0x0F);
+                if *afc == 0b11 && *disc {
+                    pkt[5] = 0x80;
+                }
+                buf.extend_from_slice(&pkt);
+
+                if (*afc == 0b01 || *afc == 0b11) && !(*afc == 0b11 && *disc) {
+                    payload_bearing += 1;
+                }
+            }
+
+            checker.scan(&buf);
+
+            let checks = checker.cc_checks();
+            let gaps = checker.cc_gaps();
+            prop_assert!(
+                checks <= payload_bearing,
+                "cc_checks ({}) must not exceed payload-bearing packets ({})",
+                checks,
+                payload_bearing,
+            );
+            prop_assert!(
+                gaps <= checks,
+                "cc_gaps ({}) must not exceed cc_checks ({})",
+                gaps,
+                checks,
+            );
+        }
     }
 }

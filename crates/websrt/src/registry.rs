@@ -55,6 +55,7 @@ pub(crate) struct SessionEntry {
     /// Upstream data drops when the publish channel is full. Incremented by
     /// `route_release_data` on `try_send` failure.
     pub publish_dropped: AtomicU64,
+    pub publish_first_drop_logged: AtomicBool,
     /// Last SRT stats snapshot, refreshed each tick for periodic logging.
     pub last_srt_stats: StdMutex<Option<SocketStatistics>>,
     /// RAII guard for connection limiting. Drops when the session exits,
@@ -338,6 +339,80 @@ mod tests {
             messages_pushed: AtomicU64::new(0),
             viewer_lag_count: AtomicU64::new(0),
             publish_dropped: AtomicU64::new(0),
+            publish_first_drop_logged: AtomicBool::new(false),
+            last_srt_stats: StdMutex::new(None),
+            guard: None,
+            peer: DUMMY_REMOTE,
+            stream_name: format!("stream-{session_id}"),
+        })
+    }
+
+    fn make_connected_initiator() -> SrtInitiator {
+        use srt_protocol::packet::Packet;
+        use srt_protocol::protocol::pending_connection::listen::Listen;
+        use srt_protocol::protocol::pending_connection::ConnectionResult;
+        use srt_protocol::settings::ConnInitSettings;
+
+        let now = Instant::now();
+        let mut initiator = SrtInitiator::new(
+            LOCAL,
+            DUMMY_REMOTE,
+            &SrtConfig::default(),
+            Duration::from_millis(50),
+        );
+
+        let mut listen = Listen::new(ConnInitSettings::default(), false);
+        listen.allow_skip_induction(true);
+
+        let (actions, _) = initiator.tick(now);
+        let conclusion_bytes = actions
+            .iter()
+            .find_map(|a| match a {
+                crate::srt_sender::SenderAction::SendDatagram(b) => Some(b.clone()),
+                _ => None,
+            })
+            .expect("initiator should emit a datagram");
+
+        let mut buf: &[u8] = &conclusion_bytes[..];
+        let conclusion_pkt = Packet::parse(&mut buf, false).expect("parse conclusion");
+
+        let result = listen.handle_packet(now, Ok((conclusion_pkt, DUMMY_REMOTE)));
+        let resp_bytes = match result {
+            ConnectionResult::Connected(Some((pkt, _)), _) => {
+                let mut buf = bytes::BytesMut::with_capacity(pkt.wire_size());
+                pkt.serialize(&mut buf);
+                buf.to_vec()
+            }
+            _ => panic!("listen should connect on conclusion-first handshake"),
+        };
+
+        initiator.handle_datagram(&resp_bytes, now);
+        assert!(
+            initiator.is_connected(),
+            "initiator must be connected after handshake"
+        );
+        initiator
+    }
+
+    fn make_connected_entry(
+        conn: Connection,
+        session_id: u64,
+        viewer: Option<ViewerRx>,
+    ) -> Arc<SessionEntry> {
+        let initiator = make_connected_initiator();
+        Arc::new(SessionEntry {
+            conn,
+            initiator: Arc::new(Mutex::new(initiator)),
+            loss: Arc::new(Mutex::new(LossInjector::new(0, 0))),
+            viewer: StdMutex::new(viewer),
+            session_id,
+            shutdown: Arc::new(Notify::new()),
+            finished: AtomicBool::new(false),
+            publish_tx: None,
+            messages_pushed: AtomicU64::new(0),
+            viewer_lag_count: AtomicU64::new(0),
+            publish_dropped: AtomicU64::new(0),
+            publish_first_drop_logged: AtomicBool::new(false),
             last_srt_stats: StdMutex::new(None),
             guard: None,
             peer: DUMMY_REMOTE,
@@ -527,6 +602,71 @@ mod tests {
             "second drop must increment counter again"
         );
 
+        server.close(0u32.into(), b"");
+    }
+
+    #[tokio::test]
+    async fn tick_all_drains_viewer_messages() {
+        use crate::broadcaster::Broadcaster;
+        use crate::ingest::ChannelIngester;
+
+        let (server, addr, hash) = make_test_server().await;
+        let conn = accept_one_conn(&server, hash, addr.port()).await;
+
+        let (bc_tx, bc_rx) = tokio::sync::mpsc::channel::<TsMessage>(16);
+        let ingester = ChannelIngester::new(bc_rx);
+        let bc = Broadcaster::spawn(ingester, 4, 16, Arc::new(Notify::new()));
+        let viewer_rx = bc.subscribe().expect("subscribe");
+        for _ in 0..3 {
+            let _ = bc_tx.try_send((Instant::now(), Bytes::from_static(b"x")));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let entry = make_connected_entry(conn, 1, Some(viewer_rx));
+        let reg = SessionRegistry::new();
+        reg.insert(entry.clone());
+
+        reg.tick_all().await;
+
+        assert!(
+            entry.messages_pushed.load(Ordering::Relaxed) > 0,
+            "messages_pushed should increment when tick_all drains viewer messages"
+        );
+
+        bc.shutdown();
+        server.close(0u32.into(), b"");
+    }
+
+    #[tokio::test]
+    async fn tick_all_increments_viewer_lag_count_on_overflow() {
+        use crate::broadcaster::Broadcaster;
+        use crate::ingest::ChannelIngester;
+
+        let (server, addr, hash) = make_test_server().await;
+        let conn = accept_one_conn(&server, hash, addr.port()).await;
+
+        let capacity = 2usize;
+        let (bc_tx, bc_rx) = tokio::sync::mpsc::channel::<TsMessage>(16);
+        let ingester = ChannelIngester::new(bc_rx);
+        let bc = Broadcaster::spawn(ingester, 4, capacity, Arc::new(Notify::new()));
+        let viewer_rx = bc.subscribe().expect("subscribe");
+        for _ in 0..(capacity + 5) {
+            let _ = bc_tx.try_send((Instant::now(), Bytes::from_static(b"x")));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let entry = make_connected_entry(conn, 1, Some(viewer_rx));
+        let reg = SessionRegistry::new();
+        reg.insert(entry.clone());
+
+        reg.tick_all().await;
+
+        assert!(
+            entry.viewer_lag_count.load(Ordering::Relaxed) > 0,
+            "viewer_lag_count should increment when the broadcast channel overflows"
+        );
+
+        bc.shutdown();
         server.close(0u32.into(), b"");
     }
 }
