@@ -431,6 +431,10 @@ impl Gateway {
             tracing::info!("shutdown complete");
         }
 
+        tracing::info!("cleaning up registries");
+        self.streams.cleanup();
+        self.sessions.clear();
+
         Ok(())
     }
 }

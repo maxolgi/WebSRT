@@ -64,12 +64,30 @@ impl SrtConfig {
         if self.send_buffer_size == 0 {
             anyhow::bail!("send_buffer_size must be >= 1");
         }
+        if self.send_buffer_size > 100_000 {
+            anyhow::bail!(
+                "send_buffer_size must be <= 100000, got {}",
+                self.send_buffer_size
+            );
+        }
         if self.recv_buffer_size == 0 {
             anyhow::bail!("recv_buffer_size must be >= 1");
+        }
+        if self.recv_buffer_size > 100_000 {
+            anyhow::bail!(
+                "recv_buffer_size must be <= 100000, got {}",
+                self.recv_buffer_size
+            );
         }
         if self.peer_idle_timeout < std::time::Duration::from_secs(1) {
             anyhow::bail!(
                 "peer_idle_timeout must be >= 1s, got {:?}",
+                self.peer_idle_timeout
+            );
+        }
+        if self.peer_idle_timeout > std::time::Duration::from_secs(300) {
+            anyhow::bail!(
+                "peer_idle_timeout must be <= 300s, got {:?}",
                 self.peer_idle_timeout
             );
         }
@@ -406,5 +424,47 @@ mod tests {
         let mut c = SrtConfig::default();
         c.payload_size = 1456;
         assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn send_buffer_boundary_100000_ok() {
+        let mut c = SrtConfig::default();
+        c.send_buffer_size = 100_000;
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn send_buffer_boundary_100001_rejected() {
+        let mut c = SrtConfig::default();
+        c.send_buffer_size = 100_001;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn recv_buffer_boundary_100000_ok() {
+        let mut c = SrtConfig::default();
+        c.recv_buffer_size = 100_000;
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn recv_buffer_boundary_100001_rejected() {
+        let mut c = SrtConfig::default();
+        c.recv_buffer_size = 100_001;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn idle_timeout_boundary_300s_ok() {
+        let mut c = SrtConfig::default();
+        c.peer_idle_timeout = std::time::Duration::from_secs(300);
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn idle_timeout_boundary_301s_rejected() {
+        let mut c = SrtConfig::default();
+        c.peer_idle_timeout = std::time::Duration::from_secs(301);
+        assert!(c.validate().is_err());
     }
 }

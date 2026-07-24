@@ -5,10 +5,13 @@
 //! RAII guards that decrement counters on drop.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use std::time::Duration;
+
+use anyhow::Result;
 
 /// Configuration for gateway-level resource limits.
 ///
@@ -50,6 +53,37 @@ impl GatewayLimits {
     pub fn builder() -> GatewayLimitsBuilder {
         GatewayLimitsBuilder::default()
     }
+
+    /// Validate timeout bounds. Returns an error if any timeout is outside
+    /// its safe range: `1s <= max_idle_timeout <= 600s` and
+    /// `1s <= handshake_timeout <= 60s`.
+    pub fn validate(&self) -> Result<()> {
+        if self.max_idle_timeout < Duration::from_secs(1) {
+            anyhow::bail!(
+                "max_idle_timeout must be >= 1s, got {:?}",
+                self.max_idle_timeout
+            );
+        }
+        if self.max_idle_timeout > Duration::from_secs(600) {
+            anyhow::bail!(
+                "max_idle_timeout must be <= 600s, got {:?}",
+                self.max_idle_timeout
+            );
+        }
+        if self.handshake_timeout < Duration::from_secs(1) {
+            anyhow::bail!(
+                "handshake_timeout must be >= 1s, got {:?}",
+                self.handshake_timeout
+            );
+        }
+        if self.handshake_timeout > Duration::from_secs(60) {
+            anyhow::bail!(
+                "handshake_timeout must be <= 60s, got {:?}",
+                self.handshake_timeout
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Builder for [`GatewayLimits`].
@@ -87,8 +121,25 @@ impl GatewayLimitsBuilder {
         self
     }
 
-    pub fn build(self) -> GatewayLimits {
-        self.limits
+    pub fn build(self) -> Result<GatewayLimits> {
+        self.limits.validate()?;
+        Ok(self.limits)
+    }
+}
+
+/// Map an IP address to its per-IP limit key. IPv4 passes through unchanged;
+/// IPv6 addresses are collapsed to their /64 network prefix (low 64 bits
+/// zeroed) so that a host on a single /64 cannot evade the per-IP cap by
+/// cycling through its 2^64 addresses.
+fn limit_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => {
+            let octets = v6.octets();
+            let mut masked = [0u8; 16];
+            masked[..8].copy_from_slice(&octets[..8]);
+            IpAddr::V6(Ipv6Addr::from(masked))
+        }
     }
 }
 
@@ -145,16 +196,21 @@ impl ConnectionTracker {
         self.total.load(Ordering::Relaxed)
     }
 
-    /// Current session count for a specific IP.
+    /// Current session count for a specific IP. IPv6 addresses are collapsed
+    /// to their /64 prefix, so any address within a /64 reports the shared
+    /// bucket count.
     pub fn per_ip(&self, ip: &IpAddr) -> u32 {
-        self.per_ip.lock().unwrap().get(ip).copied().unwrap_or(0)
+        let key = limit_key(*ip);
+        self.per_ip.lock().get(&key).copied().unwrap_or(0)
     }
 
     /// Try to acquire a session slot. Returns `Some(guard)` if within limits,
-    /// or `None` if the per-IP or global cap would be exceeded.
+    /// or `None` if the per-IP or global cap would be exceeded. IPv6 addresses
+    /// are tracked by their /64 prefix.
     pub fn try_acquire(self: &Arc<Self>, ip: IpAddr) -> Option<SessionGuard> {
-        let mut per_ip = self.per_ip.lock().unwrap();
-        let current_ip = per_ip.get(&ip).copied().unwrap_or(0);
+        let key = limit_key(ip);
+        let mut per_ip = self.per_ip.lock();
+        let current_ip = per_ip.get(&key).copied().unwrap_or(0);
         let current_total = self.total.load(Ordering::Relaxed);
 
         if let Some(max_per_ip) = self.limits.max_sessions_per_ip {
@@ -168,18 +224,18 @@ impl ConnectionTracker {
             }
         }
 
-        per_ip.insert(ip, current_ip + 1);
+        per_ip.insert(key, current_ip + 1);
         self.total.fetch_add(1, Ordering::Relaxed);
 
         Some(SessionGuard {
             tracker: Arc::clone(self),
-            ip,
+            ip: key,
         })
     }
 
     /// Release a session slot. Called automatically by [`SessionGuard::drop`].
     fn release(&self, ip: &IpAddr) {
-        let mut per_ip = self.per_ip.lock().unwrap();
+        let mut per_ip = self.per_ip.lock();
         if let Some(count) = per_ip.get_mut(ip) {
             *count = count.saturating_sub(1);
             if *count == 0 {
@@ -195,10 +251,15 @@ impl ConnectionTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, SocketAddr};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
     fn ip(n: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, n))
+    }
+
+    // 2001:db8::n — varies only in the host (low 64) portion.
+    fn v6(n: u16) -> IpAddr {
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, n))
     }
 
     #[test]
@@ -217,7 +278,8 @@ mod tests {
             .max_sessions(100)
             .max_idle_timeout(Duration::from_secs(30))
             .handshake_timeout(Duration::from_secs(5))
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(l.max_sessions_per_ip, Some(5));
         assert_eq!(l.max_sessions, Some(100));
     }
@@ -226,7 +288,8 @@ mod tests {
     fn builder_disables_limit_with_none() {
         let l = GatewayLimits::builder()
             .max_sessions_per_ip(None)
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(l.max_sessions_per_ip, None);
     }
 
@@ -253,7 +316,7 @@ mod tests {
 
     #[test]
     fn per_ip_cap_enforced() {
-        let limits = GatewayLimits::builder().max_sessions_per_ip(2).build();
+        let limits = GatewayLimits::builder().max_sessions_per_ip(2).build().unwrap();
         let tracker = Arc::new(ConnectionTracker::new(limits));
 
         let g1 = tracker.try_acquire(ip(1));
@@ -267,7 +330,7 @@ mod tests {
 
     #[test]
     fn per_ip_cap_does_not_affect_other_ips() {
-        let limits = GatewayLimits::builder().max_sessions_per_ip(1).build();
+        let limits = GatewayLimits::builder().max_sessions_per_ip(1).build().unwrap();
         let tracker = Arc::new(ConnectionTracker::new(limits));
 
         let g1 = tracker.try_acquire(ip(1)).unwrap();
@@ -283,7 +346,8 @@ mod tests {
         let limits = GatewayLimits::builder()
             .max_sessions(2)
             .max_sessions_per_ip(None)
-            .build();
+            .build()
+            .unwrap();
         let tracker = Arc::new(ConnectionTracker::new(limits));
 
         let g1 = tracker.try_acquire(ip(1));
@@ -300,7 +364,8 @@ mod tests {
         let limits = GatewayLimits::builder()
             .max_sessions(None)
             .max_sessions_per_ip(None)
-            .build();
+            .build()
+            .unwrap();
         let tracker = Arc::new(ConnectionTracker::new(limits));
 
         let mut guards = Vec::new();
@@ -317,7 +382,7 @@ mod tests {
             let _g = tracker.try_acquire(ip(1)).unwrap();
         }
         // After drop, the IP entry should be removed from the map.
-        assert!(tracker.per_ip.lock().unwrap().is_empty());
+        assert!(tracker.per_ip.lock().is_empty());
     }
 
     #[test]
@@ -328,5 +393,102 @@ mod tests {
         // Manually call release again (simulates a bug/double-release).
         tracker.release(&ip(1));
         assert_eq!(tracker.total(), 0, "total should not underflow");
+    }
+
+    #[test]
+    fn ipv6_same_prefix_counts_as_one_identity() {
+        let limits = GatewayLimits::builder()
+            .max_sessions_per_ip(1)
+            .build()
+            .unwrap();
+        let tracker = Arc::new(ConnectionTracker::new(limits));
+
+        let g1 = tracker.try_acquire(v6(1));
+        let g2 = tracker.try_acquire(v6(2));
+        assert!(g1.is_some());
+        assert!(
+            g2.is_none(),
+            "second IPv6 in same /64 should be rejected"
+        );
+    }
+
+    #[test]
+    fn ipv6_different_prefixes_are_independent() {
+        let limits = GatewayLimits::builder()
+            .max_sessions_per_ip(1)
+            .build()
+            .unwrap();
+        let tracker = Arc::new(ConnectionTracker::new(limits));
+
+        let g1 = tracker.try_acquire(v6(1));
+        // Different /64 prefix (segment index 3 differs).
+        let other = IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 1, 0, 0, 0, 1));
+        let g2 = tracker.try_acquire(other);
+        assert!(g1.is_some());
+        assert!(g2.is_some(), "different /64 prefixes should be independent");
+    }
+
+    #[test]
+    fn per_ip_reports_bucketed_count_for_ipv6() {
+        let tracker = Arc::new(ConnectionTracker::new(GatewayLimits::default()));
+        let _g1 = tracker.try_acquire(v6(1)).unwrap();
+        let _g2 = tracker.try_acquire(v6(2)).unwrap();
+        assert_eq!(tracker.per_ip(&v6(1)), 2);
+        assert_eq!(tracker.per_ip(&v6(2)), 2);
+        assert_eq!(
+            tracker.per_ip(&v6(99)),
+            2,
+            "any address in the /64 sees the shared bucket count"
+        );
+    }
+
+    #[test]
+    fn builder_rejects_zero_timeouts() {
+        let r = GatewayLimits::builder()
+            .max_idle_timeout(Duration::ZERO)
+            .build();
+        assert!(r.is_err());
+        let r = GatewayLimits::builder()
+            .handshake_timeout(Duration::ZERO)
+            .build();
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn builder_rejects_subsecond_timeouts() {
+        let r = GatewayLimits::builder()
+            .max_idle_timeout(Duration::from_millis(999))
+            .build();
+        assert!(r.is_err());
+        let r = GatewayLimits::builder()
+            .handshake_timeout(Duration::from_millis(999))
+            .build();
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn builder_rejects_excessively_large_timeouts() {
+        let r = GatewayLimits::builder()
+            .max_idle_timeout(Duration::from_secs(601))
+            .build();
+        assert!(r.is_err());
+        let r = GatewayLimits::builder()
+            .handshake_timeout(Duration::from_secs(61))
+            .build();
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn builder_accepts_boundary_timeouts() {
+        let l = GatewayLimits::builder()
+            .max_idle_timeout(Duration::from_secs(1))
+            .handshake_timeout(Duration::from_secs(1))
+            .build();
+        assert!(l.is_ok());
+        let l = GatewayLimits::builder()
+            .max_idle_timeout(Duration::from_secs(600))
+            .handshake_timeout(Duration::from_secs(60))
+            .build();
+        assert!(l.is_ok());
     }
 }
