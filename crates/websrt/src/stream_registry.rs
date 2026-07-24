@@ -142,18 +142,23 @@ impl StreamRegistry {
         streams.retain(|_, b| b.is_alive());
     }
 
-    /// Signal every broadcaster to shut down. Called by [`crate::gateway::Gateway`]
-    /// during drain so ingesters stuck in reconnect loops (e.g. `SrtIngester`)
-    /// exit promptly and release their bound resources. The broadcasters set
-    /// `alive = false` on exit and are reaped by the next [`StreamRegistry::cleanup`].
-    pub fn shutdown_all(&self) {
-        let streams = self.streams.lock();
-        let count = streams.len();
-        for bc in streams.values() {
+    /// Signal every broadcaster to shut down and await their completion. Called
+    /// by [`crate::gateway::Gateway`] during drain so ingesters stuck in
+    /// reconnect loops (e.g. `SrtIngester`) exit promptly and release their
+    /// bound resources before sessions are torn down. The broadcasters set
+    /// `alive = false` on exit and are reaped by the next
+    /// [`StreamRegistry::cleanup`].
+    pub async fn shutdown_all(&self) {
+        let bcs: Vec<_> = self.streams.lock().values().cloned().collect();
+        let count = bcs.len();
+        for bc in &bcs {
             bc.shutdown();
         }
+        for bc in &bcs {
+            bc.join().await;
+        }
         if count > 0 {
-            tracing::info!(count, "signaled all broadcasters to shut down");
+            tracing::info!(count, "all broadcasters shut down");
         }
     }
 

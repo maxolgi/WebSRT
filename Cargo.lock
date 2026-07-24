@@ -2115,6 +2115,7 @@ dependencies = [
  "subtle",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "wtransport",
 ]
 

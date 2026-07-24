@@ -401,9 +401,10 @@ impl Gateway {
 
         // Signal all broadcasters to shut down so ingesters stuck in reconnect
         // loops (e.g. `SrtIngester`) exit and release bound resources before
-        // sessions are torn down. Dead broadcasters are reaped by the next
+        // sessions are torn down. Awaits task exit (bounded by per-broadcaster
+        // 2s join timeout). Dead broadcasters are reaped by the next
         // `cleanup()`.
-        self.streams.shutdown_all();
+        self.streams.shutdown_all().await;
 
         // Graceful drain: signal each session's shutdown Notify, wait up to
         // 3s for it to exit on its own, then fall back to abort.

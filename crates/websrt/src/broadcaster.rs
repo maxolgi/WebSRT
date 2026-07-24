@@ -39,6 +39,7 @@ pub struct Broadcaster {
     /// Shutdown signal. `notify_one()` on this causes the background task's
     /// `select!` to fire and the task to exit cleanly.
     shutdown: Arc<Notify>,
+    task_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Broadcaster {
@@ -68,11 +69,12 @@ impl Broadcaster {
             messages_sent: AtomicU64::new(0),
             send_failures: AtomicU64::new(0),
             shutdown: shutdown.clone(),
+            task_handle: Mutex::new(None),
         });
         let bc_clone = broadcaster.clone();
         let tx2 = tx.clone();
         let shutdown_notify = shutdown.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut sent = 0u64;
             loop {
                 tokio::select! {
@@ -114,6 +116,7 @@ impl Broadcaster {
             *bc_clone.tx.lock() = None;
             tracing::info!(sent, "broadcaster task exited");
         });
+        *broadcaster.task_handle.lock() = Some(handle);
         broadcaster
     }
 
@@ -121,6 +124,21 @@ impl Broadcaster {
     /// sets `alive = false` and exits on its next `select!` poll.
     pub fn shutdown(&self) {
         self.shutdown.notify_one();
+    }
+
+    /// Await the background task's completion. Best-effort: gives up after 2s.
+    /// `shutdown()` must be called first (or the source must have ended);
+    /// otherwise this will hit the timeout.
+    pub async fn join(&self) {
+        let handle = self.task_handle.lock().take();
+        if let Some(h) = handle {
+            if tokio::time::timeout(std::time::Duration::from_secs(2), h)
+                .await
+                .is_err()
+            {
+                tracing::warn!("broadcaster task did not exit within 2s");
+            }
+        }
     }
 
     /// Subscribe a new viewer. Returns `None` if the session cap is reached
