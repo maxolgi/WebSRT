@@ -141,3 +141,118 @@ impl<I: Ingester> Ingester for TsContinuityChecker<I> {
         Ok(msg)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_ts_packet(pid: u16, cc: u8, afc: u8) -> [u8; 188] {
+        let mut pkt = [0u8; 188];
+        pkt[0] = 0x47;
+        pkt[1] = (pid >> 8) as u8 & 0x1F;
+        pkt[2] = pid as u8;
+        pkt[3] = (afc << 4) | (cc & 0x0F);
+        pkt
+    }
+
+    fn make_ts_packet_with_disc(pid: u16, cc: u8) -> [u8; 188] {
+        let mut pkt = make_ts_packet(pid, cc, 0b11);
+        pkt[5] = 0x80;
+        pkt
+    }
+
+    fn scan_packets(checker: &mut TsContinuityChecker<()>, packets: &[[u8; 188]]) {
+        let mut buf = Vec::new();
+        for p in packets {
+            buf.extend_from_slice(p);
+        }
+        checker.scan(&buf);
+    }
+
+    #[test]
+    fn afc_no_payload_skips_cc_check() {
+        let mut checker = TsContinuityChecker::<()>::new(());
+        let packets = [
+            make_ts_packet(0x100, 5, 0b00),
+            make_ts_packet(0x100, 9, 0b10),
+            make_ts_packet(0x100, 3, 0b00),
+        ];
+        scan_packets(&mut checker, &packets);
+        assert_eq!(checker.cc_checks(), 0);
+        assert_eq!(checker.cc_gaps(), 0);
+    }
+
+    #[test]
+    fn sequential_cc_stream_never_reports_gap() {
+        let mut checker = TsContinuityChecker::<()>::new(());
+        let packets = [
+            make_ts_packet(0x100, 0, 0b01),
+            make_ts_packet(0x100, 1, 0b01),
+            make_ts_packet(0x100, 2, 0b01),
+            make_ts_packet(0x100, 3, 0b01),
+            make_ts_packet(0x100, 4, 0b01),
+        ];
+        scan_packets(&mut checker, &packets);
+        assert_eq!(checker.cc_checks(), 5);
+        assert_eq!(checker.cc_gaps(), 0);
+    }
+
+    #[test]
+    fn cc_gap_detected() {
+        let mut checker = TsContinuityChecker::<()>::new(());
+        let packets = [
+            make_ts_packet(0x100, 0, 0b01),
+            make_ts_packet(0x100, 2, 0b01),
+        ];
+        scan_packets(&mut checker, &packets);
+        assert_eq!(checker.cc_gaps(), 1);
+    }
+
+    #[test]
+    fn cc_wraparound_not_a_gap() {
+        let mut checker = TsContinuityChecker::<()>::new(());
+        let packets = [
+            make_ts_packet(0x100, 15, 0b01),
+            make_ts_packet(0x100, 0, 0b01),
+        ];
+        scan_packets(&mut checker, &packets);
+        assert_eq!(checker.cc_gaps(), 0);
+    }
+
+    #[test]
+    fn discontinuity_indicator_resets_state() {
+        let mut checker = TsContinuityChecker::<()>::new(());
+        let packets = [
+            make_ts_packet(0x100, 0, 0b01),
+            make_ts_packet_with_disc(0x100, 1),
+            make_ts_packet(0x100, 5, 0b01),
+        ];
+        scan_packets(&mut checker, &packets);
+        assert_eq!(checker.cc_gaps(), 0);
+    }
+
+    #[test]
+    fn multiple_pids_independent() {
+        let mut checker = TsContinuityChecker::<()>::new(());
+        let packets = [
+            make_ts_packet(0x100, 0, 0b01),
+            make_ts_packet(0x200, 0, 0b01),
+            make_ts_packet(0x100, 1, 0b01),
+            make_ts_packet(0x200, 1, 0b01),
+            make_ts_packet(0x100, 2, 0b01),
+            make_ts_packet(0x200, 2, 0b01),
+        ];
+        scan_packets(&mut checker, &packets);
+        assert_eq!(checker.cc_gaps(), 0);
+    }
+
+    #[test]
+    fn sync_byte_mismatch_skipped() {
+        let mut checker = TsContinuityChecker::<()>::new(());
+        let mut pkt = [0u8; 188];
+        pkt[0] = 0xFF;
+        checker.scan(&pkt);
+        assert_eq!(checker.cc_checks(), 0);
+        assert_eq!(checker.cc_gaps(), 0);
+    }
+}
