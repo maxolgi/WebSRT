@@ -53,6 +53,15 @@ pub(crate) struct SessionEntry {
     pub viewer_lag_count: AtomicU64,
     /// Last SRT stats snapshot, refreshed each tick for periodic logging.
     pub last_srt_stats: StdMutex<Option<SocketStatistics>>,
+    /// RAII guard for connection limiting. Drops when the session exits,
+    /// releasing the per-IP and global session slot. Field is never read —
+    /// its purpose is to be held and dropped (like `SrtIngester.kind`).
+    #[allow(dead_code)]
+    pub guard: Option<crate::limits::SessionGuard>,
+    /// Peer's remote address (for stats reporting).
+    pub peer: std::net::SocketAddr,
+    /// Stream name this session is subscribed to or publishing (for stats).
+    pub stream_name: String,
 }
 
 /// Central registry of active sessions, polled once per ~2ms by a single
@@ -89,6 +98,39 @@ impl SessionRegistry {
     /// and by the periodic stats logger.
     pub(crate) fn snapshot(&self) -> Vec<Arc<SessionEntry>> {
         self.entries.read().unwrap().values().cloned().collect()
+    }
+
+    /// Snapshot all active sessions' stats for health/metrics reporting.
+    pub(crate) fn snapshot_sessions(&self) -> Vec<crate::gateway::SessionStats> {
+        let entries = self.snapshot();
+        entries
+            .iter()
+            .filter(|e| !e.finished.load(Ordering::Relaxed))
+            .map(|e| crate::gateway::SessionStats {
+                session_id: e.session_id,
+                peer: e.peer,
+                stream_name: e.stream_name.clone(),
+                messages_pushed: e.messages_pushed.load(Ordering::Relaxed),
+                viewer_lag_count: e.viewer_lag_count.load(Ordering::Relaxed),
+                srt: e.last_srt_stats.lock().unwrap().as_ref().map(|s| {
+                    crate::gateway::SrtStatsSnapshot {
+                        tx_data: s.tx_data,
+                        tx_retransmit: s.tx_retransmit_data,
+                        tx_loss: s.tx_loss_data,
+                        tx_buffered: s.tx_buffered_data,
+                        rx_rtt: Some(s.rx_average_rtt),
+                        tx_rtt: Some(s.tx_average_rtt),
+                    }
+                }),
+            })
+            .collect()
+    }
+
+    /// Number of active (non-finished) sessions.
+    pub(crate) fn active_session_count(&self) -> usize {
+        self.entries.read().unwrap().values()
+            .filter(|e| !e.finished.load(Ordering::Relaxed))
+            .count()
     }
 
     /// Drive every active session's SRT state machine once. Called by the

@@ -21,12 +21,13 @@
 //! For arbitrary logic (per-stream tokens, rate limits, JWT validation, etc.),
 //! implement [`SessionPolicy`] directly on your own type.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use subtle::ConstantTimeEq;
 
 /// Extract a percent-decoded query parameter value from a `key=value&...`
 /// query string. Returns `None` if the key is absent.
-pub(crate) fn parse_query_param(query: &str, key: &str) -> Option<String> {
+pub fn parse_query_param(query: &str, key: &str) -> Option<String> {
     for kv in query.split('&') {
         let mut parts = kv.splitn(2, '=');
         if parts.next() == Some(key) {
@@ -54,8 +55,19 @@ pub struct SessionRequest<'a> {
     pub origin: Option<&'a str>,
     /// Authority (HTTP/3 `:authority` pseudo-header; comparable to Host).
     pub authority: &'a str,
+    /// User-Agent header value if the client sent one.
+    pub user_agent: Option<&'a str>,
+    /// All HTTP/3 request headers as a string map.
+    pub headers: &'a HashMap<String, String>,
     /// Remote peer socket address.
     pub remote_address: SocketAddr,
+}
+
+impl<'a> SessionRequest<'a> {
+    /// Extract a percent-decoded query parameter value. Returns `None` if absent.
+    pub fn query_param(&self, key: &str) -> Option<String> {
+        parse_query_param(self.query, key)
+    }
 }
 
 /// Decision returned by [`SessionPolicy::decide`].
@@ -72,16 +84,18 @@ pub enum Decision {
 ///
 /// Implementations must be `Send + Sync + 'static` because the gateway holds
 /// the policy behind an `Arc` and consults it from the accept loop.
+#[async_trait::async_trait]
 pub trait SessionPolicy: Send + Sync + 'static {
     /// Inspect `req` and return [`Decision::Accept`] or [`Decision::Reject`].
-    fn decide(&self, req: &SessionRequest) -> Decision;
+    async fn decide(&self, req: &SessionRequest) -> Decision;
 }
 
 // Allow `Arc<dyn SessionPolicy>` (and `Arc<T: SessionPolicy>`) to satisfy
 // `SessionPolicy` so type-erased policies can be chained at runtime.
+#[async_trait::async_trait]
 impl<T: SessionPolicy + ?Sized> SessionPolicy for std::sync::Arc<T> {
-    fn decide(&self, req: &SessionRequest) -> Decision {
-        (**self).decide(req)
+    async fn decide(&self, req: &SessionRequest) -> Decision {
+        (**self).decide(req).await
     }
 }
 
@@ -96,8 +110,9 @@ pub struct PathPolicy {
     expected: String,
 }
 
+#[async_trait::async_trait]
 impl SessionPolicy for PathPolicy {
-    fn decide(&self, req: &SessionRequest) -> Decision {
+    async fn decide(&self, req: &SessionRequest) -> Decision {
         if req.path == self.expected {
             Decision::Accept
         } else {
@@ -117,8 +132,9 @@ pub struct OriginAllowlistPolicy {
     allowed: Vec<String>,
 }
 
+#[async_trait::async_trait]
 impl SessionPolicy for OriginAllowlistPolicy {
-    fn decide(&self, req: &SessionRequest) -> Decision {
+    async fn decide(&self, req: &SessionRequest) -> Decision {
         match req.origin {
             Some(o) if self.allowed.iter().any(|a| a == o) => Decision::Accept,
             _ => Decision::Reject,
@@ -138,8 +154,9 @@ pub struct AuthTokenPolicy {
     expected: String,
 }
 
+#[async_trait::async_trait]
 impl SessionPolicy for AuthTokenPolicy {
-    fn decide(&self, req: &SessionRequest) -> Decision {
+    async fn decide(&self, req: &SessionRequest) -> Decision {
         let token_valid = match parse_query_param(req.query, "token") {
             Some(t) => {
                 let matched: bool = t.as_bytes().ct_eq(self.expected.as_bytes()).into();
@@ -167,10 +184,11 @@ pub struct Chain<A, B> {
     pub second: B,
 }
 
+#[async_trait::async_trait]
 impl<A: SessionPolicy, B: SessionPolicy> SessionPolicy for Chain<A, B> {
-    fn decide(&self, req: &SessionRequest) -> Decision {
-        match self.first.decide(req) {
-            Decision::Accept => self.second.decide(req),
+    async fn decide(&self, req: &SessionRequest) -> Decision {
+        match self.first.decide(req).await {
+            Decision::Accept => self.second.decide(req).await,
             Decision::Reject => Decision::Reject,
         }
     }
@@ -187,8 +205,9 @@ pub fn chain<A: SessionPolicy, B: SessionPolicy>(a: A, b: B) -> impl SessionPoli
 /// Always-accept policy. Useful as a default or for testing.
 pub struct AcceptAll;
 
+#[async_trait::async_trait]
 impl SessionPolicy for AcceptAll {
-    fn decide(&self, _req: &SessionRequest) -> Decision {
+    async fn decide(&self, _req: &SessionRequest) -> Decision {
         Decision::Accept
     }
 }
@@ -198,136 +217,158 @@ mod tests {
     use super::*;
 
     fn req<'a>(path: &'a str, query: &'a str, origin: Option<&'a str>) -> SessionRequest<'a> {
+        static EMPTY_HEADERS: std::sync::LazyLock<HashMap<String, String>> =
+            std::sync::LazyLock::new(HashMap::new);
         SessionRequest {
             path,
             query,
             origin,
             authority: "localhost:4433",
+            user_agent: None,
+            headers: &*EMPTY_HEADERS,
             remote_address: "127.0.0.1:0".parse().unwrap(),
         }
     }
 
     // PathPolicy
-    #[test]
-    fn path_policy_matches_exact_path() {
+    #[tokio::test]
+    async fn path_policy_matches_exact_path() {
         let p = path_policy("/wt".into());
-        assert_eq!(p.decide(&req("/wt", "", None)), Decision::Accept);
+        assert_eq!(p.decide(&req("/wt", "", None)).await, Decision::Accept);
     }
 
-    #[test]
-    fn path_policy_rejects_different_path() {
+    #[tokio::test]
+    async fn path_policy_rejects_different_path() {
         let p = path_policy("/wt".into());
-        assert_eq!(p.decide(&req("/other", "", None)), Decision::Reject);
+        assert_eq!(p.decide(&req("/other", "", None)).await, Decision::Reject);
     }
 
-    #[test]
-    fn path_policy_does_not_match_query_string() {
+    #[tokio::test]
+    async fn path_policy_does_not_match_query_string() {
         let p = path_policy("/wt".into());
         // path is /wt; query is stream=foo — must still match
-        assert_eq!(p.decide(&req("/wt", "stream=foo", None)), Decision::Accept);
-    }
-
-    // OriginAllowlistPolicy
-    #[test]
-    fn origin_allowlist_matches_allowed_origin() {
-        let p = origin_allowlist_policy(vec!["https://example.com".into()]);
         assert_eq!(
-            p.decide(&req("/wt", "", Some("https://example.com"))),
+            p.decide(&req("/wt", "stream=foo", None)).await,
             Decision::Accept
         );
     }
 
-    #[test]
-    fn origin_allowlist_rejects_unlisted_origin() {
+    // OriginAllowlistPolicy
+    #[tokio::test]
+    async fn origin_allowlist_matches_allowed_origin() {
         let p = origin_allowlist_policy(vec!["https://example.com".into()]);
         assert_eq!(
-            p.decide(&req("/wt", "", Some("https://evil.test"))),
+            p.decide(&req("/wt", "", Some("https://example.com"))).await,
+            Decision::Accept
+        );
+    }
+
+    #[tokio::test]
+    async fn origin_allowlist_rejects_unlisted_origin() {
+        let p = origin_allowlist_policy(vec!["https://example.com".into()]);
+        assert_eq!(
+            p.decide(&req("/wt", "", Some("https://evil.test"))).await,
             Decision::Reject
         );
     }
 
-    #[test]
-    fn origin_allowlist_rejects_missing_origin() {
+    #[tokio::test]
+    async fn origin_allowlist_rejects_missing_origin() {
         let p = origin_allowlist_policy(vec!["https://example.com".into()]);
-        assert_eq!(p.decide(&req("/wt", "", None)), Decision::Reject);
+        assert_eq!(p.decide(&req("/wt", "", None)).await, Decision::Reject);
     }
 
-    #[test]
-    fn origin_allowlist_empty_list_rejects_everything() {
+    #[tokio::test]
+    async fn origin_allowlist_empty_list_rejects_everything() {
         let p = origin_allowlist_policy(vec![]);
         assert_eq!(
-            p.decide(&req("/wt", "", Some("https://example.com"))),
+            p.decide(&req("/wt", "", Some("https://example.com"))).await,
             Decision::Reject
         );
     }
 
     // AuthTokenPolicy
-    #[test]
-    fn auth_token_accepts_correct_token() {
+    #[tokio::test]
+    async fn auth_token_accepts_correct_token() {
         let p = auth_token_policy("s3cret".into());
         assert_eq!(
-            p.decide(&req("/wt", "token=s3cret", None)),
+            p.decide(&req("/wt", "token=s3cret", None)).await,
             Decision::Accept
         );
     }
 
-    #[test]
-    fn auth_token_accepts_with_other_params() {
+    #[tokio::test]
+    async fn auth_token_accepts_with_other_params() {
         let p = auth_token_policy("s3cret".into());
         assert_eq!(
-            p.decide(&req("/wt", "stream=foo&token=s3cret&other=bar", None)),
+            p.decide(&req("/wt", "stream=foo&token=s3cret&other=bar", None)).await,
             Decision::Accept
         );
     }
 
-    #[test]
-    fn auth_token_rejects_wrong_token() {
+    #[tokio::test]
+    async fn auth_token_rejects_wrong_token() {
         let p = auth_token_policy("s3cret".into());
-        assert_eq!(p.decide(&req("/wt", "token=wrong", None)), Decision::Reject);
+        assert_eq!(
+            p.decide(&req("/wt", "token=wrong", None)).await,
+            Decision::Reject
+        );
     }
 
-    #[test]
-    fn auth_token_rejects_missing_token() {
+    #[tokio::test]
+    async fn auth_token_rejects_missing_token() {
         let p = auth_token_policy("s3cret".into());
-        assert_eq!(p.decide(&req("/wt", "stream=foo", None)), Decision::Reject);
+        assert_eq!(
+            p.decide(&req("/wt", "stream=foo", None)).await,
+            Decision::Reject
+        );
     }
 
-    #[test]
-    fn auth_token_rejects_empty_query() {
+    #[tokio::test]
+    async fn auth_token_rejects_empty_query() {
         let p = auth_token_policy("s3cret".into());
-        assert_eq!(p.decide(&req("/wt", "", None)), Decision::Reject);
+        assert_eq!(p.decide(&req("/wt", "", None)).await, Decision::Reject);
     }
 
-    #[test]
-    fn auth_token_percent_decodes_value() {
+    #[tokio::test]
+    async fn auth_token_percent_decodes_value() {
         let p = auth_token_policy("s3cret pass".into());
         assert_eq!(
-            p.decide(&req("/wt", "token=s3cret%20pass", None)),
+            p.decide(&req("/wt", "token=s3cret%20pass", None)).await,
             Decision::Accept
         );
     }
 
     // Chain
-    #[test]
-    fn chain_accepts_when_both_accept() {
+    #[tokio::test]
+    async fn chain_accepts_when_both_accept() {
         let p = chain(path_policy("/wt".into()), auth_token_policy("t".into()));
-        assert_eq!(p.decide(&req("/wt", "token=t", None)), Decision::Accept);
+        assert_eq!(
+            p.decide(&req("/wt", "token=t", None)).await,
+            Decision::Accept
+        );
     }
 
-    #[test]
-    fn chain_rejects_when_first_rejects() {
+    #[tokio::test]
+    async fn chain_rejects_when_first_rejects() {
         let p = chain(path_policy("/wt".into()), auth_token_policy("t".into()));
-        assert_eq!(p.decide(&req("/other", "token=t", None)), Decision::Reject);
+        assert_eq!(
+            p.decide(&req("/other", "token=t", None)).await,
+            Decision::Reject
+        );
     }
 
-    #[test]
-    fn chain_rejects_when_second_rejects() {
+    #[tokio::test]
+    async fn chain_rejects_when_second_rejects() {
         let p = chain(path_policy("/wt".into()), auth_token_policy("t".into()));
-        assert_eq!(p.decide(&req("/wt", "token=wrong", None)), Decision::Reject);
+        assert_eq!(
+            p.decide(&req("/wt", "token=wrong", None)).await,
+            Decision::Reject
+        );
     }
 
-    #[test]
-    fn chain_short_circuits_on_first_reject() {
+    #[tokio::test]
+    async fn chain_short_circuits_on_first_reject() {
         // Triple-chain to verify associativity.
         let p = chain(
             path_policy("/wt".into()),
@@ -338,27 +379,33 @@ mod tests {
         );
         // Wrong path → reject without checking origin/token.
         assert_eq!(
-            p.decide(&req("/other", "token=t", Some("https://x.test"))),
+            p.decide(&req("/other", "token=t", Some("https://x.test"))).await,
             Decision::Reject
         );
     }
 
     // AcceptAll
-    #[test]
-    fn accept_all_always_accepts() {
+    #[tokio::test]
+    async fn accept_all_always_accepts() {
         let p = AcceptAll;
-        assert_eq!(p.decide(&req("/anything", "", None)), Decision::Accept);
+        assert_eq!(
+            p.decide(&req("/anything", "", None)).await,
+            Decision::Accept
+        );
     }
 
     // Arc<dyn SessionPolicy> blanket impl
-    #[test]
-    fn arc_dyn_policy_satisfies_trait() {
+    #[tokio::test]
+    async fn arc_dyn_policy_satisfies_trait() {
         // Verify Arc<dyn SessionPolicy> can be wrapped in another policy.
         let inner: std::sync::Arc<dyn SessionPolicy> =
             std::sync::Arc::new(path_policy("/wt".into()));
         let outer = chain(inner, AcceptAll);
-        assert_eq!(outer.decide(&req("/wt", "", None)), Decision::Accept);
-        assert_eq!(outer.decide(&req("/other", "", None)), Decision::Reject);
+        assert_eq!(outer.decide(&req("/wt", "", None)).await, Decision::Accept);
+        assert_eq!(
+            outer.decide(&req("/other", "", None)).await,
+            Decision::Reject
+        );
     }
 
     // parse_query_param

@@ -129,6 +129,8 @@ impl BrowserSession {
         sim_seed: u64,
         config: SrtConfig,
         publish_tx: Option<tokio::sync::mpsc::Sender<TsMessage>>,
+        guard: Option<crate::limits::SessionGuard>,
+        stream_name: String,
     ) -> (Arc<SessionEntry>, JoinHandle<()>) {
         let session_id = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
         let peer = conn.remote_address();
@@ -162,6 +164,9 @@ impl BrowserSession {
             messages_pushed: AtomicU64::new(0),
             viewer_lag_count: AtomicU64::new(0),
             last_srt_stats: StdMutex::new(None),
+            guard,
+            peer,
+            stream_name,
         });
 
         let entry_for_task = entry.clone();

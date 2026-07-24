@@ -5,6 +5,7 @@
 //! (either immediately or deferred via `source_handle`).
 
 use crate::ingest::{Ingester, TsMessage};
+use crate::limits::{ConnectionTracker, GatewayLimits};
 use crate::registry::SessionRegistry;
 use crate::session::BrowserSession;
 use crate::srt_sender::SrtConfig;
@@ -31,12 +32,14 @@ const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
 /// then call [`Gateway::run`] to start the accept loop.
 pub struct Gateway {
     streams: Arc<StreamRegistry>,
+    sessions: Arc<SessionRegistry>,
     bind_addr: SocketAddr,
     identity: Identity,
     policy: Arc<dyn crate::hooks::SessionPolicy>,
     srt_config: SrtConfig,
     sim_loss: u8,
     sim_seed: u64,
+    limits: GatewayLimits,
 }
 
 /// Builder for [`Gateway`].
@@ -52,6 +55,7 @@ pub struct GatewayBuilder {
     session_policy: Option<Arc<dyn crate::hooks::SessionPolicy>>,
     sim_loss: u8,
     sim_seed: u64,
+    limits: GatewayLimits,
 }
 
 /// Handle for setting the source ingester on a [`Gateway`].
@@ -78,6 +82,32 @@ pub struct GatewayStats {
     pub broadcast_capacity: usize,
     /// Per-stream snapshot, sorted by name.
     pub per_stream: Vec<StreamStats>,
+    /// Number of active sessions.
+    pub active_sessions: usize,
+    /// Per-session snapshot, sorted by session_id.
+    pub per_session: Vec<SessionStats>,
+}
+
+/// Snapshot of SRT-level statistics for one session.
+#[derive(Debug, Clone)]
+pub struct SrtStatsSnapshot {
+    pub tx_data: u64,
+    pub tx_retransmit: u64,
+    pub tx_loss: u64,
+    pub tx_buffered: u64,
+    pub rx_rtt: Option<std::time::Duration>,
+    pub tx_rtt: Option<std::time::Duration>,
+}
+
+/// Snapshot of one session's state for health/stats reporting.
+#[derive(Debug, Clone)]
+pub struct SessionStats {
+    pub session_id: u64,
+    pub peer: std::net::SocketAddr,
+    pub stream_name: String,
+    pub messages_pushed: u64,
+    pub viewer_lag_count: u64,
+    pub srt: Option<SrtStatsSnapshot>,
 }
 
 /// Handle for reading gateway stats after [`Gateway::run`] has consumed the gateway.
@@ -87,6 +117,7 @@ pub struct GatewayStats {
 /// health/metrics HTTP server spawned by the embedding application).
 pub struct GatewayStatsHandle {
     streams: Arc<StreamRegistry>,
+    sessions: Arc<SessionRegistry>,
 }
 
 impl GatewayStatsHandle {
@@ -100,6 +131,8 @@ impl GatewayStatsHandle {
             max_viewers: self.streams.max_viewers(),
             broadcast_capacity: self.streams.broadcast_capacity(),
             per_stream: self.streams.snapshot_streams(),
+            active_sessions: self.sessions.active_session_count(),
+            per_session: self.sessions.snapshot_sessions(),
         }
     }
 }
@@ -119,6 +152,7 @@ impl Gateway {
             session_policy: None,
             sim_loss: 0,
             sim_seed: 0,
+            limits: GatewayLimits::default(),
         }
     }
 
@@ -139,6 +173,7 @@ impl Gateway {
     pub fn stats_handle(&self) -> GatewayStatsHandle {
         GatewayStatsHandle {
             streams: self.streams.clone(),
+            sessions: self.sessions.clone(),
         }
     }
 
@@ -147,7 +182,7 @@ impl Gateway {
         let config = ServerConfig::builder()
             .with_bind_address(self.bind_addr)
             .with_identity(self.identity)
-            .max_idle_timeout(Some(Duration::from_secs(10)))
+            .max_idle_timeout(Some(self.limits.max_idle_timeout))
             .map_err(|e| anyhow::anyhow!("invalid idle timeout: {e}"))?
             .build();
 
@@ -158,11 +193,15 @@ impl Gateway {
             "WebTransport server listening"
         );
 
+        // Per-IP + global session cap tracker. Guards are RAII; stored in
+        // each SessionEntry and released on session exit.
+        let tracker = Arc::new(ConnectionTracker::new(self.limits.clone()));
+
         let mut session_handles: Vec<(Arc<Notify>, tokio::task::JoinHandle<()>)> = Vec::new();
 
         // Centralized session registry + ticker. ONE ticker task drives all
         // sessions' SRT state machines (~2ms cadence).
-        let registry = Arc::new(SessionRegistry::new());
+        let registry = self.sessions.clone();
         let ticker_shutdown = Arc::new(Notify::new());
         let ticker_registry = registry.clone();
         let ticker_streams = self.streams.clone();
@@ -212,9 +251,11 @@ impl Gateway {
                         query,
                         origin: origin_header,
                         authority: session_request.authority(),
+                        user_agent: session_request.user_agent(),
+                        headers: session_request.headers(),
                         remote_address: session_request.remote_address(),
                     };
-                    match self.policy.decide(&session_req) {
+                    match self.policy.decide(&session_req).await {
                         crate::hooks::Decision::Accept => {}
                         crate::hooks::Decision::Reject => {
                             tracing::info!(
@@ -226,6 +267,22 @@ impl Gateway {
                             continue;
                         }
                     }
+
+                    // Connection limit check (per-IP + global).
+                    let peer_ip = session_req.remote_address.ip();
+                    let guard = match tracker.try_acquire(peer_ip) {
+                        Some(g) => g,
+                        None => {
+                            tracing::warn!(
+                                ip = %peer_ip,
+                                total = tracker.total(),
+                                per_ip = tracker.per_ip(&peer_ip),
+                                "session rejected: connection limit exceeded"
+                            );
+                            session_request.not_found().await;
+                            continue;
+                        }
+                    };
 
                     // Parse stream routing from query params.
                     //   ?stream=<name> or ?subscribe=<name> → view this stream
@@ -247,10 +304,17 @@ impl Gateway {
                         continue;
                     }
 
-                    let connection = match session_request.accept().await {
-                        Ok(c) => c,
-                        Err(e) => {
+                    let connection = match tokio::time::timeout(
+                        self.limits.handshake_timeout,
+                        session_request.accept(),
+                    ).await {
+                        Ok(Ok(c)) => c,
+                        Ok(Err(e)) => {
                             tracing::warn!(?e, "accept failed");
+                            continue;
+                        }
+                        Err(_) => {
+                            tracing::warn!("handshake timed out after {:?}", self.limits.handshake_timeout);
                             continue;
                         }
                     };
@@ -316,6 +380,8 @@ impl Gateway {
                         connection, viewer,
                         self.sim_loss, self.sim_seed, self.srt_config.clone(),
                         publish_tx,
+                        Some(guard),
+                        stream_name.clone(),
                     ).await;
                     let session_shutdown = entry.shutdown.clone();
                     registry.insert(entry);
@@ -410,17 +476,17 @@ impl GatewayBuilder {
     }
 
     pub fn max_viewers(mut self, n: usize) -> Self {
-        self.max_viewers = n.max(1);
+        self.max_viewers = n;
         self
     }
 
     pub fn broadcast_capacity(mut self, n: usize) -> Self {
-        self.broadcast_capacity = n.max(1);
+        self.broadcast_capacity = n;
         self
     }
 
     pub fn latency_ms(mut self, ms: u64) -> Self {
-        let dur = std::time::Duration::from_millis(ms.max(10));
+        let dur = std::time::Duration::from_millis(ms);
         self.srt_config.send_latency = dur;
         self.srt_config.recv_latency = dur;
         self
@@ -489,11 +555,59 @@ impl GatewayBuilder {
         self
     }
 
+    /// Set gateway-level resource limits (session caps, timeouts).
+    pub fn limits(mut self, limits: GatewayLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Max concurrent sessions from one IP. `None` disables the per-IP limit.
+    pub fn max_sessions_per_ip(mut self, n: impl Into<Option<usize>>) -> Self {
+        self.limits.max_sessions_per_ip = n.into();
+        self
+    }
+
+    /// Max total concurrent sessions. `None` disables the global limit.
+    pub fn max_sessions(mut self, n: impl Into<Option<usize>>) -> Self {
+        self.limits.max_sessions = n.into();
+        self
+    }
+
+    /// WebTransport idle timeout.
+    pub fn max_idle_timeout(mut self, d: std::time::Duration) -> Self {
+        self.limits.max_idle_timeout = d;
+        self
+    }
+
+    /// Max time to complete the WebTransport handshake.
+    pub fn handshake_timeout(mut self, d: std::time::Duration) -> Self {
+        self.limits.handshake_timeout = d;
+        self
+    }
+
     /// Build the gateway. Returns error if identity was not set.
     pub fn build(self) -> Result<Gateway> {
         let identity = self
             .identity
             .ok_or_else(|| anyhow::anyhow!("identity must be set"))?;
+
+        // Validate configuration values.
+        if self.max_viewers < 1 {
+            anyhow::bail!("max_viewers must be >= 1, got {}", self.max_viewers);
+        }
+        if self.broadcast_capacity < 1 {
+            anyhow::bail!(
+                "broadcast_capacity must be >= 1, got {}",
+                self.broadcast_capacity
+            );
+        }
+        self.srt_config.validate()?;
+        if let Some(ref token) = self.auth_token {
+            if token.is_empty() {
+                anyhow::bail!("auth_token must not be empty string");
+            }
+        }
+
         let streams = Arc::new(StreamRegistry::new(
             self.max_viewers,
             self.broadcast_capacity,
@@ -530,12 +644,14 @@ impl GatewayBuilder {
 
         Ok(Gateway {
             streams,
+            sessions: Arc::new(SessionRegistry::new()),
             bind_addr: self.bind_addr,
             identity,
             policy,
             srt_config: self.srt_config,
             sim_loss: self.sim_loss,
             sim_seed: self.sim_seed,
+            limits: self.limits,
         })
     }
 }
@@ -562,30 +678,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builder_max_viewers_clamps_to_1() {
-        let builder = Gateway::builder()
+    fn builder_max_viewers_zero_rejected() {
+        let result = Gateway::builder()
             .max_viewers(0)
-            .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
-        let gateway = builder.build().unwrap();
-        assert_eq!(gateway.streams.max_viewers(), 1);
+            .identity(Identity::self_signed(&["localhost".to_string()]).unwrap())
+            .build();
+        assert!(result.is_err());
     }
 
     #[test]
-    fn builder_broadcast_capacity_clamps_to_1() {
-        let builder = Gateway::builder()
+    fn builder_broadcast_capacity_zero_rejected() {
+        let result = Gateway::builder()
             .broadcast_capacity(0)
-            .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
-        let gateway = builder.build().unwrap();
-        assert_eq!(gateway.streams.broadcast_capacity(), 1);
+            .identity(Identity::self_signed(&["localhost".to_string()]).unwrap())
+            .build();
+        assert!(result.is_err());
     }
 
     #[test]
-    fn builder_latency_clamps_to_10() {
-        let builder = Gateway::builder()
+    fn builder_latency_zero_rejected() {
+        let result = Gateway::builder()
             .latency_ms(0)
-            .identity(Identity::self_signed(&["localhost".to_string()]).unwrap());
-        let gateway = builder.build().unwrap();
-        assert!(gateway.srt_config.send_latency.as_millis() >= 10);
+            .identity(Identity::self_signed(&["localhost".to_string()]).unwrap())
+            .build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn builder_empty_auth_token_rejected() {
+        let result = Gateway::builder()
+            .auth_token("")
+            .identity(Identity::self_signed(&["localhost".to_string()]).unwrap())
+            .build();
+        assert!(result.is_err());
     }
 
     #[test]
