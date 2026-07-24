@@ -20,13 +20,18 @@
       h1 { font-size: 1.1rem; }
       h2 { font-size: 0.95rem; color: #999; margin: 12px 0 4px; text-transform: uppercase; letter-spacing: 0.5px; }
       video, canvas { background: #000; display: block; }
-      #preview {
-        max-width: 100%;
-        max-height: calc(100vh - 100px);
-        width: auto;
-        height: auto;
+      .video-pair {
+        display: flex; gap: 10px; align-items: flex-start;
       }
-      #preview:fullscreen {
+      .video-slot {
+        flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
+      }
+      .video-slot h2 { margin: 0 0 4px; }
+      .video-slot video, .video-slot canvas {
+        width: 100%; max-height: calc(100vh - 140px); object-fit: contain;
+        background: #000; display: block;
+      }
+      #preview:fullscreen, #playback-canvas:fullscreen {
         width: 100vw; height: 100vh; object-fit: contain; background: #000;
       }
       .ok { color: #6f6; }
@@ -38,6 +43,12 @@
       }
       button:hover { background: #333; }
       button:disabled { opacity: 0.5; cursor: default; }
+      #share-btn:not(:disabled), #publish-btn:not(:disabled) {
+        background: #1b5e20; color: #b9f6ca; border-color: #2e7d32;
+      }
+      #share-btn:not(:disabled):hover, #publish-btn:not(:disabled):hover {
+        background: #2e7d32;
+      }
       .controls { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
       .controls label { display: flex; align-items: center; gap: 4px; }
       a { color: #6cf; }
@@ -109,26 +120,39 @@
   </head>
   <body>
     <div>
-      <video id="preview" width="640" height="360" muted playsinline></video>
-      <div class="controls">
-        <button id="share-btn">Share Screen</button>
-        <button id="publish-btn" disabled>Start Publishing</button>
-        <button id="stop-btn" disabled>Stop</button>
-        <button id="fullscreen-btn">fullscreen</button>
-        <button id="debug-toggle">debug</button>
+    <div class="video-pair">
+      <div class="video-slot">
+        <h2>Capture</h2>
+        <video id="preview" width="640" height="360" muted playsinline></video>
+        <div class="controls">
+          <button id="share-btn">Share Screen</button>
+          <button id="publish-btn" disabled>Start Publishing</button>
+          <button id="stop-btn" disabled>Stop</button>
+          <button id="debug-toggle">debug</button>
+        </div>
+        <div class="controls">
+          <label>stream: <input type="text" id="stream-name" size="10" /></label>
+          <label>latency: <input type="number" id="latency-num" min="20" max="8000" step="10" value="120" />ms</label>
+          <label>codec: <select id="codec-select"><option value="auto">auto</option></select></label>
+          <label>bitrate: <input type="number" id="bitrate-num" min="0.5" max="50" step="0.5" value="4" />Mbps</label>
+          <label>framerate: <select id="framerate-select"><option>30</option><option>60</option></select></label>
+          <label>audio: <select id="audio-source"><option value="">(none)</option></select></label>
+        </div>
       </div>
-      <div class="controls">
-        <label>stream: <input type="text" id="stream-name" value="default" size="10" /></label>
-        <label>latency: <input type="number" id="latency-num" min="20" max="8000" step="10" value="120" />ms</label>
-        <label>codec: <select id="codec-select"><option value="auto">auto</option></select></label>
-        <label>bitrate: <input type="number" id="bitrate-num" min="0.5" max="50" step="0.5" value="4" />Mbps</label>
-        <label>framerate: <select id="framerate-select"><option>30</option><option>60</option></select></label>
-        <label>audio: <select id="audio-source"><option value="">(none)</option></select></label>
+      <div class="video-slot">
+        <h2>Stream Back</h2>
+        <canvas id="playback-canvas" width="640" height="360"></canvas>
+        <div class="controls">
+          <button id="playback-toggle">play</button>
+          <button id="playback-mute" disabled>muted</button>
+          <label>latency: <input type="number" id="playback-latency" min="20" max="8000" step="10" value="120" />ms</label>
+        </div>
       </div>
-
-      <a id="viewer-link" href="/index.html" style="display:none; margin-top:8px;">watch stream &rarr;</a>
-      <div class="pub-stats" id="pub-stats-text"></div>
     </div>
+    <div class="controls" style="margin-top: 10px;">
+      <a id="viewer-link" href="/index.html" target="_blank" style="display:none;"></a>
+    </div>
+    <div class="pub-stats" id="pub-stats-text"></div>
     <div id="debug-root"></div>
     <script src="/cert-hash.js"></script>
     <script type="module" src="/src/stream.tsx"></script>

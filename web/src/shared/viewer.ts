@@ -49,6 +49,8 @@ export interface ViewerConfig {
   baseReconnectDelayMs?: number;
   /** Max reconnect backoff (ms). Defaults to 30000. */
   maxReconnectDelayMs?: number;
+  /** Stream name resolver. When provided, overrides the URL `?stream=` param. */
+  getStreamName?(): string;
 }
 
 export interface ViewerHandle {
@@ -78,6 +80,7 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
     ui,
     baseReconnectDelayMs = 2000,
     maxReconnectDelayMs = 30000,
+    getStreamName,
   } = config;
 
   // --- closure state (was module-level `let` in the entrypoints) ---
@@ -282,7 +285,7 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
     const urlParams = new URLSearchParams(location.search);
     const wtPort = urlParams.get('port') || '4433';
     const authToken = urlParams.get('token');
-    const streamName = urlParams.get('stream') || 'default';
+    const streamName = getStreamName?.() ?? (urlParams.get('stream') || 'default');
     const qp = new URLSearchParams({ stream: streamName });
     if (authToken) qp.set('token', authToken);
     const wtUrl = `https://${wtHost}:${wtPort}/wt?${qp}`;

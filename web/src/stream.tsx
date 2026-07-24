@@ -2,6 +2,7 @@ import { render } from 'preact';
 import { DebugStore } from './debug/store';
 import { DebugPanel } from './debug/components/Panel';
 import { attachConsoleErrorCapture } from './debug/sampler';
+import { createViewer, type ConnectionState } from './shared/viewer';
 import type { PublishCmd, PublishMsg, EncodeStats } from './stream-worker';
 import type { StatsMsg } from './worker';
 
@@ -16,10 +17,13 @@ const latencyNum = document.getElementById('latency-num') as HTMLInputElement;
 const codecSelect = document.getElementById('codec-select') as HTMLSelectElement;
 const bitrateNum = document.getElementById('bitrate-num') as HTMLInputElement;
 const framerateSelect = document.getElementById('framerate-select') as HTMLSelectElement;
-const fullscreenBtn = document.getElementById('fullscreen-btn') as HTMLButtonElement;
 const pubStatsText = document.getElementById('pub-stats-text') as HTMLDivElement;
 const viewerLink = document.getElementById('viewer-link') as HTMLAnchorElement;
 const audioSourceSelect = document.getElementById('audio-source') as HTMLSelectElement;
+const playbackCanvas = document.getElementById('playback-canvas') as HTMLCanvasElement;
+const playbackMuteBtn = document.getElementById('playback-mute') as HTMLButtonElement;
+const playbackToggleBtn = document.getElementById('playback-toggle') as HTMLButtonElement;
+const playbackLatencyNum = document.getElementById('playback-latency') as HTMLInputElement;
 
 const debugRoot = document.getElementById('debug-root') as HTMLDivElement;
 
@@ -76,6 +80,28 @@ let consoleCleanup: (() => void) | null = null;
 function log(msg: string, cls = '') { store.pushLog(msg, cls); }
 function setStatus(s: string) { store.status.value = s; }
 
+// ─── Stream-back viewer (round-trip from gateway) ─────────────────
+
+const pbViewer = createViewer({
+  canvas: playbackCanvas,
+  latencyInput: playbackLatencyNum,
+  muteBtn: playbackMuteBtn,
+  baseReconnectDelayMs: 1000,
+  getStreamName: () => streamNameInput.value || 'default',
+  ui: {
+    log: (msg, cls) => store.pushLog(`[playback] ${msg}`, cls),
+    setStatus: (s) => store.pushLog(`[playback] ${s}`, 'info'),
+    onStateChange: (s: ConnectionState) => {
+      playbackToggleBtn.textContent = s === 'idle' ? 'play' : 'stop';
+      if (s === 'connected') playbackMuteBtn.disabled = false;
+      else { playbackMuteBtn.disabled = true; playbackMuteBtn.textContent = 'muted'; }
+    },
+    onFirstFrame: (w, h) => store.pushLog(`[playback] first frame ${w}x${h}`, 'ok'),
+    onVideoConfigured: (info) => store.pushLog(`[playback] decoder profile ${info.profile} level ${info.level}`, 'info'),
+    onAudioReady: () => store.pushLog('[playback] audio ready', 'info'),
+  },
+});
+
 function setPanelVisible(visible: boolean) {
   store.panelVisible.value = visible;
   debugRoot.classList.toggle('visible', visible);
@@ -101,6 +127,19 @@ let captureStream: MediaStream | null = null;
 let publishing = false;
 let credits = 0;
 let rafId: number | null = null;
+let bgWorker: Worker | null = null;
+
+const TIMER_WORKER_SRC = `
+let id = null;
+onmessage = (e) => {
+  if (typeof e.data === 'number') {
+    if (id) clearInterval(id);
+    id = setInterval(() => postMessage('tick'), e.data);
+  } else if (e.data === 'stop') {
+    if (id) { clearInterval(id); id = null; }
+  }
+};
+`;
 let detectedCodec: string | null = null;
 let detectedCodecLabel = '';
 
@@ -338,30 +377,51 @@ shareBtn.addEventListener('click', async () => {
 
 function startFramePump() {
   credits = 4;
-  const pump = () => {
-    if (!publishing || !worker) return;
-    if (credits > 0 && previewEl.readyState >= 2) {
-      const frame = new VideoFrame(previewEl);
-      if (frame.format === null) {
-        frame.close();
-      } else {
-        credits--;
-        const cmd: PublishCmd = { cmd: 'frame', frame };
-        worker.postMessage(cmd, [frame]);
-      }
+  pumpFrame();
+}
+
+function pumpFrame() {
+  if (!publishing || !worker) return;
+  if (credits > 0 && previewEl.readyState >= 2) {
+    const frame = new VideoFrame(previewEl);
+    if (frame.format === null) {
+      frame.close();
+    } else {
+      credits--;
+      const cmd: PublishCmd = { cmd: 'frame', frame };
+      worker.postMessage(cmd, [frame]);
     }
+  }
+  schedulePump();
+}
+
+function schedulePump() {
+  if (!publishing) return;
+  if (document.hidden) {
+    if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+    if (bgWorker === null) {
+      bgWorker = new Worker(URL.createObjectURL(new Blob([TIMER_WORKER_SRC], { type: 'application/javascript' })));
+      bgWorker.onmessage = () => pumpFrame();
+      bgWorker.postMessage(1000 / +framerateSelect.value);
+    }
+  } else {
+    if (bgWorker !== null) { bgWorker.terminate(); bgWorker = null; }
+    if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
     rafId = 'requestVideoFrameCallback' in previewEl
       ? (previewEl as unknown as { requestVideoFrameCallback: (cb: FrameRequestCallback) => number })
-        .requestVideoFrameCallback(pump as FrameRequestCallback)
-      : requestAnimationFrame(pump);
-  };
-  pump();
+        .requestVideoFrameCallback(pumpFrame as FrameRequestCallback)
+      : requestAnimationFrame(pumpFrame);
+  }
 }
 
 function stopFramePump() {
   if (rafId !== null) {
     cancelAnimationFrame(rafId);
     rafId = null;
+  }
+  if (bgWorker !== null) {
+    bgWorker.terminate();
+    bgWorker = null;
   }
 }
 
@@ -376,7 +436,9 @@ publishBtn.addEventListener('click', async () => {
   stopBtn.disabled = false;
   viewerLink.style.display = '';
   const sn = streamNameInput.value || 'default';
-  viewerLink.href = `/?stream=${encodeURIComponent(sn)}`;
+  const viewerUrl = `${location.origin}/?stream=${encodeURIComponent(sn)}`;
+  viewerLink.href = viewerUrl;
+  viewerLink.textContent = viewerUrl;
   setStatus('starting\u2026');
 
   // Determine codec
@@ -450,6 +512,7 @@ stopBtn.addEventListener('click', () => stopAll());
 function stopAll() {
   publishing = false;
   stopFramePump();
+  pbViewer.disconnect();
   viewerLink.style.display = 'none';
   if (worker) {
     worker.postMessage({ cmd: 'stop' } as PublishCmd);
@@ -491,6 +554,10 @@ function handleWorkerMsg(msg: PublishMsg) {
       log('SRT handshake complete', 'ok');
       setStatus('LIVE');
       startFramePump();
+      if (!pbViewer.isActive()) {
+        store.pushLog('[playback] auto-connecting stream-back…', 'info');
+        pbViewer.connect();
+      }
       break;
     case 'close':
       log('SRT closed', 'err');
@@ -538,16 +605,32 @@ function hexToBytes(hex: string): Uint8Array {
 
 // ─── Misc handlers ────────────────────────────────────────────────
 
-fullscreenBtn.addEventListener('click', () => {
-  if (document.fullscreenElement) document.exitFullscreen();
-  else previewEl.requestFullscreen();
-});
-
 document.getElementById('debug-toggle')?.addEventListener('click', () => {
   setPanelVisible(!store.panelVisible.value);
 });
 
+document.addEventListener('visibilitychange', () => {
+  if (publishing) schedulePump();
+});
+
+playbackToggleBtn.addEventListener('click', () => {
+  if (pbViewer.isActive()) pbViewer.disconnect();
+  else pbViewer.connect();
+});
+
 // ─── Init ─────────────────────────────────────────────────────────
+
+// Persistent stream key: load from localStorage or generate a random 8-char one.
+const STREAM_KEY_KEY = 'websrt-stream-name';
+const savedName = localStorage.getItem(STREAM_KEY_KEY);
+streamNameInput.value = savedName ?? Array.from(
+  { length: 8 },
+  () => Math.floor(Math.random() * 36).toString(36),
+).join('');
+localStorage.setItem(STREAM_KEY_KEY, streamNameInput.value);
+streamNameInput.addEventListener('change', () => {
+  localStorage.setItem(STREAM_KEY_KEY, streamNameInput.value);
+});
 
 populateCodecSelect();
 enumerateMics();
