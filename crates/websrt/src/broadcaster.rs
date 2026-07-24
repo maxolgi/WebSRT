@@ -9,6 +9,7 @@ use anyhow::Result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
+use tokio::sync::Notify;
 
 /// One viewer's subscription. Holds a `broadcast::Receiver`. Each browser
 /// session owns one of these and polls it for messages to feed into its
@@ -34,12 +35,25 @@ pub struct Broadcaster {
     messages_sent: AtomicU64,
     /// Number of offered messages that had no active receiver (dropped).
     send_failures: AtomicU64,
+    /// Shutdown signal. `notify_one()` on this causes the background task's
+    /// `select!` to fire and the task to exit cleanly.
+    shutdown: Arc<Notify>,
 }
 
 impl Broadcaster {
     /// Spawn the broadcaster. `capacity` is the broadcast ring-buffer depth;
     /// larger values absorb viewer-side latency spikes but cost memory.
-    pub fn spawn<I>(mut ingester: I, max_viewers: usize, capacity: usize) -> Arc<Self>
+    ///
+    /// `shutdown` is a `Notify` the caller retains a clone of; calling
+    /// `notify_one()` on it (or [`Broadcaster::shutdown`]) causes the
+    /// background task to exit promptly, even if the ingester is stuck in an
+    /// infinite reconnect loop.
+    pub fn spawn<I>(
+        mut ingester: I,
+        max_viewers: usize,
+        capacity: usize,
+        shutdown: Arc<Notify>,
+    ) -> Arc<Self>
     where
         I: Ingester + Send + 'static,
     {
@@ -52,31 +66,42 @@ impl Broadcaster {
             alive,
             messages_sent: AtomicU64::new(0),
             send_failures: AtomicU64::new(0),
+            shutdown: shutdown.clone(),
         });
         let bc_clone = broadcaster.clone();
         let tx2 = tx.clone();
+        let shutdown_notify = shutdown.clone();
         tokio::spawn(async move {
             let mut sent = 0u64;
             loop {
-                match ingester.next_message().await {
-                    Ok(Some(msg)) => {
-                        sent += 1;
-                        bc_clone.messages_sent.fetch_add(1, Ordering::Relaxed);
-                        if tx2.send(msg).is_err() {
-                            bc_clone.send_failures.fetch_add(1, Ordering::Relaxed);
-                            tracing::debug!(
-                                rx_count = tx2.receiver_count(),
-                                "broadcast send failed (no active receivers)"
-                            );
-                        }
-                    }
-                    Ok(None) => {
-                        tracing::info!("ingester source ended; broadcaster shutting down");
+                tokio::select! {
+                    biased;
+                    _ = shutdown_notify.notified() => {
+                        tracing::info!("broadcaster shutdown signal received");
                         break;
                     }
-                    Err(e) => {
-                        tracing::warn!(?e, "ingester error");
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    msg = ingester.next_message() => {
+                        match msg {
+                            Ok(Some(msg)) => {
+                                sent += 1;
+                                bc_clone.messages_sent.fetch_add(1, Ordering::Relaxed);
+                                if tx2.send(msg).is_err() {
+                                    bc_clone.send_failures.fetch_add(1, Ordering::Relaxed);
+                                    tracing::debug!(
+                                        rx_count = tx2.receiver_count(),
+                                        "broadcast send failed (no active receivers)"
+                                    );
+                                }
+                            }
+                            Ok(None) => {
+                                tracing::info!("ingester source ended; broadcaster shutting down");
+                                break;
+                            }
+                            Err(e) => {
+                                tracing::warn!(?e, "ingester error");
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            }
+                        }
                     }
                 }
             }
@@ -89,6 +114,12 @@ impl Broadcaster {
             tracing::info!(sent, "broadcaster task exited");
         });
         broadcaster
+    }
+
+    /// Signal the background task to shut down. Returns immediately; the task
+    /// sets `alive = false` and exits on its next `select!` poll.
+    pub fn shutdown(&self) {
+        self.shutdown.notify_one();
     }
 
     /// Subscribe a new viewer. Returns `None` if the session cap is reached

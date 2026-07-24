@@ -398,6 +398,12 @@ impl Gateway {
         ticker_shutdown.notify_one();
         let _ = tokio::time::timeout(Duration::from_secs(2), ticker_handle).await;
 
+        // Signal all broadcasters to shut down so ingesters stuck in reconnect
+        // loops (e.g. `SrtIngester`) exit and release bound resources before
+        // sessions are torn down. Dead broadcasters are reaped by the next
+        // `cleanup()`.
+        self.streams.shutdown_all();
+
         // Graceful drain: signal each session's shutdown Notify, wait up to
         // 3s for it to exit on its own, then fall back to abort.
         let handles = std::mem::take(&mut session_handles);
@@ -602,6 +608,7 @@ impl GatewayBuilder {
             );
         }
         self.srt_config.validate()?;
+        self.limits.validate()?;
         if let Some(ref token) = self.auth_token {
             if token.is_empty() {
                 anyhow::bail!("auth_token must not be empty string");

@@ -12,6 +12,7 @@ use crate::ingest::{ChannelIngester, Ingester, TsMessage};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+use tokio::sync::Notify;
 
 /// Snapshot of one stream's state for health/stats reporting.
 #[derive(Debug, Clone)]
@@ -52,7 +53,13 @@ impl StreamRegistry {
     pub fn publish(&self, name: &str) -> mpsc::Sender<TsMessage> {
         let (tx, rx) = mpsc::channel(self.broadcast_capacity);
         let ingester = ChannelIngester::new(rx);
-        let broadcaster = Broadcaster::spawn(ingester, self.max_viewers, self.broadcast_capacity);
+        let shutdown = Arc::new(Notify::new());
+        let broadcaster = Broadcaster::spawn(
+            ingester,
+            self.max_viewers,
+            self.broadcast_capacity,
+            shutdown,
+        );
         self.streams
             .lock()
             .unwrap()
@@ -68,7 +75,13 @@ impl StreamRegistry {
     where
         I: Ingester + Send + 'static,
     {
-        let broadcaster = Broadcaster::spawn(ingester, self.max_viewers, self.broadcast_capacity);
+        let shutdown = Arc::new(Notify::new());
+        let broadcaster = Broadcaster::spawn(
+            ingester,
+            self.max_viewers,
+            self.broadcast_capacity,
+            shutdown,
+        );
         self.streams
             .lock()
             .unwrap()
@@ -128,6 +141,21 @@ impl StreamRegistry {
     pub fn cleanup(&self) {
         let mut streams = self.streams.lock().unwrap();
         streams.retain(|_, b| b.is_alive());
+    }
+
+    /// Signal every broadcaster to shut down. Called by [`crate::gateway::Gateway`]
+    /// during drain so ingesters stuck in reconnect loops (e.g. `SrtIngester`)
+    /// exit promptly and release their bound resources. The broadcasters set
+    /// `alive = false` on exit and are reaped by the next [`StreamRegistry::cleanup`].
+    pub fn shutdown_all(&self) {
+        let streams = self.streams.lock().unwrap();
+        let count = streams.len();
+        for bc in streams.values() {
+            bc.shutdown();
+        }
+        if count > 0 {
+            tracing::info!(count, "signaled all broadcasters to shut down");
+        }
     }
 
     /// Total number of registered streams (alive or dead).

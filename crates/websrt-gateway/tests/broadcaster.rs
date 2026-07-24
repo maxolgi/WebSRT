@@ -11,7 +11,9 @@
 //! waiting for the task to exit.
 
 use bytes::Bytes;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 use websrt::ingest::Ingester;
 use websrt::Broadcaster;
 
@@ -81,7 +83,7 @@ async fn wait_until_dead(broadcaster: &Broadcaster, timeout: Duration) -> bool {
 async fn basic_fanout_delivers_all_messages() {
     let n = 4;
     let msgs: Vec<_> = (0..n).map(|_| ts_packet()).collect();
-    let bc = Broadcaster::spawn(MockIngester::new(msgs), 1, 16);
+    let bc = Broadcaster::spawn(MockIngester::new(msgs), 1, 16, Arc::new(Notify::new()));
 
     // Subscribe synchronously before awaiting so the broadcaster task hasn't
     // dropped early messages for lack of a receiver (current-thread runtime).
@@ -110,7 +112,12 @@ async fn basic_fanout_delivers_all_messages() {
 async fn viewer_cap_rejects_excess_subscribers() {
     // Use a never-ending ingester so the broadcaster stays alive for the
     // duration of the test (otherwise the empty stream trips end-of-stream).
-    let bc = Broadcaster::spawn(MockIngester::new(vec![]).block_forever(), 2, 16);
+    let bc = Broadcaster::spawn(
+        MockIngester::new(vec![]).block_forever(),
+        2,
+        16,
+        Arc::new(Notify::new()),
+    );
 
     let v1 = bc.subscribe();
     let v2 = bc.subscribe();
@@ -128,7 +135,7 @@ async fn viewer_cap_rejects_excess_subscribers() {
 /// flips to false and further `subscribe()` calls return `None`.
 #[tokio::test]
 async fn dead_broadcaster_rejects_subscriptions() {
-    let bc = Broadcaster::spawn(MockIngester::new(vec![]), 1, 16);
+    let bc = Broadcaster::spawn(MockIngester::new(vec![]), 1, 16, Arc::new(Notify::new()));
 
     assert!(
         wait_until_dead(&bc, Duration::from_secs(2)).await,
@@ -149,7 +156,7 @@ async fn slow_viewer_reports_lagged() {
     let capacity = 2;
     let pushed = 5;
     let msgs: Vec<_> = (0..pushed).map(|_| ts_packet()).collect();
-    let bc = Broadcaster::spawn(MockIngester::new(msgs), 1, capacity);
+    let bc = Broadcaster::spawn(MockIngester::new(msgs), 1, capacity, Arc::new(Notify::new()));
 
     // Subscribe before the broadcaster task runs so the receiver's read
     // pointer starts at position 0 and every subsequent send overwrites it.
@@ -171,4 +178,26 @@ async fn slow_viewer_reports_lagged() {
         (pushed - capacity) as u64,
         "lag should equal (pushed - capacity)"
     );
+}
+
+/// 5. Shutdown signal: a broadcaster whose ingester blocks forever (mimicking
+/// `SrtIngester`'s reconnect loop) exits promptly when `shutdown()` is called.
+#[tokio::test]
+async fn shutdown_signal_kills_broadcaster() {
+    let bc = Broadcaster::spawn(
+        MockIngester::new(vec![]).block_forever(),
+        1,
+        16,
+        Arc::new(Notify::new()),
+    );
+
+    assert!(bc.is_alive(), "broadcaster should be alive before shutdown");
+
+    bc.shutdown();
+
+    assert!(
+        wait_until_dead(&bc, Duration::from_secs(2)).await,
+        "broadcaster should exit within 2s of shutdown signal"
+    );
+    assert!(!bc.is_alive(), "is_alive should be false after shutdown");
 }
