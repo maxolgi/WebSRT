@@ -10,8 +10,9 @@
 //!   normal PKI validation.
 //!
 //! Mode C (`CertSource::PemBytes`):
-//!   Load PEM cert/key from in-memory byte slices (e.g. from a secret manager).
-//!   Browser uses normal PKI validation.
+//!   Parse PEM cert/key from in-memory byte slices (e.g. from a secret manager)
+//!   directly into a WebTransport `Identity` — no temp files, no disk I/O.
+//!   Browser uses normal PKI validation. Private key must be PKCS#8.
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -23,6 +24,10 @@ pub enum CertSource {
     /// Loaded from PEM files on disk.
     Mkcert { cert: PathBuf, key: PathBuf },
     /// Loaded from PEM-encoded byte slices (e.g. from a secret manager).
+    ///
+    /// Parsed entirely in memory; never touches disk. The private key must be
+    /// PKCS#8 (`-----BEGIN PRIVATE KEY-----`); PKCS#1 RSA and SEC1 EC keys are
+    /// rejected — re-export with `openssl pkcs8 -topk8 -nocrypt`.
     PemBytes { cert: Vec<u8>, key: Vec<u8> },
 }
 
@@ -38,7 +43,7 @@ impl Cert {
         match src {
             CertSource::SelfSigned { sans } => Self::build_self_signed(sans),
             CertSource::Mkcert { cert, key } => Self::build_mkcert(cert, key).await,
-            CertSource::PemBytes { cert, key } => Self::build_pem_bytes(cert, key).await,
+            CertSource::PemBytes { cert, key } => Self::build_pem_bytes(cert, key),
         }
     }
 
@@ -72,59 +77,96 @@ impl Cert {
         })
     }
 
-    async fn build_pem_bytes(cert: Vec<u8>, key: Vec<u8>) -> Result<Self> {
-        // wtransport 0.7.1 exposes no in-memory PEM loader: `Identity::load_pemfiles`
-        // accepts only filesystem paths. Round-trip the caller's PEM bytes through
-        // restrictively-permissioned temp files and let wtransport parse them, so
-        // every PEM key format (PKCS#8 / PKCS#1 / SEC1) is supported without adding
-        // a new dependency. Temp files are removed on every path (success or error).
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
+    fn build_pem_bytes(cert: Vec<u8>, key: Vec<u8>) -> Result<Self> {
+        use rustls_pki_types::pem::PemObject;
+        use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+        use wtransport::tls::{Certificate, CertificateChain, PrivateKey};
 
-        let token = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir();
-        let cert_path = dir.join(format!("websrt-pembytes-{}-{token}.crt", std::process::id()));
-        let key_path = dir.join(format!("websrt-pembytes-{}-{token}.key", std::process::id()));
-
-        let loaded = async {
-            Self::write_secret_file(&cert_path, &cert)
-                .await
-                .context("write temp cert pem")?;
-            Self::write_secret_file(&key_path, &key)
-                .await
-                .context("write temp key pem")?;
-            Identity::load_pemfiles(&cert_path, &key_path)
-                .await
-                .context("load pem bytes")
+        let chain: Vec<Certificate> = CertificateDer::pem_slice_iter(&cert)
+            .map(|der| {
+                let der = der.context("parse cert pem")?;
+                Certificate::from_der(der.to_vec()).context("build certificate from der")
+            })
+            .collect::<Result<_, _>>()
+            .context("build certificate chain from pem")?;
+        if chain.is_empty() {
+            anyhow::bail!("no CERTIFICATE sections found in cert PEM");
         }
-        .await;
 
-        // Best-effort cleanup regardless of outcome.
-        let _ = tokio::fs::remove_file(&cert_path).await;
-        let _ = tokio::fs::remove_file(&key_path).await;
+        // wtransport's `PrivateKey` only accepts PKCS#8 DER; PKCS#1 (RSA) and
+        // SEC1 (EC) keys are rejected with an actionable message.
+        let key_der = PrivateKeyDer::from_pem_slice(&key).context("parse key pem")?;
+        let private_key = match key_der {
+            PrivateKeyDer::Pkcs8(pkcs8) => {
+                PrivateKey::from_der_pkcs8(pkcs8.secret_pkcs8_der().to_vec())
+            }
+            _ => anyhow::bail!(
+                "PemBytes private key must be PKCS#8 ('PRIVATE KEY'); \
+                 PKCS#1 RSA and SEC1 EC keys are not supported. \
+                 Re-export with: openssl pkcs8 -topk8 -nocrypt -in current.key -out pkcs8.key"
+            ),
+        };
 
+        let identity = Identity::new(CertificateChain::new(chain), private_key);
         Ok(Self {
-            identity: loaded?,
+            identity,
             der_sha256: None,
         })
     }
+}
 
-    /// Writes `data` to `path` with `0600` permissions on Unix (private).
-    #[cfg(unix)]
-    async fn write_secret_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
-        use tokio::io::AsyncWriteExt;
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-            .await?;
-        file.write_all(data).await
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pem_bytes_round_trips_self_signed() {
+        // Self-signed identities use PKCS#8 keys internally (rcgen serialize_der),
+        // so their PEM is directly usable by PemBytes.
+        let src = Identity::self_signed(["localhost"]).unwrap();
+        let cert_pem = src.certificate_chain().as_slice()[0].to_pem().into_bytes();
+        let key_pem = src.private_key().to_secret_pem().into_bytes();
+
+        let cert = Cert::build(CertSource::PemBytes {
+            cert: cert_pem,
+            key: key_pem,
+        })
+        .await
+        .expect("in-memory PEM parse should succeed");
+
+        // Leaf DER must round-trip byte-for-byte.
+        let parsed_leaf = &cert.identity.certificate_chain().as_slice()[0];
+        assert_eq!(parsed_leaf.der(), src.certificate_chain().as_slice()[0].der());
     }
 
-    #[cfg(not(unix))]
-    async fn write_secret_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-        tokio::fs::write(path, data).await
+    #[tokio::test]
+    async fn pem_bytes_rejects_empty_cert() {
+        let err = Cert::build(CertSource::PemBytes {
+            cert: b"-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n".to_vec(),
+            key: b"-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----\n".to_vec(),
+        })
+        .await;
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn pem_bytes_rejects_non_pkcs8_key() {
+        // SEC1 EC private-key section. Empty body decodes to empty DER
+        // (rustls-pki-types), so parsing succeeds and we hit the kind-match arm.
+        let ec_pem = b"-----BEGIN EC PRIVATE KEY-----\n-----END EC PRIVATE KEY-----\n";
+        let src = Identity::self_signed(["localhost"]).unwrap();
+        let cert_pem = src.certificate_chain().as_slice()[0].to_pem().into_bytes();
+
+        let err = Cert::build(CertSource::PemBytes {
+            cert: cert_pem,
+            key: ec_pem.to_vec(),
+        })
+        .await
+        .err()
+        .expect("non-PKCS#8 key should be rejected");
+        assert!(
+            err.to_string().contains("PKCS#8"),
+            "error should mention PKCS#8: {err}"
+        );
     }
 }

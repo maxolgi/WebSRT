@@ -26,6 +26,7 @@ futures.workspace = true
 rand = { workspace = true, optional = true }
 percent-encoding.workspace = true
 parking_lot.workspace = true
+rustls-pki-types = "1"
 
 [dev-dependencies]
 proptest = "1"
