@@ -20,7 +20,8 @@ use crate::registry::SessionEntry;
 use crate::srt_sender::{SenderAction, SrtConfig, SrtInitiator};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
+use parking_lot::Mutex as StdMutex;
 use std::time::Instant;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
@@ -171,10 +172,10 @@ impl BrowserSession {
 
         let entry_for_task = entry.clone();
         let handle = tokio::spawn(async move {
+            let _guard = FinishedGuard {
+                entry: entry_for_task.clone(),
+            };
             Self::recv_pump(entry_for_task.clone()).await;
-            // Defensive: ensure finished is set on every exit path so the
-            // ticker reclaims the entry on its next sweep.
-            entry_for_task.finished.store(true, Ordering::Relaxed);
         });
         (entry, handle)
     }
@@ -237,6 +238,16 @@ impl BrowserSession {
         entry.conn.close(0u32.into(), b"close");
         entry.finished.store(true, Ordering::Relaxed);
         entry.shutdown.notify_waiters();
+    }
+}
+
+struct FinishedGuard {
+    entry: Arc<SessionEntry>,
+}
+
+impl Drop for FinishedGuard {
+    fn drop(&mut self) {
+        self.entry.finished.store(true, Ordering::Relaxed);
     }
 }
 

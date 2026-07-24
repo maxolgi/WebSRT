@@ -4,13 +4,14 @@
 //! viewers. Sources publish by feeding an [`Ingester`] (or an
 //! [`mpsc::Sender<TsMessage>`]) into the registry; viewers subscribe by name.
 //!
-//! All map operations use a `std::sync::Mutex` because the critical sections
+//! All map operations use a `parking_lot::Mutex` because the critical sections
 //! are tiny (HashMap insert/lookup) and never held across an `.await`.
 
 use crate::broadcaster::{Broadcaster, ViewerRx};
 use crate::ingest::{ChannelIngester, Ingester, TsMessage};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
@@ -62,7 +63,6 @@ impl StreamRegistry {
         );
         self.streams
             .lock()
-            .unwrap()
             .insert(name.to_string(), broadcaster);
         tx
     }
@@ -84,39 +84,38 @@ impl StreamRegistry {
         );
         self.streams
             .lock()
-            .unwrap()
             .insert(name.to_string(), broadcaster);
     }
 
     /// Subscribe to a stream by name. Returns `None` if the stream doesn't
     /// exist, is dead (source ended), or the per-stream viewer cap is reached.
     pub fn subscribe(&self, name: &str) -> Option<ViewerRx> {
-        let streams = self.streams.lock().unwrap();
+        let streams = self.streams.lock();
         streams.get(name).and_then(|b| b.subscribe())
     }
 
     /// Check if a stream exists and is alive.
     pub fn is_alive(&self, name: &str) -> bool {
-        let streams = self.streams.lock().unwrap();
+        let streams = self.streams.lock();
         streams.get(name).map(|b| b.is_alive()).unwrap_or(false)
     }
 
     /// Get viewer count for a single stream.
     pub fn viewer_count(&self, name: &str) -> usize {
-        let streams = self.streams.lock().unwrap();
+        let streams = self.streams.lock();
         streams.get(name).map(|b| b.viewer_count()).unwrap_or(0)
     }
 
     /// Sum of viewer counts across all streams (for health reporting).
     pub fn total_viewers(&self) -> usize {
-        let streams = self.streams.lock().unwrap();
+        let streams = self.streams.lock();
         streams.values().map(|b| b.viewer_count()).sum()
     }
 
     /// Snapshot all streams' state, sorted by name for stable output.
     /// Used by [`crate::gateway::GatewayStatsHandle`] for health/stats reporting.
     pub fn snapshot_streams(&self) -> Vec<StreamStats> {
-        let streams = self.streams.lock().unwrap();
+        let streams = self.streams.lock();
         let mut entries: Vec<StreamStats> = streams
             .iter()
             .map(|(name, bc)| StreamStats {
@@ -133,13 +132,13 @@ impl StreamRegistry {
 
     /// Number of streams whose source is still alive.
     pub fn alive_stream_count(&self) -> usize {
-        let streams = self.streams.lock().unwrap();
+        let streams = self.streams.lock();
         streams.values().filter(|b| b.is_alive()).count()
     }
 
     /// Remove dead streams. Called periodically or on lookup.
     pub fn cleanup(&self) {
-        let mut streams = self.streams.lock().unwrap();
+        let mut streams = self.streams.lock();
         streams.retain(|_, b| b.is_alive());
     }
 
@@ -148,7 +147,7 @@ impl StreamRegistry {
     /// exit promptly and release their bound resources. The broadcasters set
     /// `alive = false` on exit and are reaped by the next [`StreamRegistry::cleanup`].
     pub fn shutdown_all(&self) {
-        let streams = self.streams.lock().unwrap();
+        let streams = self.streams.lock();
         let count = streams.len();
         for bc in streams.values() {
             bc.shutdown();
@@ -160,7 +159,7 @@ impl StreamRegistry {
 
     /// Total number of registered streams (alive or dead).
     pub fn stream_count(&self) -> usize {
-        self.streams.lock().unwrap().len()
+        self.streams.lock().len()
     }
 
     pub fn max_viewers(&self) -> usize {

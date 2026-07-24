@@ -6,10 +6,10 @@
 //! on WT datagram receive.
 //!
 //! Lock strategy:
-//! - `entries` lives behind a `std::sync::RwLock` — insert/remove from the
+//! - `entries` lives behind a `parking_lot::RwLock` — insert/remove from the
 //!   accept loop, snapshot from the ticker. The lock is held only long enough
 //!   to clone the `Arc<SessionEntry>` values; never across `.await`.
-//! - `entry.viewer` uses `std::sync::Mutex` — it's touched only at known sync
+//! - `entry.viewer` uses `parking_lot::Mutex` — it's touched only at known sync
 //!   points inside `tick_all` and never held across `.await`.
 //! - `entry.initiator` and `entry.loss` use `tokio::sync::Mutex` — they're
 //!   shared between the ticker and the recv_pump and may be held across
@@ -23,8 +23,9 @@ use crate::srt_sender::SrtInitiator;
 use srt_protocol::statistics::SocketStatistics;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use parking_lot::{Mutex as StdMutex, RwLock};
 use tokio::sync::{Mutex, Notify};
 use wtransport::Connection;
 
@@ -38,7 +39,7 @@ pub(crate) struct SessionEntry {
     pub conn: Connection,
     pub initiator: Arc<Mutex<SrtInitiator>>,
     pub loss: Arc<Mutex<LossInjector>>,
-    /// Ticker-exclusive; std::sync::Mutex is sufficient because it is never
+    /// Ticker-exclusive; parking_lot::Mutex is sufficient because it is never
     /// held across an `.await` (locked only for `try_recv`). `None` for
     /// publish-only sessions that have no downstream to drain.
     pub viewer: StdMutex<Option<ViewerRx>>,
@@ -84,20 +85,24 @@ impl SessionRegistry {
     /// Returns the session_id.
     pub fn insert(&self, entry: Arc<SessionEntry>) -> u64 {
         let id = entry.session_id;
-        let mut w = self.entries.write().unwrap();
+        let mut w = self.entries.write();
         w.insert(id, entry);
         id
     }
 
     pub(crate) fn remove(&self, session_id: u64) {
-        let mut w = self.entries.write().unwrap();
+        let mut w = self.entries.write();
         w.remove(&session_id);
+    }
+
+    pub(crate) fn clear(&self) {
+        self.entries.write().clear();
     }
 
     /// Snapshot all active session entries. Used by the ticker for iteration
     /// and by the periodic stats logger.
     pub(crate) fn snapshot(&self) -> Vec<Arc<SessionEntry>> {
-        self.entries.read().unwrap().values().cloned().collect()
+        self.entries.read().values().cloned().collect()
     }
 
     /// Snapshot all active sessions' stats for health/metrics reporting.
@@ -112,7 +117,7 @@ impl SessionRegistry {
                 stream_name: e.stream_name.clone(),
                 messages_pushed: e.messages_pushed.load(Ordering::Relaxed),
                 viewer_lag_count: e.viewer_lag_count.load(Ordering::Relaxed),
-                srt: e.last_srt_stats.lock().unwrap().as_ref().map(|s| {
+                srt: e.last_srt_stats.lock().as_ref().map(|s| {
                     crate::gateway::SrtStatsSnapshot {
                         tx_data: s.tx_data,
                         tx_retransmit: s.tx_retransmit_data,
@@ -128,7 +133,7 @@ impl SessionRegistry {
 
     /// Number of active (non-finished) sessions.
     pub(crate) fn active_session_count(&self) -> usize {
-        self.entries.read().unwrap().values()
+        self.entries.read().values()
             .filter(|e| !e.finished.load(Ordering::Relaxed))
             .count()
     }
@@ -141,13 +146,16 @@ impl SessionRegistry {
         let mut to_remove: Vec<u64> = Vec::new();
 
         let should_log_stats = {
-            let mut last = self.last_stats_log.lock().unwrap();
+            let mut last = self.last_stats_log.lock();
             let should = last.map(|t| now.duration_since(t) >= Duration::from_secs(5)).unwrap_or(true);
             if should { *last = Some(now); }
             should
         };
 
-        for entry in &entries {
+        for (idx, entry) in entries.iter().enumerate() {
+            if idx > 0 && idx % 32 == 0 {
+                tokio::task::yield_now().await;
+            }
             if entry.finished.load(Ordering::Relaxed) {
                 to_remove.push(entry.session_id);
                 continue;
@@ -159,7 +167,7 @@ impl SessionRegistry {
                 if init.is_connected() {
                     for _ in 0..MAX_MSGS_PER_TICK {
                         let maybe_msg = {
-                            let mut viewer = entry.viewer.lock().unwrap();
+                            let mut viewer = entry.viewer.lock();
                             viewer.as_mut().map(|v| v.try_recv())
                         };
                         match maybe_msg {
@@ -185,7 +193,7 @@ impl SessionRegistry {
                     }
                 }
                 if let Some(s) = init.stats() {
-                    *entry.last_srt_stats.lock().unwrap() = Some(s.clone());
+                    *entry.last_srt_stats.lock() = Some(s.clone());
                 }
                 (actions, data)
             };
@@ -213,7 +221,7 @@ impl SessionRegistry {
         if should_log_stats {
             for entry in &entries {
                 if entry.finished.load(Ordering::Relaxed) { continue; }
-                let guard = entry.last_srt_stats.lock().unwrap();
+                let guard = entry.last_srt_stats.lock();
                 if let Some(s) = guard.as_ref() {
                     tracing::info!(
                         session_id = entry.session_id,
@@ -233,6 +241,15 @@ impl SessionRegistry {
 
         for id in to_remove {
             self.remove(id);
+        }
+
+        let elapsed = now.elapsed();
+        if elapsed > Duration::from_millis(2) {
+            tracing::warn!(
+                duration_us = elapsed.as_micros() as u64,
+                sessions = entries.len(),
+                "tick_all exceeded 2ms budget"
+            );
         }
     }
 }

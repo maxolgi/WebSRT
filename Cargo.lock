@@ -1929,6 +1929,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
+ "parking_lot",
  "percent-encoding",
  "rand 0.8.7",
  "srt-protocol",

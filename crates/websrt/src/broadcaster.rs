@@ -7,7 +7,8 @@
 use crate::ingest::{Ingester, TsMessage};
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use tokio::sync::broadcast;
 use tokio::sync::Notify;
 
@@ -110,7 +111,7 @@ impl Broadcaster {
             // the broadcast channel closes and every ViewerRx::try_recv()
             // returns Ok(None) instead of hanging until the SRT idle timeout.
             drop(tx2);
-            *bc_clone.tx.lock().unwrap() = None;
+            *bc_clone.tx.lock() = None;
             tracing::info!(sent, "broadcaster task exited");
         });
         broadcaster
@@ -128,7 +129,7 @@ impl Broadcaster {
         if !self.alive.load(Ordering::SeqCst) {
             return None;
         }
-        let guard = self.tx.lock().unwrap();
+        let guard = self.tx.lock();
         let tx = guard.as_ref()?;
         if tx.receiver_count() >= self.max_viewers {
             return None;
@@ -143,7 +144,6 @@ impl Broadcaster {
     pub fn viewer_count(&self) -> usize {
         self.tx
             .lock()
-            .unwrap()
             .as_ref()
             .map(|t| t.receiver_count())
             .unwrap_or(0)
