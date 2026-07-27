@@ -120,9 +120,7 @@ When reviewing, hardening, or auditing code, prioritize by layer:
 
 ## Architecture
 
-Gateway is a **dumb SRT repeater**: terminates OBS's SRT/UDP connection, re-originates TS bytes as a new SRT sender to each browser over WebTransport datagrams. TS bytes are never inspected server-side.
-
-Each browser gets its own independent `SrtInitiator` (independent seq numbers, retransmit buffer). Fanout via `tokio::sync::broadcast` in `broadcaster.rs`.
+Gateway is a **multi-stream SRT repeater**: a single `StreamRegistry` maps stream names to independent `Broadcaster`s, each fanning its stream out to N viewers via `tokio::sync::broadcast`. Routing is query-param based on one fixed `/wt` WebTransport path — viewers select a stream with `?stream=<name>` or `?subscribe=<name>`, browser publishers with `?publish=<name>`, and the SRT/OBS ingester derives the stream name from OBS's `?streamid=`. Each browser session gets its own independent `SrtInitiator` (independent seq numbers, retransmit buffer); a session can simultaneously view one stream and publish another. TS bytes are never modified server-side.
 
 Browser runs the **same** `srt-protocol` + `mpeg2ts` Rust crates compiled to WASM. JS is glue only (WT datagram I/O, WebCodecs, canvas/audio routing).
 
