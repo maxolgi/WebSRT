@@ -4,9 +4,12 @@ pub mod channel;
 pub mod continuity;
 pub mod file;
 pub mod srt;
+pub mod srt_listener;
 
 pub use channel::ChannelIngester;
 pub use continuity::{TsContinuityChecker, TsStatsHandle};
+pub use srt::SrtConnectionIngester;
+pub use srt_listener::SrtListenerService;
 
 use anyhow::Result;
 use async_trait::async_trait;

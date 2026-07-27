@@ -87,6 +87,25 @@ impl StreamRegistry {
             .insert(name.to_string(), broadcaster);
     }
 
+    pub fn try_publish_ingester<I>(&self, name: &str, ingester: I) -> bool
+    where
+        I: Ingester + Send + 'static,
+    {
+        let mut streams = self.streams.lock();
+        if streams.get(name).map(|b| b.is_alive()).unwrap_or(false) {
+            return false;
+        }
+        let shutdown = Arc::new(Notify::new());
+        let broadcaster = Broadcaster::spawn(
+            ingester,
+            self.max_viewers,
+            self.broadcast_capacity,
+            shutdown,
+        );
+        streams.insert(name.to_string(), broadcaster);
+        true
+    }
+
     /// Subscribe to a stream by name. Returns `None` if the stream doesn't
     /// exist, is dead (source ended), or the per-stream viewer cap is reached.
     pub fn subscribe(&self, name: &str) -> Option<ViewerRx> {
@@ -319,5 +338,45 @@ pub(crate) mod tests {
         let _v1 = registry.subscribe("capped").unwrap();
         let _v2 = registry.subscribe("capped").unwrap();
         assert!(registry.subscribe("capped").is_none());
+    }
+
+    #[tokio::test]
+    async fn try_publish_ingester_succeeds_first_time() {
+        let registry = StreamRegistry::new(4, 8);
+        let (_tx, rx) = mpsc::channel(8);
+        let ingester = ChannelIngester::new(rx);
+        assert!(registry.try_publish_ingester("a", ingester));
+        assert!(registry.is_alive("a"));
+        assert_eq!(registry.stream_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn try_publish_ingester_rejects_while_alive() {
+        let registry = StreamRegistry::new(4, 8);
+        let (tx, rx) = mpsc::channel(8);
+        let ingester = ChannelIngester::new(rx);
+        assert!(registry.try_publish_ingester("a", ingester));
+        let (_tx2, rx2) = mpsc::channel(8);
+        let ingester2 = ChannelIngester::new(rx2);
+        assert!(!registry.try_publish_ingester("a", ingester2));
+        assert!(registry.is_alive("a"));
+        assert_eq!(registry.stream_count(), 1);
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn try_publish_ingester_replaces_dead_entry() {
+        let registry = StreamRegistry::new(4, 8);
+        let (tx, rx) = mpsc::channel(8);
+        let ingester = ChannelIngester::new(rx);
+        assert!(registry.try_publish_ingester("a", ingester));
+        drop(tx);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!registry.is_alive("a"));
+        let (_tx2, rx2) = mpsc::channel(8);
+        let ingester2 = ChannelIngester::new(rx2);
+        assert!(registry.try_publish_ingester("a", ingester2));
+        assert!(registry.is_alive("a"));
+        assert_eq!(registry.stream_count(), 1);
     }
 }

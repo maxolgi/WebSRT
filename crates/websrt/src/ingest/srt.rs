@@ -223,3 +223,46 @@ impl Ingester for SrtIngester {
         }
     }
 }
+
+pub struct SrtConnectionIngester {
+    socket: SrtSocket,
+}
+
+impl SrtConnectionIngester {
+    pub fn new(socket: SrtSocket) -> Self {
+        Self { socket }
+    }
+
+    async fn close_socket(&mut self) {
+        match tokio::time::timeout(Duration::from_secs(5), self.socket.close_and_finish()).await {
+            Ok(Ok(())) => tracing::info!("SRT socket closed cleanly"),
+            Ok(Err(e)) => tracing::warn!(?e, "SRT socket close error"),
+            Err(_) => tracing::warn!("SRT socket close timed out after 5s; dropping"),
+        }
+    }
+}
+
+#[async_trait]
+impl Ingester for SrtConnectionIngester {
+    async fn next_message(&mut self) -> Result<Option<TsMessage>> {
+        const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+        match tokio::time::timeout(IDLE_TIMEOUT, self.socket.next()).await {
+            Ok(Some(Ok(msg))) => Ok(Some(msg)),
+            Ok(Some(Err(e))) => {
+                tracing::warn!(?e, "srt recv error; closing socket");
+                self.close_socket().await;
+                Ok(None)
+            }
+            Ok(None) => {
+                tracing::info!("srt socket closed");
+                self.close_socket().await;
+                Ok(None)
+            }
+            Err(_) => {
+                tracing::warn!("srt idle {:?}; closing socket", IDLE_TIMEOUT);
+                self.close_socket().await;
+                Ok(None)
+            }
+        }
+    }
+}

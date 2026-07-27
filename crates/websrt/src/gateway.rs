@@ -678,6 +678,13 @@ impl GatewaySourceHandle {
         self.streams.publish_ingester(name, ingester);
     }
 
+    /// Get a clone of the shared stream registry. Used by callers that need
+    /// direct access to `try_publish_ingester` (e.g. `SrtListenerService` for
+    /// multi-publisher SRT accept loops).
+    pub fn registry(&self) -> Arc<StreamRegistry> {
+        self.streams.clone()
+    }
+
     /// Create a channel-backed stream for browser upstream sessions. Returns
     /// the [`mpsc::Sender`] for pushing TS messages into the stream. The stream
     /// is immediately available for viewers to subscribe under `name`.
