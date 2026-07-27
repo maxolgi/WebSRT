@@ -5,13 +5,14 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::EnvFilter;
 use websrt::cert::{Cert, CertSource};
 use websrt::ingest::file::FileIngester;
 use websrt::ingest::srt::SrtIngester;
-use websrt::ingest::{TsContinuityChecker, TsStatsHandle};
+use websrt::ingest::{SrtListenerService, TsContinuityChecker, TsStatsHandle};
 use websrt::Gateway;
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
@@ -204,7 +205,7 @@ async fn main() -> Result<()> {
     // is moved into the broadcaster pipeline; this handle lets the health
     // endpoint keep reading its live counters. Populated when the ingester is
     // wired (synchronously for --input file, inside the SRT setup task otherwise).
-    let ts_stats: Arc<Mutex<Option<TsStatsHandle>>> = Arc::new(Mutex::new(None));
+    let ts_stats: Arc<Mutex<HashMap<String, TsStatsHandle>>> = Arc::new(Mutex::new(HashMap::new()));
 
     // Spawn the demo health/metrics server. The library no longer owns this;
     // each embedding application is responsible for its own exposition format.
@@ -250,14 +251,25 @@ async fn main() -> Result<()> {
                             })
                             .collect::<Vec<_>>()
                             .join(",");
-                        let ingester_json = match ts_stats.lock().unwrap().as_ref() {
-                            Some(h) => format!(
-                                r#"{{"cc_gaps":{},"cc_checks":{},"messages_seen":{}}}"#,
-                                h.cc_gaps(),
-                                h.cc_checks(),
-                                h.messages_seen(),
-                            ),
-                            None => "null".to_string(),
+                        let ingester_json = {
+                            let stats_map = ts_stats.lock().unwrap();
+                            if stats_map.is_empty() {
+                                "null".to_string()
+                            } else {
+                                let entries: Vec<String> = stats_map
+                                    .iter()
+                                    .map(|(name, h)| {
+                                        format!(
+                                            r#""{}":{{"cc_gaps":{},"cc_checks":{},"messages_seen":{}}}"#,
+                                            json_escape(name),
+                                            h.cc_gaps(),
+                                            h.cc_checks(),
+                                            h.messages_seen(),
+                                        )
+                                    })
+                                    .collect();
+                                format!("{{{}}}", entries.join(","))
+                            }
                         };
                         let json = format!(
                             r#"{{"status":"{}","streams":{},"alive_streams":{},"viewers":{},"max_viewers":{},"per_stream":[{}],"ingester":{}}}"#,
@@ -296,7 +308,7 @@ async fn main() -> Result<()> {
             })?;
             tracing::info!(fixture = ?cli.fixture, "file ingester ready");
             let checker = TsContinuityChecker::new(ingester);
-            *ts_stats.lock().unwrap() = Some(checker.stats_handle());
+            ts_stats.lock().unwrap().insert("default".to_string(), checker.stats_handle());
             gateway.source_handle().publish_stream("default", checker);
         }
         InputMode::Srt => {
@@ -308,18 +320,41 @@ async fn main() -> Result<()> {
             let latency_ms = cli.latency;
             let ts_stats = ts_stats.clone();
             tokio::spawn(async move {
-                let result = match srt_mode {
+                match srt_mode {
                     SrtMode::Listener => {
-                        tracing::info!(port = srt_port, "binding SRT listener for OBS");
-                        SrtIngester::bind_with_latency(
+                        tracing::info!(port = srt_port, "binding SRT multi-publisher listener");
+                        let listener = match SrtListenerService::bind(
                             format!("0.0.0.0:{srt_port}"),
-                            streamid,
                             std::time::Duration::from_millis(latency_ms),
                         )
                         .await
+                        {
+                            Ok(l) => l,
+                            Err(e) => {
+                                tracing::error!(?e, "SRT listener bind failed");
+                                return;
+                            }
+                        };
+                        let registry = source.registry();
+                        let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+                        tracing::info!("SRT multi-publisher listener ready, awaiting OBS connections");
+                        listener
+                            .serve(
+                                registry,
+                                shutdown,
+                                move |name, conn| {
+                                    let checker = TsContinuityChecker::new(conn);
+                                    ts_stats
+                                        .lock()
+                                        .unwrap()
+                                        .insert(name.to_string(), checker.stats_handle());
+                                    checker
+                                },
+                            )
+                            .await;
                     }
                     SrtMode::Caller => {
-                        match call_addr {
+                        let result = match call_addr {
                             Some(addr) => {
                                 tracing::info!(%addr, "SRT caller mode: dialing OBS");
                                 SrtIngester::call_with_latency(
@@ -329,27 +364,34 @@ async fn main() -> Result<()> {
                                 )
                                 .await
                             }
-                            None => Err(anyhow::anyhow!("--srt-call <addr> required when --srt-mode caller")),
+                            None => Err(anyhow::anyhow!(
+                                "--srt-call <addr> required when --srt-mode caller"
+                            )),
+                        };
+                        match result {
+                            Ok(ingester) => {
+                                let stream_name = ingester
+                                    .accepted_stream_id()
+                                    .map(|s| {
+                                        tracing::info!(
+                                            stream = %s,
+                                            "publishing SRT stream under OBS streamid"
+                                        );
+                                        s.to_string()
+                                    })
+                                    .unwrap_or_else(|| "default".to_string());
+                                tracing::info!("OBS connected; starting broadcaster");
+                                let checker = TsContinuityChecker::new(ingester);
+                                ts_stats
+                                    .lock()
+                                    .unwrap()
+                                    .insert(stream_name.clone(), checker.stats_handle());
+                                source.publish_stream(&stream_name, checker);
+                            }
+                            Err(e) => {
+                                tracing::error!(?e, "SRT ingester setup failed");
+                            }
                         }
-                    }
-                };
-                match result {
-                    Ok(ingester) => {
-                        // Route by OBS's ?streamid=... if present, else "default".
-                        let stream_name = ingester
-                            .accepted_stream_id()
-                            .map(|s| {
-                                tracing::info!(stream = %s, "publishing SRT stream under OBS streamid");
-                                s.to_string()
-                            })
-                            .unwrap_or_else(|| "default".to_string());
-                        tracing::info!("OBS connected; starting broadcaster");
-                        let checker = TsContinuityChecker::new(ingester);
-                        *ts_stats.lock().unwrap() = Some(checker.stats_handle());
-                        source.publish_stream(&stream_name, checker);
-                    }
-                    Err(e) => {
-                        tracing::error!(?e, "SRT ingester setup failed");
                     }
                 }
             });
