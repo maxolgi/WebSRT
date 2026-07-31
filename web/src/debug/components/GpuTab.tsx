@@ -53,8 +53,10 @@ export function GpuTab({ store }: Props): JSX.Element {
           <div style={{ color: '#999' }}>Querying WebGL…</div>
         ) : gpu.available && (gpu.vendor || gpu.renderer) ? (
           <table class="debug-table">
-            <tr><td>Vendor</td><td style={{ textAlign: 'right' }}>{gpu.vendor ?? '—'}</td></tr>
-            <tr><td>Renderer</td><td style={{ textAlign: 'right' }}>{gpu.renderer ?? '—'}</td></tr>
+            <tbody>
+              <tr><td>Vendor</td><td style={{ textAlign: 'right' }}>{gpu.vendor ?? '—'}</td></tr>
+              <tr><td>Renderer</td><td style={{ textAlign: 'right' }}>{gpu.renderer ?? '—'}</td></tr>
+            </tbody>
           </table>
         ) : (
           <div class="stat-warn">WebGL debug info blocked by browser</div>
@@ -67,23 +69,25 @@ export function GpuTab({ store }: Props): JSX.Element {
       <div class="debug-section">
         <h3>Canvas / Rendering</h3>
         <table class="debug-table">
-          <tr><td>Frames Presented</td><td>{render?.frameCount ?? 0}</td></tr>
-          <tr><td>Dropped (Late)</td><td>{render?.droppedLate ?? 0}</td></tr>
-          <tr><td>Dropped (Overflow)</td><td>{render?.droppedOverflow ?? 0}</td></tr>
-          <tr>
-            <td>Ring Buffer</td>
-            <td>
-              {render
-                ? `${render.ringLength}/${render.ringCap}${ringPct !== null ? ` (${ringPct}%)` : ''}`
-                : '—'}
-            </td>
-          </tr>
-          <tr>
-            <td>Presentation PTS</td>
-            <td>{render?.currentPtsUs != null ? `${render.currentPtsUs} µs` : 'Not anchored yet'}</td>
-          </tr>
-          <tr><td>rAF Delta</td><td>{render ? `${render.rafDeltaMs.toFixed(1)} ms` : '—'}</td></tr>
-          <tr><td>FPS</td><td>{render?.fps ?? '—'}</td></tr>
+          <tbody>
+            <tr><td>Frames Presented</td><td>{render?.frameCount ?? 0}</td></tr>
+            <tr><td>Dropped (Late)</td><td>{render?.droppedLate ?? 0}</td></tr>
+            <tr><td>Dropped (Overflow)</td><td>{render?.droppedOverflow ?? 0}</td></tr>
+            <tr>
+              <td>Ring Buffer</td>
+              <td>
+                {render
+                  ? `${render.ringLength}/${render.ringCap}${ringPct !== null ? ` (${ringPct}%)` : ''}`
+                  : '—'}
+              </td>
+            </tr>
+            <tr>
+              <td>Presentation PTS</td>
+              <td>{render?.currentPtsUs != null ? `${render.currentPtsUs} µs` : 'Not anchored yet'}</td>
+            </tr>
+            <tr><td>rAF Delta</td><td>{render ? `${render.rafDeltaMs.toFixed(1)} ms` : '—'}</td></tr>
+            <tr><td>FPS</td><td>{render?.fps ?? '—'}</td></tr>
+          </tbody>
         </table>
       </div>
     </>

@@ -26,9 +26,11 @@ export function StreamTab({ store }: Props): JSX.Element {
       <div class="debug-section">
         <h3>Connection</h3>
         <table class="debug-table">
-          <tr><td>status</td><td>{status}</td></tr>
-          <tr><td>latency</td><td>{latency}ms</td></tr>
-          <tr><td>cert mode</td><td>{certMode}</td></tr>
+          <tbody>
+            <tr><td>status</td><td>{status}</td></tr>
+            <tr><td>latency</td><td>{latency}ms</td></tr>
+            <tr><td>cert mode</td><td>{certMode}</td></tr>
+          </tbody>
         </table>
       </div>
 
@@ -74,12 +76,14 @@ function CcErrorCounter({ store }: { store: DebugStore }): JSX.Element {
     <div class="debug-section">
       <h3>Continuity Counter Errors</h3>
       <table class="debug-table">
-        <tr>
-          <td>total</td>
-          <td class={cls} style={{ cursor: 'pointer' }} onClick={() => setBaseline(total)} title="click to reset">
-            {display}
-          </td>
-        </tr>
+        <tbody>
+          <tr>
+            <td>total</td>
+            <td class={cls} style={{ cursor: 'pointer' }} onClick={() => setBaseline(total)} title="click to reset">
+              {display}
+            </td>
+          </tr>
+        </tbody>
       </table>
     </div>
   )
@@ -97,21 +101,23 @@ function SrtStatsTable({ srt, drift }: { srt: StatsMsg; drift: number | null }) 
     <div class="debug-section">
       <h3>SRT Stats</h3>
       <table class="debug-table">
-        <tr><td>uptime</td><td>{elapsed}s</td></tr>
-        <tr><td>RTT</td><td>{srt.rttMs.toFixed(1)}ms</td></tr>
-        <tr><td>bandwidth</td><td>{mbps} Mbps</td></tr>
-        <tr><td>rx packets</td><td>{srt.rxData}</td></tr>
-        <tr><td>rx bytes</td><td>{(srt.rxBytes / 1e6).toFixed(1)} MB</td></tr>
-        <tr><td>loss</td><td class={lossCls}>{srt.rxLoss} ({lossRate}%)</td></tr>
-        <tr><td>retransmit</td><td>{srt.rxRetransmit}</td></tr>
-        <tr><td>dropped</td><td>{srt.rxDropped}</td></tr>
-        <tr><td>belated</td><td>{srt.rxBelated}</td></tr>
-        <tr><td>buffered</td><td>{srt.rxBuffered}</td></tr>
+        <tbody>
+          <tr><td>uptime</td><td>{elapsed}s</td></tr>
+          <tr><td>RTT</td><td>{srt.rttMs.toFixed(1)}ms</td></tr>
+          <tr><td>bandwidth</td><td>{mbps} Mbps</td></tr>
+          <tr><td>rx packets</td><td>{srt.rxData}</td></tr>
+          <tr><td>rx bytes</td><td>{(srt.rxBytes / 1e6).toFixed(1)} MB</td></tr>
+          <tr><td>loss</td><td class={lossCls}>{srt.rxLoss} ({lossRate}%)</td></tr>
+          <tr><td>retransmit</td><td>{srt.rxRetransmit}</td></tr>
+          <tr><td>dropped</td><td>{srt.rxDropped}</td></tr>
+          <tr><td>belated</td><td>{srt.rxBelated}</td></tr>
+          <tr><td>buffered</td><td>{srt.rxBuffered}</td></tr>
           <tr><td>ACK / NAK</td><td>{srt.rxAck} / {srt.rxNak}</td></tr>
           <tr><td>poll max</td><td>{srt.pollMaxMs.toFixed(1)}ms</td></tr>
-        {drift !== null && (
-          <tr><td>A/V drift</td><td>{drift >= 0 ? '+' : ''}{drift.toFixed(0)}ms</td></tr>
-        )}
+          {drift !== null && (
+            <tr><td>A/V drift</td><td>{drift >= 0 ? '+' : ''}{drift.toFixed(0)}ms</td></tr>
+          )}
+        </tbody>
       </table>
     </div>
   )

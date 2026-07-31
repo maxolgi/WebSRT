@@ -61,24 +61,26 @@ export function CodecTab({ store }: Props): JSX.Element {
       <div class="debug-section">
         <h3>Video Decoder</h3>
         <table class="debug-table">
-          <tr><td>Codec</td><td>{video?.codecString ?? 'Not configured'}</td></tr>
-          <tr><td>Profile / Level</td><td>{video ? `${video.profile} / ${video.level}` : '—'}</td></tr>
-          <tr><td>Coded Resolution</td><td>{video ? `${video.codedWidth} × ${video.codedHeight}` : '—'}</td></tr>
-          <tr><td>Decoder State</td><td>{video?.decoderState ?? '—'}</td></tr>
-          <tr><td>Hardware Accel</td><td>{video?.hwAcceleration ?? '—'}</td></tr>
-          <tr><td>Reconfigure Count</td>
-              <td class={(video?.reconfigureCount ?? 0) > 3 ? 'stat-warn' : ''}>
-                {video?.reconfigureCount ?? 0}
-                {(video?.reconfigureCount ?? 0) > 3
-                  ? ' — SPS/SH is bouncing, check encoder'
-                  : ''}
-              </td>
-          </tr>
-          <tr><td>Decode Queue</td><td>{video?.decodeQueueSize ?? 0}</td></tr>
-          <tr><td>Decoded Frames</td><td>{video?.decodedCount ?? 0}</td></tr>
-          <tr><td>Dropped Frames</td><td>{video?.droppedFrames ?? 0}</td></tr>
-          <tr><td>Decode FPS</td><td>{video?.decodeFps?.toFixed(1) ?? '—'}</td></tr>
-          <tr><td>Render FPS</td><td>{render?.fps?.toFixed(1) ?? '—'}</td></tr>
+          <tbody>
+            <tr><td>Codec</td><td>{video?.codecString ?? 'Not configured'}</td></tr>
+            <tr><td>Profile / Level</td><td>{video ? `${video.profile} / ${video.level}` : '—'}</td></tr>
+            <tr><td>Coded Resolution</td><td>{video ? `${video.codedWidth} × ${video.codedHeight}` : '—'}</td></tr>
+            <tr><td>Decoder State</td><td>{video?.decoderState ?? '—'}</td></tr>
+            <tr><td>Hardware Accel</td><td>{video?.hwAcceleration ?? '—'}</td></tr>
+            <tr><td>Reconfigure Count</td>
+                <td class={(video?.reconfigureCount ?? 0) > 3 ? 'stat-warn' : ''}>
+                  {video?.reconfigureCount ?? 0}
+                  {(video?.reconfigureCount ?? 0) > 3
+                    ? ' — SPS/SH is bouncing, check encoder'
+                    : ''}
+                </td>
+            </tr>
+            <tr><td>Decode Queue</td><td>{video?.decodeQueueSize ?? 0}</td></tr>
+            <tr><td>Decoded Frames</td><td>{video?.decodedCount ?? 0}</td></tr>
+            <tr><td>Dropped Frames</td><td>{video?.droppedFrames ?? 0}</td></tr>
+            <tr><td>Decode FPS</td><td>{video?.decodeFps?.toFixed(1) ?? '—'}</td></tr>
+            <tr><td>Render FPS</td><td>{render?.fps?.toFixed(1) ?? '—'}</td></tr>
+          </tbody>
         </table>
       </div>
 
@@ -107,14 +109,16 @@ export function CodecTab({ store }: Props): JSX.Element {
       <div class="debug-section">
         <h3>Audio Decoder</h3>
         <table class="debug-table">
-          <tr><td>Codec</td><td>{audio?.codec ?? 'Not configured'}</td></tr>
-          <tr><td>Sample Rate</td><td>{audio?.sampleRate ? `${audio.sampleRate} Hz` : '—'}</td></tr>
-          <tr><td>Channels</td><td>{audio?.channels ?? '—'}</td></tr>
-          <tr><td>Decoder State</td><td>{audio?.decoderState ?? '—'}</td></tr>
-          <tr><td>Decode Queue</td><td>{audio?.decodeQueueSize ?? 0}</td></tr>
-          <tr><td>Packets Decoded</td><td>{audio?.packetsDecoded ?? 0}</td></tr>
-          <tr><td>Packets Dropped</td><td>{audio?.droppedPackets ?? 0}</td></tr>
-          <tr><td>Output Mode</td><td>{audio?.outputMode ?? '—'}</td></tr>
+          <tbody>
+            <tr><td>Codec</td><td>{audio?.codec ?? 'Not configured'}</td></tr>
+            <tr><td>Sample Rate</td><td>{audio?.sampleRate ? `${audio.sampleRate} Hz` : '—'}</td></tr>
+            <tr><td>Channels</td><td>{audio?.channels ?? '—'}</td></tr>
+            <tr><td>Decoder State</td><td>{audio?.decoderState ?? '—'}</td></tr>
+            <tr><td>Decode Queue</td><td>{audio?.decodeQueueSize ?? 0}</td></tr>
+            <tr><td>Packets Decoded</td><td>{audio?.packetsDecoded ?? 0}</td></tr>
+            <tr><td>Packets Dropped</td><td>{audio?.droppedPackets ?? 0}</td></tr>
+            <tr><td>Output Mode</td><td>{audio?.outputMode ?? '—'}</td></tr>
+          </tbody>
         </table>
       </div>
 
