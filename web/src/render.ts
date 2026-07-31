@@ -63,7 +63,18 @@ export class CanvasRenderer {
 
   draw(frame: VideoFrame) {
     this.lastPtsUs = frame.timestamp;
-    this.updateClock(frame.timestamp);
+    // When the ring is empty, the decoder paused before this frame (B-frame
+    // reorder: WebCodecs holds B-frames until their forward reference
+    // arrives, then emits a burst ~reorder-depth after their presentation
+    // slots). Re-anchor the presentation clock to this frame so the burst's
+    // leading B-frame is treated as on-time rather than dropped as late —
+    // the following frames in the burst still pace by PTS via present().
+    if (this.ring.length === 0) {
+      this.ptsOriginUs = frame.timestamp;
+      this.wallOriginMs = performance.now();
+    } else {
+      this.updateClock(frame.timestamp);
+    }
     this.ring.push(frame);
     while (this.ring.length > CanvasRenderer.RING_CAP) {
       const old = this.ring.shift()!;

@@ -623,10 +623,19 @@ export class VideoPipeline {
   // Pending NALU batches seen between SPS/PPS arrival and decoder.configure().
   // Each batch retains its original PTS so flushed chunks don't get stamped
   // with the wrong timestamp.
-  private pendingNalus: { nalus: NalUnit[]; pts: number | null; isKeyframe: boolean }[] = [];
+  private pendingNalus: { nalus: NalUnit[]; pts: number | null; dts: number | null; isKeyframe: boolean }[] = [];
   // Pending AV1 access units seen between SH capture and decoder.configure().
-  private pendingAv1: { payload: Uint8Array; pts: number | null; isKey: boolean }[] = [];
+  private pendingAv1: { payload: Uint8Array; pts: number | null; dts: number | null; isKey: boolean }[] = [];
   private static readonly PENDING_CAP = 30;
+  // DTS-paced decode: decode within this look-ahead of decode time. ~2-3
+  // frames at typical sources — keeps the renderer ring fed without the
+  // decoder running far ahead on a bursty/backlogged SRT delivery and
+  // overflowing it.
+  private static readonly LOOKAHEAD_US = 100_000;
+  // Reset the DTS↔wall clock mapping on large divergence (seek/restart).
+  private static readonly CLOCK_RESET_US = 1_000_000;
+  // Memory valve for deferred chunks (backgrounded-tab RAF throttling).
+  private static readonly DEFERRED_CAP = 30;
   private configured = false;
   private configuring = false;
   private decodedCount = 0;
@@ -649,6 +658,15 @@ export class VideoPipeline {
   private lastLevel = 0;
   private lastWidth = 0;
   private lastHeight = 0;
+  // DTS-paced decode: wall-clock ↔ DTS mapping, and future-DTS chunks
+  // awaiting their decode slot. Drained by a RAF tick. DTS (not PTS) is used
+  // for the gate so B-frame streams aren't reordered — DTS is monotonic in
+  // the decode/arrival order, so deferring by DTS keeps references ahead of
+  // the frames that need them while still preventing run-ahead.
+  private dtsOriginUs: number | null = null;
+  private wallOriginMs = 0;
+  private deferred: { chunk: EncodedVideoChunk; dtsUs: number | null; isKey: boolean }[] = [];
+  private rafId: number | null = null;
 
   constructor(cb: DecoderCallbacks) {
     this.cb = cb;
@@ -686,11 +704,11 @@ export class VideoPipeline {
   }
 
   /** Feed a PES payload from the demuxer (Annex-B byte stream, or AV1 OBUs). */
-  feed(payload: Uint8Array, pts: number | null, isKeyframe: boolean) {
+  feed(payload: Uint8Array, pts: number | null, isKeyframe: boolean, dts: number | null = null) {
     // AV1 path: low-overhead OBU bitstream, not Annex B. Honor an explicit
     // PMT hint, or a previously-pinned av1 detection.
     if (this.codecHint === 'av1' || this.codec === 'av1') {
-      this.feedAv1(payload, pts, isKeyframe);
+      this.feedAv1(payload, pts, isKeyframe, dts);
       return;
     }
 
@@ -698,23 +716,32 @@ export class VideoPipeline {
 
     // Auto-detect codec on first recognizable NAL.
     if (this.codec === null) {
-      for (const n of nalus) {
-        if (n.hevcType === HEVC_VPS || n.hevcType === HEVC_SPS || n.hevcType === HEVC_PPS) {
-          this.codec = 'hevc';
-          break;
+      // Trust the PMT hint when available — it's authoritative (MPEG-TS
+      // stream_type 0x1b vs 0x24). NAL-byte sniffing is unreliable: an
+      // H.264 P-slice NAL byte 0x41 yields hevcType=32 (HEVC_VPS), a false
+      // positive that locks the pipeline onto HEVC when the viewer joins
+      // mid-stream on a non-keyframe PES (e.g. ffmpeg -ss <offset>).
+      if (this.codecHint === 'h264' || this.codecHint === 'hevc') {
+        this.codec = this.codecHint;
+      } else {
+        for (const n of nalus) {
+          if (n.hevcType === HEVC_VPS || n.hevcType === HEVC_SPS || n.hevcType === HEVC_PPS) {
+            this.codec = 'hevc';
+            break;
+          }
+          if (n.type === NAL_SPS || n.type === NAL_PPS || n.type === NAL_IDR) {
+            this.codec = 'h264';
+            break;
+          }
         }
-        if (n.type === NAL_SPS || n.type === NAL_PPS || n.type === NAL_IDR) {
-          this.codec = 'h264';
-          break;
+        if (this.codec === null) {
+          // No NAL recognized — try AV1 OBU sniff (fallback when no PMT hint).
+          if (looksLikeAv1(payload)) {
+            this.codec = 'av1';
+            this.feedAv1(payload, pts, isKeyframe);
+          }
+          return;
         }
-      }
-      if (this.codec === null) {
-        // No NAL recognized — try AV1 OBU sniff (fallback when no PMT hint).
-        if (looksLikeAv1(payload)) {
-          this.codec = 'av1';
-          this.feedAv1(payload, pts, isKeyframe);
-        }
-        return;
       }
     }
 
@@ -735,7 +762,7 @@ export class VideoPipeline {
     if (!this.configured) {
       const ready = isHevc ? (this.vps && this.sps && this.pps) : (this.sps && this.pps);
       if (ready) this.configure();
-      this.pendingNalus.push({ nalus, pts, isKeyframe });
+      this.pendingNalus.push({ nalus, pts, dts, isKeyframe });
       if (this.pendingNalus.length > VideoPipeline.PENDING_CAP) {
         this.pendingNalus.splice(0, this.pendingNalus.length - VideoPipeline.PENDING_CAP);
       }
@@ -743,23 +770,23 @@ export class VideoPipeline {
     }
 
     if (!this.decoder || this.decoder.state !== 'configured') {
-      this.pendingNalus.push({ nalus, pts, isKeyframe });
+      this.pendingNalus.push({ nalus, pts, dts, isKeyframe });
       if (this.pendingNalus.length > VideoPipeline.PENDING_CAP) {
         this.pendingNalus.splice(0, this.pendingNalus.length - VideoPipeline.PENDING_CAP);
       }
       return;
     }
 
-    // Flush pending batches with their original PTS, then the current batch.
+    // Flush pending batches with their original PTS/DTS, then the current batch.
     const batches = this.pendingNalus;
     this.pendingNalus = [];
     for (const b of batches) {
-      this.emitAu(b.nalus, b.pts, b.isKeyframe);
+      this.emitAu(b.nalus, b.pts, b.dts, b.isKeyframe);
     }
-    this.emitAu(nalus, pts, isKeyframe);
+    this.emitAu(nalus, pts, dts, isKeyframe);
   }
 
-  private emitAu(nalus: NalUnit[], pts: number | null, _hint: boolean) {
+  private emitAu(nalus: NalUnit[], pts: number | null, dts: number | null, _hint: boolean) {
     if (!this.decoder || this.decoder.state !== 'configured') return;
     const isHevc = this.codec === 'hevc';
     const nt = (n: NalUnit) => isHevc ? n.hevcType : n.type;
@@ -788,12 +815,7 @@ export class VideoPipeline {
       timestamp: tsUs ?? 0,
       data,
     });
-    try {
-      this.decoder.decode(chunk);
-    } catch (e) {
-      this.cb.onError(e);
-      this.reset();
-    }
+    this.submitChunk(chunk, ptsToUs(dts) ?? tsUs ?? null, hasIdr);
   }
 
   private configure() {
@@ -807,7 +829,7 @@ export class VideoPipeline {
   }
 
   /** AV1 feed: parse OBUs, (re)configure on Sequence Header, emit access units. */
-  private feedAv1(payload: Uint8Array, pts: number | null, isKey: boolean) {
+  private feedAv1(payload: Uint8Array, pts: number | null, isKey: boolean, dts: number | null = null) {
     if (this.codec === null) this.codec = 'av1';
     const obus = parseObus(payload);
     // Capture Sequence Header. SH rides inside keyframes; refresh config when
@@ -824,7 +846,7 @@ export class VideoPipeline {
 
     if (!this.configured) {
       if (this.av1ShRaw && !this.configuring) this.configureAv1();
-      this.pendingAv1.push({ payload, pts, isKey });
+      this.pendingAv1.push({ payload, pts, dts, isKey });
       if (this.pendingAv1.length > VideoPipeline.PENDING_CAP) {
         this.pendingAv1.splice(0, this.pendingAv1.length - VideoPipeline.PENDING_CAP);
       }
@@ -832,21 +854,21 @@ export class VideoPipeline {
     }
 
     if (!this.decoder || this.decoder.state !== 'configured') {
-      this.pendingAv1.push({ payload, pts, isKey });
+      this.pendingAv1.push({ payload, pts, dts, isKey });
       if (this.pendingAv1.length > VideoPipeline.PENDING_CAP) {
         this.pendingAv1.splice(0, this.pendingAv1.length - VideoPipeline.PENDING_CAP);
       }
       return;
     }
 
-    // Flush pending access units with their original PTS, then the current one.
+    // Flush pending access units with their original PTS/DTS, then the current one.
     const batches = this.pendingAv1;
     this.pendingAv1 = [];
-    for (const b of batches) this.emitAv1(b.payload, b.pts, b.isKey);
-    this.emitAv1(payload, pts, isKey);
+    for (const b of batches) this.emitAv1(b.payload, b.pts, b.dts, b.isKey);
+    this.emitAv1(payload, pts, dts, isKey);
   }
 
-  private emitAv1(payload: Uint8Array, pts: number | null, isKey: boolean) {
+  private emitAv1(payload: Uint8Array, pts: number | null, dts: number | null, isKey: boolean) {
     if (!this.decoder || this.decoder.state !== 'configured') return;
     if (!this.seenKeyframe && !isKey) return;
     if (isKey) this.seenKeyframe = true;
@@ -864,12 +886,7 @@ export class VideoPipeline {
       timestamp: tsUs ?? 0,
       data: payload,
     });
-    try {
-      this.decoder.decode(chunk);
-    } catch (e) {
-      this.cb.onError(e);
-      this.reset();
-    }
+    this.submitChunk(chunk, ptsToUs(dts) ?? tsUs ?? null, isKey);
   }
 
   /**
@@ -1065,6 +1082,109 @@ export class VideoPipeline {
     }
   }
 
+  /**
+   * DTS-paced decode gate. PES arrives in DTS (decode) order; we pace decode
+   * submission by DTS so the decoder stays near realtime instead of burning
+   * through a backlogged SRT buffer and overflowing the renderer ring. DTS
+   * (not PTS) is the gate because DTS is monotonic in arrival order — pacing
+   * by PTS would reorder P-frames behind B-frames and break decode.
+   *
+   * Keyframes always decode immediately (flushing deferred deltas first to
+   * preserve order). When DTS is unavailable (PES omitted it — common for
+   * no-B-frame streams where PTS==DTS), PTS is a safe fallback since it's
+   * already monotonic in that case.
+   */
+  private submitChunk(chunk: EncodedVideoChunk, dtsUs: number | null, isKey: boolean) {
+    if (!this.decoder || this.decoder.state !== 'configured') return;
+    if (dtsUs !== null) this.updateClock(dtsUs);
+    // Keyframes always decode (never dropped), but flush any deferred
+    // deltas first to preserve decode order — they precede this keyframe
+    // in the stream and must reach the decoder before it.
+    if (isKey) {
+      if (this.deferred.length > 0) this.flushDeferred();
+      this.decodeChunk(chunk);
+      return;
+    }
+    const nowDts = this.nowDtsUs();
+    const decodeNow = dtsUs === null
+      || nowDts === null
+      || dtsUs <= nowDts + VideoPipeline.LOOKAHEAD_US;
+    if (decodeNow) {
+      this.decodeChunk(chunk);
+      return;
+    }
+    if (this.deferred.length >= VideoPipeline.DEFERRED_CAP) {
+      this.droppedVideo++;
+      return;
+    }
+    this.deferred.push({ chunk, dtsUs, isKey });
+    this.ensureDrain();
+  }
+
+  /** Decode every deferred chunk in arrival order (used at keyframe boundaries). */
+  private flushDeferred() {
+    for (const d of this.deferred) {
+      this.decodeChunk(d.chunk);
+    }
+    this.deferred = [];
+  }
+
+  private decodeChunk(chunk: EncodedVideoChunk) {
+    if (!this.decoder || this.decoder.state !== 'configured') return;
+    try {
+      this.decoder.decode(chunk);
+    } catch (e) {
+      this.cb.onError(e);
+      this.reset();
+    }
+  }
+
+  /** Wall-clock ↔ DTS mapping; anchors on first frame, resets on large gap. */
+  private updateClock(dtsUs: number) {
+    if (this.dtsOriginUs === null) {
+      this.dtsOriginUs = dtsUs;
+      this.wallOriginMs = performance.now();
+      return;
+    }
+    const nowDtsUs = this.dtsOriginUs + (performance.now() - this.wallOriginMs) * 1000;
+    if (Math.abs(dtsUs - nowDtsUs) > VideoPipeline.CLOCK_RESET_US) {
+      this.dtsOriginUs = dtsUs;
+      this.wallOriginMs = performance.now();
+      this.drainDeferred();
+    }
+  }
+
+  private nowDtsUs(): number | null {
+    if (this.dtsOriginUs === null) return null;
+    return this.dtsOriginUs + (performance.now() - this.wallOriginMs) * 1000;
+  }
+
+  private ensureDrain() {
+    if (this.rafId !== null) return;
+    const tick = () => {
+      this.rafId = null;
+      this.drainDeferred();
+      if (this.deferred.length > 0 && this.decoder && this.decoder.state === 'configured') {
+        this.rafId = requestAnimationFrame(tick);
+      }
+    };
+    this.rafId = requestAnimationFrame(tick);
+  }
+
+  private drainDeferred() {
+    if (this.deferred.length === 0) return;
+    const nowDts = this.nowDtsUs();
+    const keep: { chunk: EncodedVideoChunk; dtsUs: number | null; isKey: boolean }[] = [];
+    for (const d of this.deferred) {
+      if (nowDts === null || d.isKey || d.dtsUs === null || d.dtsUs <= nowDts + VideoPipeline.LOOKAHEAD_US) {
+        this.decodeChunk(d.chunk);
+      } else {
+        keep.push(d);
+      }
+    }
+    this.deferred = keep;
+  }
+
   getStats(): import('./debug/types').VideoStats {
     return {
       codec: this.codec,
@@ -1095,6 +1215,12 @@ export class VideoPipeline {
     this.av1ShInfo = null;
     this.pendingNalus = [];
     this.pendingAv1 = [];
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+    this.deferred = [];
+    this.dtsOriginUs = null;
     if (this.decoder) {
       try { this.decoder.close(); } catch {}
       this.decoder = null;

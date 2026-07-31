@@ -37,7 +37,7 @@ export type WorkerMsg =
   | { type: 'log'; msg: string; cls?: string }
   | { type: 'handshakeComplete' }
   | { type: 'pmt'; videoPid: number; audioPid: number; audioStreamType: number; videoCodec: 'av1' | 'h264' | 'hevc' | null }
-  | { type: 'videoPes'; data: Uint8Array; pts: number | null; isKeyframe: boolean }
+  | { type: 'videoPes'; data: Uint8Array; pts: number | null; dts: number | null; isKeyframe: boolean }
   | { type: 'audioPes'; data: Uint8Array; pts: number | null }
   | { type: 'wtReady' }
   | { type: 'wtClosed'; error?: string }
@@ -177,7 +177,7 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
           });
         }
       },
-      onPes: (pid, pts, _dts, bytes, ra) => {
+      onPes: (pid, pts, dts, bytes, ra) => {
         if (probePids.has(pid)) {
           // Content-probe: distinguish AV1 video from Opus audio by sniffing
           // the first OBU header. Runs once per PID, then pins the decision.
@@ -200,7 +200,7 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
           });
         }
         if (pid === videoPid) {
-          queue({ type: 'videoPes', data: bytes, pts, isKeyframe: ra });
+          queue({ type: 'videoPes', data: bytes, pts, dts, isKeyframe: ra });
         } else if (pid === audioPid) {
           queue({ type: 'audioPes', data: bytes, pts });
         }

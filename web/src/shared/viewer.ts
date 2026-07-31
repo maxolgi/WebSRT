@@ -171,10 +171,6 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
       const driftMs = (videoPts - audioPts) / 1000;
       latestDriftMs = driftMs;
       ui.onDrift?.(driftMs);
-      if (Math.abs(driftMs) > 40) {
-        const direction = driftMs > 0 ? 'ahead of' : 'behind';
-        console.warn(`A/V drift: ${driftMs.toFixed(1)}ms (video ${direction} audio)`);
-      }
     }, 2000);
   }
 
@@ -344,7 +340,7 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
         }
         break;
       case 'videoPes':
-        video?.feed(msg.data, msg.pts, msg.isKeyframe);
+        video?.feed(msg.data, msg.pts, msg.isKeyframe, msg.dts);
         break;
       case 'audioPes':
         audio?.feed(msg.data, msg.pts);
