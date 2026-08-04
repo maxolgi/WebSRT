@@ -88,6 +88,11 @@ function onStateChange(s: ConnectionState) {
 const savedLatency = localStorage.getItem('latency');
 if (savedLatency) latencyNum.value = savedLatency;
 store.latencyMs.value = +latencyNum.value;
+
+// Pacing is off by default (trust SRT TSBPD). Persisted ON state is
+// re-applied on each connect inside onFirstFrame.
+const savedDecodePacing = localStorage.getItem('websrt-pacing-decode') === '1';
+const savedRenderPacing = localStorage.getItem('websrt-pacing-render') === '1';
 latencyNum.addEventListener('change', () => {
   const v = Math.max(20, Math.min(8000, +latencyNum.value || 120));
   latencyNum.value = String(v);
@@ -113,6 +118,9 @@ const viewer = createViewer({
     onFirstFrame: (w, h) => {
       log(`first frame decoded ✓ (${w}x${h})`, 'ok');
       setStatus(`decoding ${w}x${h}`);
+      // Re-apply persisted pacing preferences now that pipelines are live.
+      viewer.getVideo()?.setDecodePacing(savedDecodePacing);
+      viewer.getRenderer()?.setRenderPacing(savedRenderPacing);
     },
     onVideoConfigured: (info) =>
       log(`VideoDecoder configured (profile ${info.profile}, level ${info.level})`, 'info'),
@@ -209,6 +217,16 @@ store.testActions.value = {
     }
     v.setHwMode(mode);
     log(`VideoDecoder hw preference → ${mode} (applies on next feed())`, 'info');
+  },
+  setDecodePacing: (enabled) => {
+    localStorage.setItem('websrt-pacing-decode', enabled ? '1' : '0');
+    viewer.getVideo()?.setDecodePacing(enabled);
+    log(`decode pacing → ${enabled ? 'ON' : 'OFF'}`, 'info');
+  },
+  setRenderPacing: (enabled) => {
+    localStorage.setItem('websrt-pacing-render', enabled ? '1' : '0');
+    viewer.getRenderer()?.setRenderPacing(enabled);
+    log(`render pacing → ${enabled ? 'ON' : 'OFF'}`, 'info');
   },
 };
 

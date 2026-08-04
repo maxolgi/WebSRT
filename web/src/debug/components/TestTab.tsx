@@ -16,6 +16,13 @@ export function TestTab({ store }: Props): JSX.Element {
     return () => clearInterval(id)
   }, [])
 
+  const [decodePacing, setDecodePacingState] = useState(
+    () => localStorage.getItem('websrt-pacing-decode') === '1',
+  )
+  const [renderPacing, setRenderPacingState] = useState(
+    () => localStorage.getItem('websrt-pacing-render') === '1',
+  )
+
   const testActions = store.testActions.value
   const latencyMs = store.latencyMs.value
 
@@ -70,6 +77,47 @@ export function TestTab({ store }: Props): JSX.Element {
           </button>
           <div style={{ color: '#888', fontSize: '11px', marginTop: '2px' }}>
             Cycles through common latency presets. Reconnect to apply. Current: {latencyMs}ms
+          </div>
+        </div>
+      </div>
+
+      <div class="debug-section">
+        <h3>Pacing Tests</h3>
+        <div style={{ color: '#888', fontSize: '11px', marginBottom: '8px' }}>
+          Both off by default (trust SRT TSBPD). Toggle on to A/B test decode/render pacing.
+        </div>
+        <div style={{ marginBottom: '12px' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', color: '#ddd' }}>
+            <input
+              type="checkbox"
+              checked={decodePacing}
+              onChange={(e) => {
+                const v = e.currentTarget.checked
+                setDecodePacingState(v)
+                testActions.setDecodePacing(v)
+              }}
+            />
+            Decode pacing (DTS gate)
+          </label>
+          <div style={{ color: '#888', fontSize: '11px', marginLeft: '20px', marginTop: '2px' }}>
+            Defers VideoDecoder.decode() by DTS to prevent run-ahead.
+          </div>
+        </div>
+        <div style={{ marginBottom: '12px' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', color: '#ddd' }}>
+            <input
+              type="checkbox"
+              checked={renderPacing}
+              onChange={(e) => {
+                const v = e.currentTarget.checked
+                setRenderPacingState(v)
+                testActions.setRenderPacing(v)
+              }}
+            />
+            Render pacing (PTS ring)
+          </label>
+          <div style={{ color: '#888', fontSize: '11px', marginLeft: '20px', marginTop: '2px' }}>
+            Gates canvas presentation by PTS (8-frame ring).
           </div>
         </div>
       </div>

@@ -177,4 +177,6 @@ export interface TestActions {
   reconnect: () => void;
   cycleLatency: () => void;
   setHwMode: (mode: 'prefer-hardware' | 'prefer-software') => void;
+  setDecodePacing: (enabled: boolean) => void;
+  setRenderPacing: (enabled: boolean) => void;
 }
