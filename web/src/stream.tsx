@@ -469,8 +469,8 @@ publishBtn.addEventListener('click', async () => {
 
   // Build WT URL
   const pageHost = location.hostname || '127.0.0.1';
-  const wtHost = pageHost === 'localhost' ? '127.0.0.1' : pageHost;
   const urlParams = new URLSearchParams(location.search);
+  const wtHost = urlParams.get('host') || (pageHost === 'localhost' ? '127.0.0.1' : pageHost);
   const wtPort = urlParams.get('port') || '4433';
   const authToken = urlParams.get('token');
   const streamName = streamNameInput.value || 'default';
