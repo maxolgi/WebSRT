@@ -667,6 +667,9 @@ export class VideoPipeline {
   private wallOriginMs = 0;
   private deferred: { chunk: EncodedVideoChunk; dtsUs: number | null; isKey: boolean }[] = [];
   private rafId: number | null = null;
+  // DTS-paced decode is off by default (trust SRT TSBPD). Enable via
+  // setDecodePacing(true) to defer decode submission by DTS.
+  private decodePacing = false;
 
   constructor(cb: DecoderCallbacks) {
     this.cb = cb;
@@ -700,6 +703,24 @@ export class VideoPipeline {
     if (this.decoder) {
       try { this.decoder.close(); } catch {}
       this.decoder = null;
+    }
+  }
+
+  /**
+   * Toggle DTS-paced decode. Off by default — chunks decode immediately,
+   * trusting SRT's TSBPD layer upstream. When disabling mid-stream, any
+   * deferred chunks are flushed to the decoder and the drain RAF is
+   * cancelled.
+   */
+  setDecodePacing(enabled: boolean) {
+    this.decodePacing = enabled;
+    if (!enabled) {
+      this.flushDeferred();
+      if (this.rafId !== null) {
+        cancelAnimationFrame(this.rafId);
+        this.rafId = null;
+      }
+      this.dtsOriginUs = null;
     }
   }
 
@@ -1096,6 +1117,11 @@ export class VideoPipeline {
    */
   private submitChunk(chunk: EncodedVideoChunk, dtsUs: number | null, isKey: boolean) {
     if (!this.decoder || this.decoder.state !== 'configured') return;
+    // Pacing off (default): decode immediately, trust SRT TSBPD upstream.
+    if (!this.decodePacing) {
+      this.decodeChunk(chunk);
+      return;
+    }
     if (dtsUs !== null) this.updateClock(dtsUs);
     // Keyframes always decode (never dropped), but flush any deferred
     // deltas first to preserve decode order — they precede this keyframe

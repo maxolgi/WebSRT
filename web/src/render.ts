@@ -1,9 +1,14 @@
-// Canvas-based VideoFrame renderer with PTS-paced presentation.
+// Canvas-based VideoFrame renderer.
 //
-// Decoded frames are queued (small bounded ring). On each
-// requestAnimationFrame, the head frame is drawn only when its PTS is due
-// — measured against a wall-clock ↔ PTS mapping established on the first
-// frame and reset on large gaps (seek, stream restart, tab backgrounding).
+// PTS-paced presentation is OPT-IN (setRenderPacing(true)). The default
+// trusts SRT's TSBPD layer entirely: the most recent decoded frame is
+// drawn on each requestAnimationFrame, matching the pre-pacing baseline.
+//
+// When pacing is enabled, decoded frames are queued (small bounded ring).
+// On each requestAnimationFrame, the head frame is drawn only when its PTS
+// is due — measured against a wall-clock ↔ PTS mapping established on the
+// first frame and reset on large gaps (seek, stream restart, tab
+// backgrounding).
 //
 // This is necessary because SRT's TSBPD smooths datagram delivery at the
 // SRT layer, but downstream stages (WebCodecs decoder output, worker→main
@@ -53,6 +58,10 @@ export class CanvasRenderer {
   private ptsOriginUs: number | null = null;
   private wallOriginMs = 0;
 
+  // PTS-paced presentation is off by default (trust SRT TSBPD). Enable
+  // via setRenderPacing(true) to gate canvas presentation by PTS.
+  private renderPacing = false;
+
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     const ctx = canvas.getContext('2d');
@@ -61,8 +70,34 @@ export class CanvasRenderer {
     this.startRafLoop();
   }
 
+  /** Toggle PTS-paced presentation. Off by default (trust SRT TSBPD). */
+  setRenderPacing(enabled: boolean) {
+    this.renderPacing = enabled;
+    if (!enabled) {
+      // Drain ring to a single latest frame (baseline behavior).
+      while (this.ring.length > 1) {
+        this.ring.shift()!.close();
+      }
+      // Reset pacing clock anchors so the mapping is re-established if
+      // pacing is re-enabled later.
+      this.ptsOriginUs = null;
+    }
+  }
+
   draw(frame: VideoFrame) {
     this.lastPtsUs = frame.timestamp;
+    if (!this.renderPacing) {
+      // Baseline: keep only the latest frame; drop any undrawn
+      // predecessor. The frame is drawn on the next RAF and consumed.
+      if (this.ring.length > 0) {
+        this.ring[0].close();
+        this.droppedOld++;
+        this.ring[0] = frame;
+      } else {
+        this.ring.push(frame);
+      }
+      return;
+    }
     // When the ring is empty, the decoder paused before this frame (B-frame
     // reorder: WebCodecs holds B-frames until their forward reference
     // arrives, then emits a burst ~reorder-depth after their presentation
@@ -119,6 +154,24 @@ export class CanvasRenderer {
   }
 
   private present() {
+    if (!this.renderPacing) {
+      if (this.ring.length === 0) return;
+      const frame = this.ring.shift()!;
+      if (this.canvas.width !== frame.displayWidth) {
+        this.canvas.width = frame.displayWidth;
+      }
+      if (this.canvas.height !== frame.displayHeight) {
+        this.canvas.height = frame.displayHeight;
+      }
+      this.ctx.drawImage(frame, 0, 0);
+      frame.close();
+      this.frameCount++;
+      if (this.frameCount % 30 === 0) {
+        this.lastFps = (30 * 1000) / (performance.now() - this.lastFpsTime);
+        this.lastFpsTime = performance.now();
+      }
+      return;
+    }
     if (this.ptsOriginUs === null || this.ring.length === 0) return;
     const nowPtsUs = this.ptsOriginUs + (performance.now() - this.wallOriginMs) * 1000;
 
@@ -158,7 +211,7 @@ export class CanvasRenderer {
       droppedLate: this.droppedLate,
       droppedOverflow: this.droppedOld,
       ringLength: this.ring.length,
-      ringCap: CanvasRenderer.RING_CAP,
+      ringCap: this.renderPacing ? CanvasRenderer.RING_CAP : 1,
       currentPtsUs: this.lastPtsUs,
       fps: this.lastFps,
       rafDeltaMs: this.lastRafDeltaMs,
