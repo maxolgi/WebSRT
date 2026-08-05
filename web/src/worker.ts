@@ -232,8 +232,10 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
     rx = initialRttMs !== undefined
       ? SrtReceiver.newWithLatencyAndRtt(latencyMs, initialRttMs)
       : SrtReceiver.newWithLatency(latencyMs);
-    reader = wt.datagrams.readable.getReader();
-    writer = wt.datagrams.writable.getWriter();
+    const dg = wt.datagrams as any;
+    const datagrams = typeof dg === 'function' ? dg() : dg;
+    reader = datagrams.readable.getReader();
+    writer = datagrams.writable.getWriter();
     wt.closed
       .then(() => { if (myGen === gen) { queue({ type: 'wtClosed' }); flushOutgoing(); } })
       .catch((e) => { if (myGen === gen) { queue({ type: 'wtClosed', error: String(e) }); flushOutgoing(); } });
