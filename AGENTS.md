@@ -73,24 +73,19 @@ cd web && npx tsc --noEmit
 ## Workspace structure
 
 - `crates/websrt/` — **library crate**: SRT-over-WebTransport gateway core. Exposes `Gateway` builder, `BrowserSession`, `Broadcaster`, `SrtInitiator`, `Cert`, `Ingester`. Sim-loss behind `sim-loss` feature.
-- `crates/websrt-gateway/` — **demo binary**: CLI wrapper around the library. This is what runs in production.
+- `crates/websrt-gateway/` — **reference implementation**: CLI binary built on the library. Runs in production under supervisord.
 - `crates/srt-wasm/` — browser-side SRT receiver + sender (WASM). Used by both viewer and publisher pages.
 - `crates/mpeg2ts-wasm/` — browser-side TS demuxer (WASM). Viewer side.
 - `crates/ts-muxer-wasm/` — browser-side TS muxer (WASM). Publisher side (browser→gateway publishing).
 
-## Production readiness scope
+## Architecture layers
 
-**The library (`crates/websrt/`) is the product.** Everything else is a demo or dev tool.
-
-When reviewing, hardening, or auditing code, prioritize by layer:
-
-1. **`crates/websrt/` (library) — production-critical.** This is what downstream developers embed. It must have: correct resource cleanup (no leaked tasks, dropped senders close channels), proper error propagation, no panics on bad input, security primitives exposed as builder options (auth callbacks, origin allowlists, constant-time token comparison, configurable health bind address), input validation on builder methods, and no blocking calls inside async paths. Every public API should be usable in a hardened deployment.
-
-2. **`crates/websrt-gateway/` (demo binary) — should work, doesn't need to be bulletproof.** It demonstrates the library. Loose defaults (auth token in query string, health on 0.0.0.0, no origin check) are acceptable here as long as the *library* exposes the APIs to do better. If the library lacks a capability the demo needs, add it to the library.
-
-3. **`web/` (demo client) — dev tool, lowest priority.** It exists to test against. Memory leaks, reconnect races, imprecise timers, and missing security checks are fine to note but should not block production readiness. The only exception: if a web-side issue reveals a library API gap (e.g., the library doesn't expose stats the client needs), fix the library.
-
-**Rule of thumb:** If a security or robustness issue can be fixed in the library so that any consumer benefits, fix it there. If it's purely demo-app glue, leave it or mention it but don't prioritize it.
+- **`crates/websrt/` (library)** — the embeddable product. `Gateway` builder,
+  sessions, SRT state machine, broadcast fanout, security hooks.
+- **`crates/websrt-gateway/` (reference implementation)** — the canonical binary.
+  CLI parse, cert setup, ingester wiring, health endpoint. Runs under supervisord.
+- **`web/` (demo UI)** — player page and stream page. Browser-side demos that
+  exercise the gateway end-to-end, plus the debug overlay.
 
 ## Forked crates (patched, not upstream)
 
@@ -129,7 +124,7 @@ Browser runs the **same** `srt-protocol` + `mpeg2ts` Rust crates compiled to WAS
 - `crates/websrt/src/gateway.rs` — high-level `Gateway` builder: WT accept loop, session spawn, viewer cap, graceful drain.
 - `crates/websrt/src/session.rs` — per-browser session: dual-task split (recv_pump + sender_pump) sharing `SrtInitiator` via `Arc<Mutex<_>>`. LossInjector (sim-loss feature) lives here.
 - `crates/websrt/src/srt_sender.rs` — wraps `srt_protocol::Connect` → `DuplexConnection`. `drain()` captures `Action::UpdateStatistics` into `last_stats`.
-- `crates/websrt-gateway/src/main.rs` — demo binary: CLI parse, cert-hash.js writing, ingester setup, `Gateway::run()`.
+- `crates/websrt-gateway/src/main.rs` — reference binary: CLI parse, cert-hash.js writing, ingester setup, `Gateway::run()`.
 - `crates/srt-wasm/src/lib.rs` — `SrtReceiver` wraps `Listen` → `DuplexConnection`. State in `RefCell`. `handle_datagram(bytes, now_us)` + `poll(now_us)` return `Vec<SrtAction>`.
 - `web/src/decode.ts` — H.264 SPS parser (exp-Golomb, High profile), avcC builder, `VideoPipeline`, `OpusAudioPipeline`, `AacAudioPipeline`. AudioWorklet fallback when `MediaStreamTrackGenerator` unavailable.
 - `web/src/worker.ts` — Web Worker: runs SrtReceiver + Demuxer off main thread. Datagrams batched (up to 16) before processing. Polls SRT state machine every 10ms.

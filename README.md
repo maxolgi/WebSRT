@@ -206,7 +206,7 @@ defaults to 16 (enforced in `Broadcaster::subscribe`).
 
 ## Library usage
 
-The `websrt` crate is the reusable core. The demo binary (`websrt-gateway`) is
+The `websrt` crate is the reusable core. The reference binary (`websrt-gateway`) is
 a thin CLI wrapper around it. To embed in your own application:
 
 ```rust
@@ -585,7 +585,7 @@ WebSRT/
           channel.rs          # ChannelIngester: mpsc-backed ingester (browser publish path)
           srt.rs              # SrtIngester: srt-tokio listener/caller with reconnect
           file.rs             # FileIngester: fixture loop with real-time pacing
-    websrt-gateway/           # demo binary: CLI wrapper around the websrt library
+    websrt-gateway/           # reference binary: CLI wrapper around the websrt library
       src/
         main.rs               # CLI parsing, cert-hash.js writing, Gateway::run()
         bin/
@@ -639,7 +639,7 @@ WebSRT/
 
 ## Latency tuning
 
-There are two independent SRT TSBPD latencies in the demo binary:
+There are two independent SRT TSBPD latencies in the reference binary:
 
 - **`--latency` (default 120 ms)** — controls the **OBS → gateway** ingester
   link (passed to `SrtIngester::bind_with_latency`). Raise it if OBS is on a

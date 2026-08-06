@@ -57,7 +57,7 @@ Commands:
           --debug: build with --dev instead of --release
 
   gateway [--sim-loss] [--debug]
-          cargo build the demo gateway binary (release by default).
+          cargo build the gateway binary (release by default).
 
   lib [--debug]
           cargo build the websrt library crate (release by default).
@@ -190,7 +190,7 @@ cmd_gateway() {
             --debug) profile_args=(--profile dev); shift ;;
             -h|--help)
                 cat <<'EOF' >&2
-gateway — build the demo gateway binary
+gateway — build the gateway binary
 Usage: ./build.sh gateway [--sim-loss] [--debug]
 EOF
                 return 0 ;;

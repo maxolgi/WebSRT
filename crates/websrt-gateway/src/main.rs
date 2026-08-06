@@ -40,7 +40,7 @@ pub enum SrtMode {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "websrt-gateway", version, about = "SRT → WebTransport gateway (demo)")]
+#[command(name = "websrt-gateway", version, about = "SRT → WebTransport gateway")]
 pub struct Cli {
     /// Input source.
     #[arg(long, value_enum, default_value_t = InputMode::File)]
@@ -207,7 +207,7 @@ async fn main() -> Result<()> {
     // wired (synchronously for --input file, inside the SRT setup task otherwise).
     let ts_stats: Arc<Mutex<HashMap<String, TsStatsHandle>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    // Spawn the demo health/metrics server. The library no longer owns this;
+    // Spawn the health/metrics server. The library no longer owns this;
     // each embedding application is responsible for its own exposition format.
     if cli.health_port > 0 {
         let bind_addr: Option<std::net::IpAddr> = cli.health_bind.parse().ok();

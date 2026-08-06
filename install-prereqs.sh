@@ -369,7 +369,7 @@ print_summary() {
         if [[ $CHECK_ONLY -eq 0 ]]; then
             echo "  next steps:" >&2
             echo "    ./build.sh setup    # build WASM modules + npm install" >&2
-            echo "    ./build.sh gateway  # build the demo gateway binary" >&2
+            echo "    ./build.sh gateway  # build the gateway binary" >&2
             echo "    ./build.sh web      # start the Vite dev server" >&2
         fi
         return 0

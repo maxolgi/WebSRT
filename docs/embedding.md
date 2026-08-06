@@ -79,7 +79,7 @@ Use `mkcert` (or a real cert) for cross-origin.
 
 - `?token=` is sent in the WT URL query string — it can appear in browser
   history and gateway logs. For production, use the library's auth callback in
-  your own binary rather than the demo's query-string scheme.
+  your own binary rather than the reference binary's query-string scheme.
 - On Server B, scope CSP to the gateway origin:
   ```http
   Content-Security-Policy: connect-src 'self' https://gateway-a.example:4433;

@@ -21,7 +21,7 @@ pub struct SrtIngester {
     latency: Duration,
     socket: Option<SrtSocket>,
     /// The stream_id of the currently-connected peer (set on each successful
-    /// accept/dial). Used by the demo binary to route the published stream
+    /// accept/dial). Used by the reference binary to route the published stream
     /// under a name derived from OBS's `?streamid=...`, so viewers can
     /// subscribe via `?stream=<name>` instead of always `?stream=default`.
     accepted_stream_id: Option<String>,
@@ -169,7 +169,7 @@ impl SrtIngester {
     }
 
     /// The stream_id reported by the currently-connected peer (OBS), or `None`
-    /// if the peer didn't send one. The demo binary uses this to route the
+    /// if the peer didn't send one. The reference binary uses this to route the
     /// published stream under a name matching the streamid so viewers can
     /// subscribe via `?stream=<streamid>` instead of always `?stream=default`.
     pub fn accepted_stream_id(&self) -> Option<&str> {
