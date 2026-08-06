@@ -14,7 +14,7 @@
 
 use mpeg2ts::es::StreamType;
 use mpeg2ts::pes::PesHeader;
-use mpeg2ts::ts::{Pid, ReadTsPacket, TsPacket, TsPacketReader, TsPayload};
+use mpeg2ts::ts::{Descriptor, Pid, ReadTsPacket, TsPacket, TsPacketReader, TsPayload};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read};
@@ -377,6 +377,21 @@ impl TsDemuxer {
     }
 }
 
+/// Extract the 4-char registration-descriptor format id (e.g. "AV01", "Opus")
+/// from a PMT elementary stream's descriptor list. Returns empty when absent.
+fn extract_format_id(descriptors: &[Descriptor]) -> String {
+    descriptors
+        .iter()
+        .find_map(|d| {
+            if d.tag == 0x05 && d.data.len() >= 4 {
+                std::str::from_utf8(&d.data[..4]).ok().map(String::from)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+}
+
 impl TsDemuxer {
     fn elapsed_ms(&self) -> f64 {
         self.start_time.elapsed().as_secs_f64() * 1000.0
@@ -649,45 +664,20 @@ impl TsDemuxer {
                 // descriptor (tag 0x05) format id disambiguates 0x06 streams
                 // (AV01 → video, Opus → audio); empty when absent.
                 let mut new_entries: Vec<PmtEntry> = Vec::with_capacity(pmt.es_info.len());
+                let mut entries: Vec<(Pid, StreamType)> = Vec::with_capacity(pmt.es_info.len());
                 for e in &pmt.es_info {
-                    let format_id = e
-                        .descriptors
-                        .iter()
-                        .find_map(|d| {
-                            if d.tag == 0x05 && d.data.len() >= 4 {
-                                std::str::from_utf8(&d.data[..4]).ok().map(String::from)
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or_default();
+                    let format_id = extract_format_id(&e.descriptors);
                     new_entries.push(PmtEntry {
                         pid: e.elementary_pid.as_u16(),
                         stream_type: e.stream_type.clone() as u8,
-                        format_id,
+                        format_id: format_id.clone(),
                     });
+                    entries.push((e.elementary_pid, e.stream_type.clone()));
                 }
+                let format_ids: Vec<String> =
+                    new_entries.iter().map(|e| e.format_id.clone()).collect();
                 self.pmt_entries = new_entries;
 
-                let entries: Vec<(Pid, StreamType)> = pmt
-                    .es_info
-                    .iter()
-                    .map(|e| (e.elementary_pid, e.stream_type.clone()))
-                    .collect();
-                let format_ids: Vec<String> = pmt
-                    .es_info
-                    .iter()
-                    .map(|e| {
-                        for d in &e.descriptors {
-                            if d.tag == 0x05 && d.data.len() >= 4 {
-                                if let Ok(s) = std::str::from_utf8(&d.data[..4]) {
-                                    return s.to_string();
-                                }
-                            }
-                        }
-                        String::new()
-                    })
-                    .collect();
                 events.push(TsEvent::pmt(&entries, &format_ids));
                 self.push_packet(PacketEntry {
                     t_ms: elapsed_ms,
