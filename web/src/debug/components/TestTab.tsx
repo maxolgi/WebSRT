@@ -20,7 +20,7 @@ export function TestTab({ store }: Props): JSX.Element {
     () => localStorage.getItem('websrt-pacing-decode') === '1',
   )
   const [renderPacing, setRenderPacingState] = useState(
-    () => localStorage.getItem('websrt-pacing-render') === '1',
+    () => localStorage.getItem('websrt-pacing-render') !== '0',
   )
 
   const testActions = store.testActions.value
@@ -84,7 +84,7 @@ export function TestTab({ store }: Props): JSX.Element {
       <div class="debug-section">
         <h3>Pacing Tests</h3>
         <div style={{ color: '#888', fontSize: '11px', marginBottom: '8px' }}>
-          Both off by default (trust SRT TSBPD). Toggle on to A/B test decode/render pacing.
+          Decode pacing off, render pacing on by default. Toggle to A/B test.
         </div>
         <div style={{ marginBottom: '12px' }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', color: '#ddd' }}>

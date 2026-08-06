@@ -1,8 +1,8 @@
 // Canvas-based VideoFrame renderer.
 //
-// PTS-paced presentation is OPT-IN (setRenderPacing(true)). The default
-// trusts SRT's TSBPD layer entirely: the most recent decoded frame is
-// drawn on each requestAnimationFrame, matching the pre-pacing baseline.
+// PTS-paced presentation is ON by default. setRenderPacing(false) opts out
+// to trust SRT's TSBPD layer entirely: the most recent decoded frame is
+// drawn on each requestAnimationFrame.
 //
 // When pacing is enabled, decoded frames are queued (small bounded ring).
 // On each requestAnimationFrame, the head frame is drawn only when its PTS
@@ -58,9 +58,10 @@ export class CanvasRenderer {
   private ptsOriginUs: number | null = null;
   private wallOriginMs = 0;
 
-  // PTS-paced presentation is off by default (trust SRT TSBPD). Enable
-  // via setRenderPacing(true) to gate canvas presentation by PTS.
-  private renderPacing = false;
+  // PTS-paced presentation is on by default (matches the pre-pacing
+  // f2caba7 baseline that paces canvas draws by PTS). Disable via
+  // setRenderPacing(false) to trust SRT's TSBPD layer instead.
+  private renderPacing = true;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;

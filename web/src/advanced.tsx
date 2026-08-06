@@ -89,10 +89,11 @@ const savedLatency = localStorage.getItem('latency');
 if (savedLatency) latencyNum.value = savedLatency;
 store.latencyMs.value = +latencyNum.value;
 
-// Pacing is off by default (trust SRT TSBPD). Persisted ON state is
-// re-applied on each connect inside onFirstFrame.
+// Decode pacing is off by default; render pacing is on by default (matches
+// the f2caba7 PTS-paced baseline). Explicit '0' opts out of render pacing;
+// unset is treated as on. Persisted state is re-applied on each connect.
 const savedDecodePacing = localStorage.getItem('websrt-pacing-decode') === '1';
-const savedRenderPacing = localStorage.getItem('websrt-pacing-render') === '1';
+const savedRenderPacing = localStorage.getItem('websrt-pacing-render') !== '0';
 latencyNum.addEventListener('change', () => {
   const v = Math.max(20, Math.min(8000, +latencyNum.value || 120));
   latencyNum.value = String(v);
