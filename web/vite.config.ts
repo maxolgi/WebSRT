@@ -11,14 +11,13 @@ import preact from '@preact/preset-vite';
 // The basic-ssl plugin generates a throwaway self-signed cert; click through
 // Chrome's "not private" warning to proceed.
 //
-// Multi-page: index.html is the original simple demo page; advanced.html is
-// the full-featured page with the debug panel (Preact + Chart.js + Eruda).
+// Multi-page entries: index.html (unified viewer; debug panel lazy-loaded),
+// simple.html (minimal viewer), stream.html (publisher).
 
 export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5173,
-    cors: { origin: [/^https?:\/\/(localhost|127\.0\.0\.1):8100$/] },
   },
   plugins: [basicSsl(), preact()],
   build: {

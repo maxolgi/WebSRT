@@ -1,9 +1,8 @@
-// Shared viewer lifecycle used by both main.ts (simple page) and advanced.tsx
-// (page with the Preact debug panel). Both entrypoints become thin wrappers
-// that inject their UI sinks (log/status/state/stats) via ViewerUi.
-//
-// All ~300 lines of duplicated state and logic that used to live at module
-// scope in each entrypoint now live as closures inside createViewer().
+// Viewer lifecycle factory. Consumed by the framework-agnostic player SDK
+// (web/src/player/index.ts → mountPlayer), which wraps it in a PlayerHandle
+// (EventTarget) and translates the ViewerUi callbacks into standard media
+// events. Host pages wire their own UI through the SDK; ViewerUi is the
+// internal hook surface.
 
 import { VideoPipeline, OpusAudioPipeline, AacAudioPipeline } from '../decode';
 import { CanvasRenderer } from '../render';

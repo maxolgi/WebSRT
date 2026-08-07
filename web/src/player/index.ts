@@ -187,8 +187,8 @@ class Player extends EventTarget implements PlayerHandle {
     this._videoHeight = h;
     this._readyState = 4;
     if (changed) this.emit('resize', { width: w, height: h } satisfies PlayerResizeDetail);
-    // Re-apply pacing preferences to the freshly built pipelines (mirrors
-    // advanced.tsx — pacing knobs attach to renderer / decoder instances).
+    // Re-apply pacing preferences to the freshly built pipelines (pacing knobs
+    // attach to renderer / decoder instances, which are recreated on connect).
     this.viewer.getRenderer()?.setRenderPacing(this.renderPacingPref);
     this.viewer.getVideo()?.setDecodePacing(this.decodePacingPref);
     this.emit('canplay');
