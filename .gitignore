@@ -16,6 +16,10 @@ web/wasm/
 certs/*.pem
 certs/*.crt
 certs/*.key
+# root-level certs/keys (never commit private keys)
+/*.pem
+/*.key
+/*.crt
 
 # runtime-generated cert hash (written by gateway on boot)
 web/public/cert-hash.js
