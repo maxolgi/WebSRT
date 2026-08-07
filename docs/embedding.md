@@ -79,7 +79,7 @@ can open a WebTransport session to gateway `A` with no CORS headers on `A` at
 all — only TLS certificate trust matters. CORS governs `fetch`/XHR-style
 reads; WebTransport is a raw QUIC stream/datagram transport and is exempt.
 
-What people actually hit and mislabel "CORS" is one of two real, separate
+What people actually hit and mislabel "CORS" is one of three real, separate
 problems:
 
 1. **Cert trust on the LAN (self-signed).** A self-signed gateway presents a
@@ -94,11 +94,15 @@ problems:
    the browser will block those fetches without correct CORS headers on the dev
    server. This only ever bites you during *development* against the unbundled
    dev server.
+3. **Delivering the self-signed cert hash to a cross-origin page.** This is the
+   one that actually bites cross-origin self-signed deployments, and **no
+   amount of gateway configuration fixes it** — it is a browser security wall,
+   not a CORS setting. See [Delivering the cert hash cross-origin](#delivering-the-cert-hash-cross-origin).
 
 Once the player is **bundled into your app** (the supported embed model), the
-player's JS and WASM are same-origin with your page. Both problems vanish:
-there are no cross-origin fetches, and you handle cert trust via `certHash` /
-a real cert. **You do not configure CORS on the gateway.**
+player's JS and WASM are same-origin with your page and problem #2 vanishes.
+Problem #1 you handle via `certHash` / a real cert. **You do not configure CORS
+on the gateway.** Problem #3 has no browser-side fix — see below.
 
 ## Player API
 
@@ -130,7 +134,9 @@ you can `addEventListener` on).
 | A **real-CA / mkcert** gateway (PKI) | `null`. Browser validates via the normal trust store (Firefox-compatible). |
 | The **reference demo pages** in this repo | **omit it** — those pages still read `window.CERT_HASH` from `cert-hash.js` written by the gateway at boot. |
 
-For an embedded app, use a real/mkcert cert and pass `certHash: null`.
+For an embedded app, use a real/mkcert cert and pass `certHash: null`. For the
+self-signed + cross-origin case, the hash must arrive out-of-band (your backend
+injects it) — see [Delivering the cert hash cross-origin](#delivering-the-cert-hash-cross-origin).
 
 ### `PlayerHandle`
 
@@ -179,16 +185,87 @@ await handle.connect();
 
 | Gateway `--cert-mode` | Browser trust | Cross-origin works? | Firefox? | Notes |
 |---|---|---|---|---|
-| `self` (default) | `serverCertificateHashes` pin (Chrome only) | Only if you ship the hash | No | Hash **rotates on every gateway restart** — you must refresh it. |
+| `self` (default) | `serverCertificateHashes` pin (Chrome only) | Only if you ship the hash | No | Hash rotates **on every restart *and* every ≤2 weeks** — see below. |
 | `mkcert` / real CA | Normal PKI trust store | Yes | Yes | Recommended for any non-LAN / embedded deployment. |
 
 For embedding, run the gateway with `--cert-mode mkcert` (LAN) or a real
-Let's Encrypt cert (public hostname) and pass `certHash: null`. Self-signed is
-fine for local Chrome-only testing if you pass the current hash.
+Let's Encrypt cert (public hostname) and pass `certHash: null`.
 
 ```sh
 websrt-gateway --cert-mode mkcert --wt-port 4433 ...
 ```
+
+### Why self-signed hashes rotate (and why you can't avoid it)
+
+The self-signed cert is regenerated each boot, but more fundamentally the
+WebTransport spec **caps the validity of any cert used with
+`serverCertificateHashes` at two weeks** (the browser deems the cert trusted
+*iff* the leaf hash matches **and** "the current time is within the validity
+period" **and** "the total length of the validity period MUST NOT exceed two
+weeks" — WebTransport §6.9 / §14.4). Pinning replaces Web-PKI chain
+verification; it does **not** replace the expiry check.
+
+Two consequences worth stating plainly so they aren't re-litigated:
+
+- **Persisting the self-signed cert does not help.** Even a cert saved to disk
+  can't have a validity window longer than two weeks, so it must be re-issued
+  (new hash) at least that often regardless. The gateway's regenerate-on-boot
+  behavior is consistent with the spec cap.
+- **The browser-discovery route is closed.** The player page must be HTTPS
+  (`WebTransport` is secure-context-only), so a `fetch()`/`<script>` to learn
+  the hash from a self-signed gateway is blocked — plain HTTP as **mixed
+  content**, self-signed HTTPS by **TLS verification** — and
+  `serverCertificateHashes` exists **only** on the `WebTransport` constructor,
+  not on `fetch`/XHR/`<script>`. No endpoint on the gateway or on Vite can
+  change this.
+
+### Delivering the cert hash cross-origin
+
+Since the browser cannot fetch the hash, it must arrive via a channel the
+browser already trusts. Two paths:
+
+**Lab / small environment → `mkcert` with an IP SAN (no hash at all).** mkcert
+accepts raw IPs (no DNS required) and its certs are validated by the normal
+trust store, so the two-week cap does **not** apply:
+
+```sh
+mkcert -install                          # once per browser; installs the local CA
+mkcert 192.168.1.10                      # cert valid 2y3m, includes the IP as a SAN
+websrt-gateway --cert-mode mkcert \
+  --cert-pem ./192.168.1.10.pem \
+  --key-pem  ./192.168.1.10-key.pem \
+  --wt-port 4433 ...
+```
+
+Then `mountPlayer(canvas, { certHash: null })`. No hash juggling, no rotation
+for the cert's life, and it works in Firefox too. (The root CA lives ~10
+years; leaf certs ~2 years 3 months, per mkcert.)
+
+**Self-signed + cross-origin → your backend injects `certHash`.** This is the
+industry-standard "signaling server provisions connection params" pattern
+(same shape as WebRTC). Your page is served by your own origin; your backend
+fetches the *current* hash **server-side** — no browser in that hop, so none of
+the CORS / mixed-content / TLS walls above apply — and renders it into the page
+as `certHash`. Fresh on every page load, it absorbs both the per-restart and
+the two-week rotation automatically:
+
+```ts
+// server-side (Node/etc.): fetch the hash from the gateway, TLS unchecked
+const resp = await fetch('https://encoder.lan:5173/cert-hash.js'); // or read a shared file
+// inject <script>window.CERT_HASH = "..."</script> into the page, OR
+// render the hex string into the mountPlayer({ certHash }) call.
+```
+
+### Where the backend gets the hash (no new endpoint needed)
+
+The hash is exposed server-side today, with no gateway change:
+
+- **The gateway boot log** prints `WebTransport cert DER SHA-256: <hex>`
+  (`crates/websrt-gateway/src/main.rs`).
+- **The `cert-hash.js` file** the gateway writes at boot
+  (`web/public/cert-hash.js`), readable on a shared filesystem or fetchable
+  from the encoder's existing web server with TLS verification disabled
+  server-side (e.g. `curl -k https://encoder.lan:5173/cert-hash.js`).
 
 ## What does NOT work
 
