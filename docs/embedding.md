@@ -1,86 +1,217 @@
-# Embedding a WebSRT player from Gateway A on Web Server B
+# Embedding the WebSRT player
 
-You have a WebSRT gateway on host **A** (`gateway-a.example`) and want the player
-to appear on a separate site on host **B** (`www.example.com`). This doc explains
-the one supported way to do that.
+The WebSRT player is a **canvas + WebCodecs SDK** you bundle into your own
+application. There is no `<video>`/MSE path — frames go straight from the SRT
+receiver (WASM) through a `VideoDecoder` onto a `<canvas>` you own. Your app
+owns all the UI (buttons, sliders, overlays); the SDK renders video and emits
+events.
 
-## How it works
+There is **one** supported embed model: consume this repo as a git submodule
+and import the player at source level. Your bundler produces a same-origin
+bundle, so there are no cross-origin fetches and no CORS configuration. See
+[Supported embed model](#supported-embed-model).
 
-The player builds its WebTransport URL from the page's hostname, plus an
-optional `?host=` override (`web/src/shared/viewer.ts`, `web/src/stream.tsx`):
+## Why this exists
 
-```js
-const pageHost = location.hostname || '127.0.0.1';
-const urlParams = new URLSearchParams(location.search);
-const wtHost = urlParams.get('host') || (pageHost === 'localhost' ? '127.0.0.1' : pageHost);
-const wtPort = urlParams.get('port') || '4433';
-...
-const wtUrl = `https://${wtHost}:${wtPort}/wt?${qp}`;
+Most browser live-streaming stacks (MoQ, fMP4 over HLS/LL-HLS, CMAF) add a
+caching layer: encode to fMP4, chunk it, cache the chunks at the edge. That
+caching layer exists because long-distance best-effort delivery drops packets
+and re-fetching whole segments is too expensive.
+
+SRT takes the other fork: when a packet is dropped, **retransmit just that
+packet**, not a segment. No fMP4, no chunking, no cache. The player runs the
+*same* `srt-protocol` + `mpeg2ts` Rust crates (compiled to WASM) that the
+gateway runs, so ARQ, TSBPD, and the congestion window live in the browser.
+
+That efficiency — retransmitting bytes, not segments — is *why* the player hits
+a sub-200 ms glass-to-glass latency floor in a browser. Canvas + WebCodecs is a
+deliberate choice to preserve it: MSE chunking would reintroduce exactly the
+buffering SRT was designed to avoid.
+
+## Supported embed model
+
+Consume this repo as a **git submodule** and import the player at source level.
+Your bundler (Vite or webpack 5) resolves the worker and the WASM.
+
+```sh
+# in your app repo
+git submodule add https://github.com/maxolgi/WebSRT.git vendor/websrt
+cd vendor/websrt
+./build.sh wasm        # builds srt-wasm + mpeg2ts-wasm + ts-muxer-wasm
+                       # → copies pkg/ into web/wasm/ (gitignored; required)
 ```
 
-Query params: `?host=` (WT host, defaults to the page host), `?port=` (default
-`4433`), `?stream=` / `?subscribe=` (default `default`), `?token=` (auth).
+> `web/wasm/` is gitignored — the artifacts are not in the submodule. Anyone
+> cloning your app must run `./build.sh wasm` (or the repo's `./build.sh setup`)
+> before the player will load. Wire it into your build/bootstrap.
 
-WebTransport is not bound by CORS — the browser lets a page on B open a WT
-session to A directly. So with the `?host=` param, Server B serves the player
-and points it at Gateway A. No reverse proxy, no iframe.
+Then import and mount:
 
-## Setup
+```ts
+import { mountPlayer } from 'websrt-web/src/player';
 
-### 1. Gateway A — use a real cert
+const handle = mountPlayer(document.querySelector('canvas')!, {
+  host: 'gateway-a.example',
+  port: 4433,
+  stream: 'mylive',
+  latencyMs: 120,
+  // certHash: see "Cert modes" below
+});
+```
 
-Run Gateway A in PKI mode so the browser validates it via normal trust store:
+**Bundler constraint — module workers.** The SDK spawns its receiver/demuxer on
+a worker via `new Worker(new URL('...', import.meta.url), { type: 'module' })`
+and loads the WASM as ES modules. Your bundler must support module workers +
+WASM URL resolution. **Vite** supports this out of the box. **webpack 5**
+supports it (module workers since 5.0; WASM via
+`experiments.asyncWebAssembly` or asset modules). Older webpack / legacy
+bundler setups will not work — do not try to shim it.
+
+Because the player ships **inside** your app bundle (same origin), there are
+**zero** cross-origin fetches at runtime. The "CORS problem" people associate
+with cross-origin WebTransport does not apply to this model — see
+[The "CORS" question](#the-cors-question).
+
+## The "CORS" question
+
+Short version: **WebTransport is not CORS-restricted.** A page on origin `B`
+can open a WebTransport session to gateway `A` with no CORS headers on `A` at
+all — only TLS certificate trust matters. CORS governs `fetch`/XHR-style
+reads; WebTransport is a raw QUIC stream/datagram transport and is exempt.
+
+What people actually hit and mislabel "CORS" is one of two real, separate
+problems:
+
+1. **Cert trust on the LAN (self-signed).** A self-signed gateway presents a
+   cert the browser doesn't trust. Over WebTransport there is no click-through
+   warning like an HTTPS page — the connection just fails. The fix is the cert
+   hash (`serverCertificateHashes`) for Chrome, or a real/mkcert cert for
+   everyone. See [Cert modes](#cert-modes). This is a *trust* problem, not
+   CORS.
+2. **Cross-origin module/worker/WASM loads during development.** Module
+   scripts, workers, and `.wasm` are CORS-gated fetches. If you point a page on
+   `B` at the player bundle served from the WebSRT **Vite dev server** on `A`,
+   the browser will block those fetches without correct CORS headers on the dev
+   server. This only ever bites you during *development* against the unbundled
+   dev server.
+
+Once the player is **bundled into your app** (the supported embed model), the
+player's JS and WASM are same-origin with your page. Both problems vanish:
+there are no cross-origin fetches, and you handle cert trust via `certHash` /
+a real cert. **You do not configure CORS on the gateway.**
+
+## Player API
+
+### `mountPlayer(canvas, opts) → PlayerHandle`
+
+Creates a player bound to `canvas`, returns a `PlayerHandle` (an `EventTarget`
+you can `addEventListener` on).
+
+**`opts`**
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `host` | `string` | page hostname | WebTransport host. `localhost` → `127.0.0.1`. |
+| `port` | `number` | `4433` | WebTransport port. |
+| `stream` | `string` | `'default'` | Stream name (the gateway's `?stream=`/`?subscribe=`). |
+| `token` | `string` | — | Auth token, sent as `?token=` in the WT URL. See [Security](#security). |
+| `certHash` | `string \| null` | — | See below. |
+| `latencyMs` | `number` | `120` | TSBPD latency floor (the glass-to-glass buffer). |
+| `renderPacing` | `boolean` | `true` | Pace canvas draws to video PTS for smooth playback. |
+| `decodePacing` | `boolean` | `false` | Pace `VideoDecoder` queue to DTS (helps absorb connect-time bursts). |
+| `muted` | `boolean` | — | Start audio muted (browsers block autoplay with sound). |
+| `debug` | `boolean` | `false` | Emit verbose `stats`/`drift` events and internal logs. |
+
+**`certHash`** — three behaviors:
+
+| You're connecting to… | Pass |
+|---|---|
+| A **self-signed** gateway | the DER SHA-256 **hex string** (64 hex chars). Browser pins it via `serverCertificateHashes` (Chrome only). |
+| A **real-CA / mkcert** gateway (PKI) | `null`. Browser validates via the normal trust store (Firefox-compatible). |
+| The **reference demo pages** in this repo | **omit it** — those pages still read `window.CERT_HASH` from `cert-hash.js` written by the gateway at boot. |
+
+For an embedded app, use a real/mkcert cert and pass `certHash: null`.
+
+### `PlayerHandle`
+
+`mountPlayer` returns a `PlayerHandle` — an `EventTarget` with the methods
+below. `connect()` returns a `Promise` that resolves on the **first decoded
+frame**.
+
+| Method | Returns | Description |
+|---|---|---|
+| `connect()` | `Promise<void>` | Open WebTransport + SRT handshake; resolves on first frame. |
+| `disconnect()` | `void` | Tear down the session; suppresses auto-reconnect. |
+| `destroy()` | `void` | `disconnect()` + release the worker, WASM, and canvas resources. Handle is dead afterwards. |
+| `setMuted(b)` | `void` | Mute / unmute audio. |
+| `setLatencyMs(ms)` | `void` | Adjust TSBPD latency live. |
+| `setRenderPacing(b)` | `void` | Toggle PTS-paced drawing. |
+| `setDecodePacing(b)` | `void` | Toggle DTS-paced decode. |
+| Getters | — | `readyState`, `state`, `videoWidth`, `videoHeight`, … |
+
+**Events** (via `handle.addEventListener(type, fn)`):
+
+```
+loadstart  connecting  open  canplay  playing  waiting
+resize  error  statechange  close  stats  drift
+```
+
+Minimal wiring:
+
+```ts
+const handle = mountPlayer(canvas, { host: 'gateway-a.example', certHash: null });
+
+handle.addEventListener('open',    () => console.log('connected'));
+handle.addEventListener('resize',  () => console.log(`${handle.videoWidth}x${handle.videoHeight}`));
+handle.addEventListener('error',   (e) => console.error('player error', e));
+handle.addEventListener('stats',   (e) => updateBitrateUI(e.detail));
+
+await handle.connect();
+```
+
+> The reference demo pages in this repo (`index.html`, `advanced.html`,
+> `stream.html`) additionally accept `?host=`, `?port=`, `?stream=`, and
+> `?token=` URL params for quick manual testing. That URL-param layer is a
+> convenience of the demos, **not** part of the embed API — embedders pass
+> `opts` to `mountPlayer`.
+
+## Cert modes
+
+| Gateway `--cert-mode` | Browser trust | Cross-origin works? | Firefox? | Notes |
+|---|---|---|---|---|
+| `self` (default) | `serverCertificateHashes` pin (Chrome only) | Only if you ship the hash | No | Hash **rotates on every gateway restart** — you must refresh it. |
+| `mkcert` / real CA | Normal PKI trust store | Yes | Yes | Recommended for any non-LAN / embedded deployment. |
+
+For embedding, run the gateway with `--cert-mode mkcert` (LAN) or a real
+Let's Encrypt cert (public hostname) and pass `certHash: null`. Self-signed is
+fine for local Chrome-only testing if you pass the current hash.
 
 ```sh
 websrt-gateway --cert-mode mkcert --wt-port 4433 ...
 ```
 
-(mkcert for LAN, or a Let's Encrypt cert for public hostnames.) This also adds
-Firefox support. Self-signed mode (`--cert-mode self`, the default) does **not**
-work cross-origin without also shipping Gateway A's `cert-hash.js` to Server B,
-and that hash rotates on every gateway restart — don't bother for production.
-
-### 2. Server B — serve the player bundle, point it at A
-
-Build the web client and host `web/dist/` from Server B's HTTPS origin:
-
-```sh
-./build.sh web build      # -> web/dist/
-# serve web/dist/ over HTTPS on Server B
-```
-
-Open:
-
-```
-https://www.example.com/?host=gateway-a.example&port=4433&stream=mylive
-```
-
-For the publisher page, use `?publish=` instead of `?stream=`.
-
-## Cert modes at a glance
-
-| Gateway `--cert-mode` | Cross-origin (B → A)? | Firefox? |
-|---|---|---|
-| `self` (default) | Only if Server B serves A's `cert-hash.js` (rotates each restart) | No |
-| `mkcert` / real CA | Yes | Yes |
-
-Use `mkcert` (or a real cert) for cross-origin.
-
 ## What does NOT work
 
-- **Reverse-proxying `/wt`** through nginx/caddy on Server B. WebTransport runs
-  over HTTP/3 datagrams; essentially no L7 proxy passes it through. Connect to
-  Gateway A's origin directly.
-- **Loading a self-signed Gateway A in an iframe.** It "works" but triggers the
-  browser's cert warning on every load and Firefox blocks it outright. Use
-  `?host=` + `mkcert` instead.
+- **Reverse-proxying `/wt` through an L7 proxy** (nginx, caddy, a CDN).
+  WebTransport runs over **HTTP/3 datagrams**; essentially no L7 proxy in its
+  default configuration passes H3 datagrams through. The browser must connect
+  to the gateway's origin **directly**. Connect your page to the gateway, don't
+  try to front it.
+- **Embedding a self-signed gateway in an `<iframe>`.** It "works" but fires
+  the browser's cert warning on every load, and Firefox blocks self-signed
+  content in frames outright. Use a real/mkcert cert and connect directly from
+  your page instead.
 
 ## Security
 
-- `?token=` is sent in the WT URL query string — it can appear in browser
-  history and gateway logs. For production, use the library's auth callback in
-  your own binary rather than the reference binary's query-string scheme.
-- On Server B, scope CSP to the gateway origin:
+- **`?token=` (and `opts.token`) travel in the WebTransport URL query string**,
+  so they can appear in browser history and gateway logs. The query-string
+  scheme is the reference binary's convenience auth. For production, prefer the
+  library's auth callback in your own gateway binary over passing tokens from
+  the page.
+- **Scope CSP to the gateway origin** on the page that embeds the player:
   ```http
   Content-Security-Policy: connect-src 'self' https://gateway-a.example:4433;
   ```
+  WebTransport connections count against `connect-src`; the WASM/worker fetches
+  are same-origin (covered by `'self'`).
