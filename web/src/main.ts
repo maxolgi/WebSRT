@@ -1,22 +1,27 @@
-// Simple viewer page entrypoint. Thin wrapper around createViewer() that
-// injects DOM-backed UI sinks (log <pre>, status <p>, stats <pre>).
+// Simple viewer page entrypoint. Thin wrapper around mountPlayer() that wires
+// the DOM (log/status/stats/controls) to the HTMLMediaElement-like PlayerHandle.
 
+import { mountPlayer } from './player';
+import type {
+  PlayerState,
+  PlayerStatsDetail,
+  PlayerErrorDetail,
+  PlayerResizeDetail,
+} from './player';
 import type { StatsMsg, DemuxStatsMsg } from './worker';
 import { summarizePmt, type PmtEntry } from './shared/pmt';
-import { createViewer, type ConnectionState } from './shared/viewer';
 
 const logEl = document.getElementById('log') as HTMLPreElement;
 const statusEl = document.getElementById('status') as HTMLParagraphElement;
+const statsEl = document.getElementById('stats') as HTMLPreElement;
 const connectBtn = document.getElementById('connect') as HTMLButtonElement;
 const canvas = document.getElementById('video-canvas') as HTMLCanvasElement;
 const latencyNum = document.getElementById('latency-num') as HTMLInputElement;
-const statsEl = document.getElementById('stats') as HTMLPreElement;
 const muteBtn = document.getElementById('mute') as HTMLButtonElement;
 const fullscreenBtn = document.getElementById('fullscreen') as HTMLButtonElement;
 
-// Tracks the most recent A/V drift sample (mirrors the closure state inside
-// the viewer; surfaced via onDrift so updateStats() can render it).
 let latestDriftMs: number | null = null;
+let firstFrameLogged = false;
 
 function log(msg: string, cls = '') {
   const lines = logEl.children;
@@ -30,50 +35,31 @@ function log(msg: string, cls = '') {
 
 function setStatus(s: string) { statusEl.textContent = s; }
 
-function onStateChange(s: ConnectionState) {
-  if (s === 'connected') connectBtn.textContent = 'stop';
-  else if (s === 'connecting') connectBtn.textContent = 'connecting…';
-  else connectBtn.textContent = 'connect';
+function setMuteBtn() {
+  muteBtn.textContent = handle.muted ? 'muted' : 'mute';
 }
 
 const savedLatency = localStorage.getItem('latency');
 if (savedLatency) latencyNum.value = savedLatency;
-latencyNum.addEventListener('input', () => {
-  const v = Math.max(20, Math.min(8000, +latencyNum.value || 120));
-  latencyNum.value = String(v);
-  localStorage.setItem('latency', String(v));
-});
 
-const viewer = createViewer({
-  canvas,
-  latencyInput: latencyNum,
-  muteBtn,
-  ui: {
-    log,
-    setStatus,
-    onStateChange,
-    onFirstFrame: (w, h) => {
-      log(`first frame decoded ✓ (${w}x${h})`, 'ok');
-      setStatus(`decoding ${w}x${h}`);
-    },
-    onVideoConfigured: (info) =>
-      log(`VideoDecoder configured (profile ${info.profile}, level ${info.level})`, 'info'),
-    onAudioReady: () => log('AudioDecoder ready', 'info'),
-    onStats: (s, demux) => updateStats(s, demux),
-    onDrift: (driftMs) => { latestDriftMs = driftMs; },
-  },
-});
+const handle = mountPlayer(canvas, { latencyMs: +latencyNum.value || 300 });
 
 connectBtn.addEventListener('click', () => {
-  if (viewer.isActive()) {
-    viewer.disconnect();
-    setStatus('disconnected');
-  } else {
-    viewer.connect();
-  }
+  if (handle.state !== 'idle') handle.disconnect();
+  else handle.connect().catch(() => {});
 });
 
-// muteBtn click handler is registered inside the viewer (it owns audioEl).
+latencyNum.addEventListener('change', () => {
+  const v = Math.max(20, Math.min(8000, +latencyNum.value || 300));
+  latencyNum.value = String(v);
+  localStorage.setItem('latency', String(v));
+  handle.setLatencyMs(v);
+});
+
+muteBtn.addEventListener('click', () => {
+  handle.setMuted(!handle.muted);
+  setMuteBtn();
+});
 
 fullscreenBtn.addEventListener('click', () => {
   if (document.fullscreenElement) document.exitFullscreen();
@@ -81,7 +67,55 @@ fullscreenBtn.addEventListener('click', () => {
 });
 
 document.addEventListener('visibilitychange', () => {
-  viewer.onVisibilityChange(!document.hidden);
+  handle.getWorker()?.postMessage({ cmd: 'visibility', visible: !document.hidden });
+});
+
+const stateLabel: Record<PlayerState, string> = {
+  idle: 'idle',
+  connecting: 'connecting…',
+  connected: 'connected',
+  reconnecting: 'reconnecting…',
+  error: 'error',
+};
+
+handle.addEventListener('statechange', (ev) => {
+  const s = (ev as CustomEvent<PlayerState>).detail;
+  connectBtn.textContent = s === 'idle' || s === 'error' ? 'connect' : 'disconnect';
+  setStatus(stateLabel[s]);
+  if (s === 'idle') {
+    latestDriftMs = null;
+    muteBtn.disabled = true;
+  }
+  const cls = s === 'connected' ? 'ok' : s === 'error' ? 'err' : 'info';
+  log(`state: ${s}`, cls);
+});
+
+handle.addEventListener('playing', () => {
+  muteBtn.disabled = false;
+  setMuteBtn();
+  setStatus(`decoding ${handle.videoWidth}x${handle.videoHeight}`);
+});
+
+handle.addEventListener('error', (ev) => {
+  const { message } = (ev as CustomEvent<PlayerErrorDetail>).detail;
+  setStatus(`error: ${message}`);
+  log(message, 'err');
+});
+
+handle.addEventListener('stats', (ev) => {
+  const { stats, demux } = (ev as CustomEvent<PlayerStatsDetail>).detail;
+  updateStats(stats, demux);
+});
+
+handle.addEventListener('drift', (ev) => {
+  latestDriftMs = (ev as CustomEvent<number>).detail;
+});
+
+handle.addEventListener('resize', (ev) => {
+  if (firstFrameLogged) return;
+  firstFrameLogged = true;
+  const { width, height } = (ev as CustomEvent<PlayerResizeDetail>).detail;
+  log(`first frame ${width}x${height}`, 'ok');
 });
 
 function updateStats(s: StatsMsg, demux: DemuxStatsMsg | null) {
@@ -138,7 +172,7 @@ function formatDemuxLine(d: DemuxStatsMsg | null): string {
 
 if ((window as any).CERT_HASH !== undefined) {
   log((window as any).CERT_HASH ? 'Cert hash loaded — auto-connecting…' : 'mkcert mode — auto-connecting…', 'info');
-  viewer.connect();
+  handle.connect().catch(() => {});
 } else {
   log('No cert-hash.js. Start the gateway first, then reload.', 'info');
 }
