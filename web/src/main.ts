@@ -42,7 +42,7 @@ function setMuteBtn() {
 const savedLatency = localStorage.getItem('latency');
 if (savedLatency) latencyNum.value = savedLatency;
 
-const handle = mountPlayer(canvas, { latencyMs: +latencyNum.value || 300 });
+const handle = mountPlayer(canvas, { latencyMs: +latencyNum.value || 120 });
 
 connectBtn.addEventListener('click', () => {
   if (handle.state !== 'idle') handle.disconnect();
@@ -50,7 +50,7 @@ connectBtn.addEventListener('click', () => {
 });
 
 latencyNum.addEventListener('change', () => {
-  const v = Math.max(20, Math.min(8000, +latencyNum.value || 300));
+  const v = Math.max(20, Math.min(8000, +latencyNum.value || 120));
   latencyNum.value = String(v);
   localStorage.setItem('latency', String(v));
   handle.setLatencyMs(v);
