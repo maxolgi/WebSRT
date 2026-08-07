@@ -2,7 +2,8 @@ import { render } from 'preact';
 import { DebugStore } from './debug/store';
 import { DebugPanel } from './debug/components/Panel';
 import { attachConsoleErrorCapture } from './debug/sampler';
-import { createViewer, type ConnectionState } from './shared/viewer';
+import { mountPlayer } from './player';
+import type { PlayerHandle, PlayerState, PlayerErrorDetail, PlayerResizeDetail } from './player';
 import type { PublishCmd, PublishMsg, EncodeStats } from './stream-worker';
 import type { StatsMsg } from './worker';
 
@@ -82,24 +83,47 @@ function setStatus(s: string) { store.status.value = s; }
 
 // ─── Stream-back viewer (round-trip from gateway) ─────────────────
 
-const pbViewer = createViewer({
-  canvas: playbackCanvas,
-  latencyInput: playbackLatencyNum,
-  muteBtn: playbackMuteBtn,
-  baseReconnectDelayMs: 1000,
-  getStreamName: () => streamNameInput.value || 'default',
-  ui: {
-    log: (msg, cls) => store.pushLog(`[playback] ${msg}`, cls),
-    setStatus: (s) => store.pushLog(`[playback] ${s}`, 'info'),
-    onStateChange: (s: ConnectionState) => {
-      playbackToggleBtn.textContent = s === 'idle' ? 'play' : 'stop';
-      if (s === 'connected') playbackMuteBtn.disabled = false;
-      else { playbackMuteBtn.disabled = true; playbackMuteBtn.textContent = 'muted'; }
-    },
-    onFirstFrame: (w, h) => store.pushLog(`[playback] first frame ${w}x${h}`, 'ok'),
-    onVideoConfigured: (info) => store.pushLog(`[playback] decoder profile ${info.profile} level ${info.level}`, 'info'),
-    onAudioReady: () => store.pushLog('[playback] audio ready', 'info'),
-  },
+let pbHandle: PlayerHandle | null = null;
+let pbStream = '';
+
+function mountPlayback(stream: string): void {
+  pbHandle?.destroy();
+  const h = mountPlayer(playbackCanvas, {
+    stream,
+    latencyMs: +playbackLatencyNum.value || 120,
+    muted: true,
+  });
+  pbHandle = h;
+  pbStream = stream;
+  h.addEventListener('statechange', (ev) => {
+    const s = (ev as CustomEvent<PlayerState>).detail;
+    playbackToggleBtn.textContent = (s === 'idle' || s === 'error') ? 'play' : 'stop';
+    if (s === 'connected') playbackMuteBtn.disabled = false;
+    else { playbackMuteBtn.disabled = true; playbackMuteBtn.textContent = 'muted'; }
+  });
+  h.addEventListener('resize', (ev) => {
+    const { width, height } = (ev as CustomEvent<PlayerResizeDetail>).detail;
+    store.pushLog(`[playback] first frame ${width}x${height}`, 'ok');
+  });
+  h.addEventListener('playing', () => store.pushLog('[playback] playing', 'info'));
+  h.addEventListener('error', (ev) => {
+    const { message } = (ev as CustomEvent<PlayerErrorDetail>).detail;
+    store.pushLog(`[playback] ${message}`, 'err');
+  });
+}
+
+function playbackActive(): boolean {
+  return pbHandle !== null && pbHandle.state !== 'idle' && pbHandle.state !== 'error';
+}
+
+playbackLatencyNum.addEventListener('change', () => {
+  pbHandle?.setLatencyMs(+playbackLatencyNum.value);
+});
+
+playbackMuteBtn.addEventListener('click', () => {
+  if (!pbHandle) return;
+  pbHandle.setMuted(!pbHandle.muted);
+  playbackMuteBtn.textContent = pbHandle.muted ? 'muted' : 'mute';
 });
 
 function setPanelVisible(visible: boolean) {
@@ -512,7 +536,7 @@ stopBtn.addEventListener('click', () => stopAll());
 function stopAll() {
   publishing = false;
   stopFramePump();
-  pbViewer.disconnect();
+  pbHandle?.disconnect();
   viewerLink.style.display = 'none';
   if (worker) {
     worker.postMessage({ cmd: 'stop' } as PublishCmd);
@@ -554,9 +578,11 @@ function handleWorkerMsg(msg: PublishMsg) {
       log('SRT handshake complete', 'ok');
       setStatus('LIVE');
       startFramePump();
-      if (!pbViewer.isActive()) {
+      if (!playbackActive()) {
+        const sn = streamNameInput.value || 'default';
+        if (!pbHandle || pbStream !== sn) mountPlayback(sn);
         store.pushLog('[playback] auto-connecting stream-back…', 'info');
-        pbViewer.connect();
+        pbHandle?.connect().catch(() => {});
       }
       break;
     case 'close':
@@ -614,8 +640,13 @@ document.addEventListener('visibilitychange', () => {
 });
 
 playbackToggleBtn.addEventListener('click', () => {
-  if (pbViewer.isActive()) pbViewer.disconnect();
-  else pbViewer.connect();
+  if (playbackActive()) {
+    pbHandle?.disconnect();
+  } else {
+    const sn = streamNameInput.value || 'default';
+    if (!pbHandle || pbStream !== sn) mountPlayback(sn);
+    pbHandle?.connect().catch(() => {});
+  }
 });
 
 // ─── Init ─────────────────────────────────────────────────────────
