@@ -10,7 +10,9 @@ import type { StatsMsg } from './worker';
 // ─── DOM refs ─────────────────────────────────────────────────────
 
 const previewEl = document.getElementById('preview') as HTMLVideoElement;
-const shareBtn = document.getElementById('share-btn') as HTMLButtonElement;
+const sourceSelect = document.getElementById('source-select') as HTMLSelectElement;
+const cameraSelect = document.getElementById('camera-select') as HTMLSelectElement;
+const captureBtn = document.getElementById('capture-btn') as HTMLButtonElement;
 const publishBtn = document.getElementById('publish-btn') as HTMLButtonElement;
 const stopBtn = document.getElementById('stop-btn') as HTMLButtonElement;
 const streamNameInput = document.getElementById('stream-name') as HTMLInputElement;
@@ -149,6 +151,7 @@ function setPanelVisible(visible: boolean) {
 let worker: Worker | null = null;
 let captureStream: MediaStream | null = null;
 let publishing = false;
+let capturing = false;
 let credits = 0;
 let rafId: number | null = null;
 let bgWorker: Worker | null = null;
@@ -241,6 +244,7 @@ function populateAudioSources() {
 }
 
 let micOptions: HTMLOptionElement[] = [];
+let cameraOptions: HTMLOptionElement[] = [];
 
 async function enumerateMics() {
   try {
@@ -254,6 +258,29 @@ async function enumerateMics() {
     });
     populateAudioSources();
   } catch { /* ignore */ }
+}
+
+async function enumerateCameras() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cameras = devices.filter((d) => d.kind === 'videoinput');
+    cameraOptions = cameras.map((c) => {
+      const opt = document.createElement('option');
+      opt.value = c.deviceId;
+      opt.textContent = c.label || `Camera ${c.deviceId.slice(0, 8)}`;
+      return opt;
+    });
+    populateCameraSelect();
+  } catch { /* ignore */ }
+}
+
+function populateCameraSelect() {
+  const current = cameraSelect.value;
+  cameraSelect.innerHTML = '';
+  for (const opt of cameraOptions) {
+    cameraSelect.appendChild(opt.cloneNode(true) as HTMLOptionElement);
+  }
+  cameraSelect.value = current || cameraOptions[0]?.value || '';
 }
 
 // ─── AudioWorklet (inline, matching decode.ts pattern) ────────────
@@ -350,49 +377,110 @@ function disconnectAudioSource() {
   }
 }
 
-// ─── Screen capture ───────────────────────────────────────────────
+// ─── Source capture (screen / webcam) ──────────────────────────────
 
-shareBtn.addEventListener('click', async () => {
-  try {
-    const stream = await navigator.mediaDevices.getDisplayMedia({
+sourceSelect.addEventListener('change', () => {
+  const isWebcam = sourceSelect.value === 'webcam';
+  cameraSelect.style.display = isWebcam ? '' : 'none';
+  cameraSelect.disabled = !isWebcam;
+  if (isWebcam && cameraOptions.length === 0) {
+    enumerateCameras();
+  }
+});
+
+async function startCapture(): Promise<void> {
+  const source = sourceSelect.value;
+  let stream: MediaStream;
+
+  if (source === 'screen') {
+    stream = await navigator.mediaDevices.getDisplayMedia({
       video: { frameRate: { ideal: +framerateSelect.value } },
       audio: true,
     });
-    captureStream = stream;
-    previewEl.srcObject = stream;
-    await previewEl.play();
-
-    // Tab/system audio now appears in the dropdown
     await enumerateMics();
-
-    shareBtn.disabled = true;
-    publishBtn.disabled = false;
-    setStatus('screen captured — ready to publish');
-    log(`Captured ${stream.getVideoTracks()[0]?.getSettings().width}x${stream.getVideoTracks()[0]?.getSettings().height}`, 'info');
-
-    // Auto-detect codec
-    const vTrack = stream.getVideoTracks()[0];
-    const settings = vTrack?.getSettings();
-    const w = settings?.width ?? 1280;
-    const h = settings?.height ?? 720;
-    const fps = +framerateSelect.value;
-    const br = +bitrateNum.value;
-    const codec = await detectCodec(w, h, fps, br);
-    if (codec) {
-      log(`Codec auto-detected: ${detectedCodecLabel} (${codec})`, 'info');
-    } else {
-      log('No supported codec found!', 'err');
-    }
-
-    // Handle user clicking browser's "Stop sharing"
-    stream.getVideoTracks()[0]?.addEventListener('ended', () => {
-      stopAll();
-      shareBtn.disabled = false;
-      publishBtn.disabled = true;
-      setStatus('screen sharing ended');
+  } else {
+    const deviceId = cameraSelect.value || undefined;
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+        frameRate: { ideal: +framerateSelect.value },
+      },
+      audio: true,
     });
+    // Re-enumerate cameras now that permission is granted (labels populate)
+    await enumerateCameras();
+    // Auto-pair the webcam's mic in the audio dropdown. The audio track
+    // from this getUserMedia is stopped — connectAudioSource() will
+    // re-acquire the mic at publish time via the existing deviceId path.
+    const audioTrack = stream.getAudioTracks()[0];
+    if (audioTrack) {
+      const micDeviceId = audioTrack.getSettings().deviceId;
+      audioTrack.stop();
+      stream.removeTrack(audioTrack);
+      if (micDeviceId) {
+        await enumerateMics();
+        audioSourceSelect.value = micDeviceId;
+      }
+    }
+  }
+
+  // Stop any previous capture before wiring the new one.
+  if (captureStream) {
+    captureStream.getTracks().forEach((t) => t.stop());
+  }
+
+  captureStream = stream;
+  previewEl.srcObject = stream;
+  await previewEl.play();
+
+  stream.getVideoTracks()[0]?.addEventListener('ended', () => {
+    stopCapture();
+  });
+
+  capturing = true;
+  captureBtn.textContent = 'Stop Capture';
+  publishBtn.disabled = false;
+
+  const vTrack = stream.getVideoTracks()[0];
+  const settings = vTrack?.getSettings();
+  const w = settings?.width ?? 1280;
+  const h = settings?.height ?? 720;
+  log(`Captured ${w}x${h} (${source})`, 'info');
+  setStatus(`${source === 'screen' ? 'screen' : 'webcam'} captured — ready to publish`);
+
+  const fps = +framerateSelect.value;
+  const br = +bitrateNum.value;
+  const codec = await detectCodec(w, h, fps, br);
+  if (codec) {
+    log(`Codec auto-detected: ${detectedCodecLabel} (${codec})`, 'info');
+  } else {
+    log('No supported codec found!', 'err');
+  }
+}
+
+function stopCapture(): void {
+  if (publishing) stopAll();
+  if (captureStream) {
+    captureStream.getTracks().forEach((t) => t.stop());
+  }
+  captureStream = null;
+  previewEl.srcObject = null;
+  capturing = false;
+  captureBtn.textContent = 'Capture';
+  publishBtn.disabled = true;
+  populateAudioSources();
+  setStatus('capture stopped');
+}
+
+captureBtn.addEventListener('click', async () => {
+  if (capturing) {
+    stopCapture();
+    return;
+  }
+  try {
+    await startCapture();
   } catch (e) {
-    log(`Screen capture failed: ${e}`, 'err');
+    log(`Capture failed: ${e}`, 'err');
     setStatus('capture failed');
   }
 });
@@ -665,7 +753,11 @@ streamNameInput.addEventListener('change', () => {
 
 populateCodecSelect();
 enumerateMics();
-navigator.mediaDevices?.addEventListener('devicechange', enumerateMics);
+enumerateCameras();
+navigator.mediaDevices?.addEventListener('devicechange', () => {
+  enumerateMics();
+  enumerateCameras();
+});
 
 setPanelVisible(false);
 

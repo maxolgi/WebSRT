@@ -43,10 +43,10 @@
       }
       button:hover { background: #333; }
       button:disabled { opacity: 0.5; cursor: default; }
-      #share-btn:not(:disabled), #publish-btn:not(:disabled) {
+      #capture-btn:not(:disabled), #publish-btn:not(:disabled) {
         background: #1b5e20; color: #b9f6ca; border-color: #2e7d32;
       }
-      #share-btn:not(:disabled):hover, #publish-btn:not(:disabled):hover {
+      #capture-btn:not(:disabled):hover, #publish-btn:not(:disabled):hover {
         background: #2e7d32;
       }
       .controls { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -125,7 +125,12 @@
         <h2>Capture</h2>
         <video id="preview" width="640" height="360" muted playsinline></video>
         <div class="controls">
-          <button id="share-btn">Share Screen</button>
+          <select id="source-select">
+            <option value="screen">Screen</option>
+            <option value="webcam">Webcam</option>
+          </select>
+          <select id="camera-select" disabled style="display:none;"></select>
+          <button id="capture-btn">Capture</button>
           <button id="publish-btn" disabled>Start Publishing</button>
           <button id="stop-btn" disabled>Stop</button>
           <button id="debug-toggle">debug</button>
