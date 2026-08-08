@@ -14,6 +14,7 @@ export function mountDebug(
   container: HTMLElement,
 ): { destroy(): void } {
   const store = new DebugStore();
+  store.latencyMs.value = handle.latencyMs;
   const log = (msg: string, cls = ''): void => store.pushLog(msg, cls);
 
   render(createElement(DebugPanel, { store }), container);

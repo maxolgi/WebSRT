@@ -97,6 +97,8 @@ export interface ViewerHandle {
   /** Set TSBPD latency (ms). Reconnects if active and the value changed,
    *  mirroring the `latencyInput` change handler. Works without any DOM. */
   setLatencyMs(ms: number): void;
+  /** Current TSBPD latency in milliseconds. */
+  getLatencyMs(): number;
   /** Mute or unmute audio. Works without any DOM element. */
   setMuted(muted: boolean): void;
   /** Tab visibility changed (drives worker visibility message). */
@@ -460,6 +462,7 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
     connect: doConnect,
     disconnect: doDisconnect,
     setLatencyMs,
+    getLatencyMs: () => currentLatencyMs,
     setMuted,
     onVisibilityChange(visible: boolean) {
       worker?.postMessage({ cmd: 'visibility', visible });

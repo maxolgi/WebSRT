@@ -68,6 +68,7 @@ export interface PlayerHandle extends EventTarget {
   readonly videoHeight: number;
   setMuted(muted: boolean): void;
   setLatencyMs(ms: number): void;
+  readonly latencyMs: number;
   setRenderPacing(enabled: boolean): void;
   setDecodePacing(enabled: boolean): void;
   getRenderer(): CanvasRenderer | null;
@@ -257,6 +258,7 @@ class Player extends EventTarget implements PlayerHandle {
   get readyState(): number { return this._readyState; }
   get state(): PlayerState { return this._state; }
   get muted(): boolean { return this._muted; }
+  get latencyMs(): number { return this.viewer.getLatencyMs(); }
   get volume(): number { return this._volume; }
   set volume(v: number) {
     // Stored only — the audio element is owned privately by the viewer and
