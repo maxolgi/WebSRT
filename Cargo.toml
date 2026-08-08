@@ -41,5 +41,6 @@ lto = true
 codegen-units = 1
 
 [patch.crates-io]
-srt-protocol = { git = "https://github.com/maxolgi/srt-rs.git" }
-mpeg2ts = { git = "https://github.com/maxolgi/mpeg2ts.git" }
+srt-protocol = { git = "https://github.com/maxolgi/srt-rs.git", branch = "main" }
+srt-tokio = { git = "https://github.com/maxolgi/srt-rs.git", branch = "main" }
+mpeg2ts = { git = "https://github.com/maxolgi/mpeg2ts.git", branch = "master" }

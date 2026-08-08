@@ -83,6 +83,11 @@ Commands:
           sudo supervisorctl restart websrt. Prints the config and log
           paths first so you can Ctrl-C on a machine without supervisord.
 
+  update-forks
+          Pull latest commits from both forked crates into Cargo.lock:
+          srt-protocol + srt-tokio (maxolgi/srt-rs, branch: main)
+          mpeg2ts (maxolgi/mpeg2ts, branch: master)
+
   all [--sim-loss] [--debug]
           Full clean rebuild: clean -y → setup → gateway → web build.
 
@@ -353,6 +358,26 @@ EOF
     ok "websrt restarted"
 }
 
+cmd_update_forks() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                cat <<'EOF' >&2
+update-forks — pull latest commits from both forked crates
+Usage: ./build.sh update-forks
+Updates Cargo.lock for srt-protocol, srt-tokio, and mpeg2ts.
+EOF
+                return 0 ;;
+            *) err "update-forks: unknown arg: $1"; return 2 ;;
+        esac
+    done
+    info "updating srt-protocol + srt-tokio (maxolgi/srt-rs, branch: main)"
+    cargo update -p srt-protocol -p srt-tokio || err "cargo update failed for srt-rs"
+    info "updating mpeg2ts (maxolgi/mpeg2ts, branch: master)"
+    cargo update -p mpeg2ts || err "cargo update failed for mpeg2ts"
+    ok "fork update complete"
+}
+
 cmd_clean() {
     local keep_target=0
     local assume_yes=0
@@ -450,6 +475,7 @@ case "$CMD" in
     test)          cmd_test "$@" ;;
     srt-protocol)  cmd_srt_protocol "$@" ;;
     restart)       cmd_restart "$@" ;;
+    update-forks)  cmd_update_forks "$@" ;;
     clean)         cmd_clean "$@" ;;
     all)           cmd_all "$@" ;;
     *)

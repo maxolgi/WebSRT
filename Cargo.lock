@@ -907,7 +907,7 @@ dependencies = [
 [[package]]
 name = "mpeg2ts"
 version = "0.6.0"
-source = "git+https://github.com/maxolgi/mpeg2ts.git#216cee77f258315945486b0b142192b773fbeadf"
+source = "git+https://github.com/maxolgi/mpeg2ts.git?branch=master#216cee77f258315945486b0b142192b773fbeadf"
 
 [[package]]
 name = "mpeg2ts-wasm"
@@ -1610,7 +1610,7 @@ dependencies = [
 [[package]]
 name = "srt-protocol"
 version = "0.4.4"
-source = "git+https://github.com/maxolgi/srt-rs.git#ac4333228b1a3e19efc0d361119fda4f7c7693e5"
+source = "git+https://github.com/maxolgi/srt-rs.git?branch=main#ac4333228b1a3e19efc0d361119fda4f7c7693e5"
 dependencies = [
  "aes",
  "array-init",
@@ -1639,8 +1639,7 @@ dependencies = [
 [[package]]
 name = "srt-tokio"
 version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a55cb90afac5672b00954e3291846dd262cfef3b52d1b507f580180433373d3"
+source = "git+https://github.com/maxolgi/srt-rs.git?branch=main#ac4333228b1a3e19efc0d361119fda4f7c7693e5"
 dependencies = [
  "bytes",
  "futures",

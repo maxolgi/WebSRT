@@ -64,7 +64,7 @@ cd web && npx tsc --noEmit
 
 ## Critical build order
 
-1. Forked `srt-protocol` (`maxolgi/srt-rs`) changes → `./build.sh srt-protocol` (rebuilds BOTH the gateway binary AND srt-wasm + copies pkg to web/wasm/)
+1. Forked `srt-protocol` (`maxolgi/srt-rs`) changes → `cargo update -p srt-protocol -p srt-tokio` (pull new commit) then `./build.sh srt-protocol` (rebuilds BOTH the gateway binary AND srt-wasm + copies pkg to web/wasm/)
 2. Changing only `web/src/*.ts` / `*.tsx` → Vite hot-reloads, no rebuild needed
 3. Changing `crates/srt-wasm/src/lib.rs` → `./build.sh wasm srt` + browser reload
 4. Changing `crates/mpeg2ts-wasm/` or `crates/ts-muxer-wasm/` → `./build.sh wasm <crate>` + browser reload
@@ -89,7 +89,13 @@ cd web && npx tsc --noEmit
 
 ## Forked crates (patched, not upstream)
 
-- `maxolgi/srt-rs` (main) — forked from `russelltg/srt-rs` v0.4.4 (commit `d4c08ac`). Eleven patches:
+Two external crates are forked and patched. Both are wired via `[patch.crates-io]`
+in root `Cargo.toml`. Cargo.lock pins each to a specific commit hash — **new
+commits pushed to a fork are NOT pulled automatically**. You must run `cargo update`
+(see [Updating forked crates](#updating-forked-crates) below).
+
+- **`maxolgi/srt-rs`** (branch: `main`) — forked from `russelltg/srt-rs` v0.4.4 (commit `d4c08ac`).
+  Provides `srt-protocol` + `srt-tokio`. Twelve patches:
   1. `std::time::Instant` → `web_time::Instant` across all source files (WASM compat; no-op on native).
   2. `TimeBase::adjust()` sign flip: upstream applies `-drift` which doubles TSBPD clock error every sync; changed to `+drift`.
   3. TLPKTL `checked_sub` in `protocol/receiver/buffer.rs` to prevent underflow panic early in page life.
@@ -101,9 +107,35 @@ cd web && npx tsc --noEmit
   9. `settings/connection.rs` + `protocol/time/rtt.rs` + `protocol/receiver/arq.rs` + `protocol/sender/buffer.rs`: `ConnInitSettings.initial_rtt: Option<Duration>` field that seeds `SendBuffer.rtt` and `ARQ.rtt` via `Rtt::from_mean_duration` (variance = mean/4). Repurposes the dead `ConnectionSettings.rtt` field.
   10. `protocol/sender/buffer.rs`: CC-aware retransmit skip in `send_next_lost_packet` — if `now + rtt.mean()` exceeds the packet's TSBPD deadline (`timestamp + latency_window`), the retransmit is skipped (receiver will drop it as too-late anyway).
   11. `protocol/sender/buffer.rs` + `protocol/sender/mod.rs` + `connection/mod.rs`: Populate `SocketStatistics.tx_average_rtt` from `SendBuffer.rtt` in `update_statistics`. The field was declared but never assigned — only `rx_average_rtt` was populated. Without this, publisher-side stats show RTT=0 because the receiver half is idle.
-- `maxolgi/mpeg2ts` (master) — forked from `sile/mpeg2ts` v0.6.0 (commit `82e68d4`). One patch:
+  12. `connection/mod.rs` + `packet/control/srt.rs`: Handle `CongestionWarning`, `PeerError`, and unknown SRT control packets without panicking (was `todo!()`/`unimplemented!()`). Advertise `TLPKTDROP` + `NAKREPORT` in `SrtShakeFlags::SUPPORTED` (both are enabled by default but were not advertised to the peer).
+- **`maxolgi/mpeg2ts`** (branch: `master`) — forked from `sile/mpeg2ts` v0.6.0 (commit `82e68d4`). One patch:
   1. `ts/reader.rs`: unknown PIDs return Raw bytes instead of erroring, preventing byte-stream misalignment when the receiver joins mid-stream.
-- Both wired via `[patch.crates-io]` in root `Cargo.toml`.
+
+### Updating forked crates
+
+Cargo.lock pins each fork to a specific commit hash. **New commits pushed to a
+fork are NOT pulled automatically.** After pushing changes to a fork, you must
+explicitly update Cargo.lock:
+
+    # After pushing to maxolgi/srt-rs (branch: main):
+    cargo update -p srt-protocol -p srt-tokio
+
+    # After pushing to maxolgi/mpeg2ts (branch: master):
+    cargo update -p mpeg2ts
+
+    # Or update both at once:
+    ./build.sh update-forks
+
+After updating `srt-protocol`, you must also rebuild srt-wasm (it depends on
+srt-protocol). Run `./build.sh srt-protocol` for the full gateway + WASM rebuild.
+
+**DO NOT edit files in `~/.cargo/git/checkouts/`** — cargo overwrites that
+directory on `cargo clean` or `cargo update`. To edit fork source:
+
+1. Clone the fork separately (e.g., `git clone git@github.com:maxolgi/srt-rs.git`)
+2. Make changes on the correct branch (`main` for srt-rs, `master` for mpeg2ts)
+3. Push to GitHub
+4. Run `cargo update -p <crate>` in WebSRT to pull the new commit
 
 ### Inherited QUIC features (via WebTransport)
 
