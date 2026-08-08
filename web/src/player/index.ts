@@ -29,6 +29,10 @@ export interface PlayerOptions {
   decodeInWorker?: boolean;
   /** Auto-reconnect on disconnect. Default true. Set false for custom reconnection. */
   autoReconnect?: boolean;
+  /** Override worker URL for non-Vite embedding. See ViewerConfig.workerUrl. */
+  workerUrl?: string;
+  /** Full WebTransport endpoint URL. Overrides host/port/stream/token. */
+  url?: string;
 }
 
 export type PlayerState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
@@ -113,6 +117,8 @@ class Player extends EventTarget implements PlayerHandle {
       latencyMs: opts.latencyMs ?? 120,
       decodeInWorker: opts.decodeInWorker ?? false,
       autoReconnect: opts.autoReconnect ?? true,
+      workerUrl: opts.workerUrl,
+      url: opts.url,
       ui: {
         log: (msg, cls) => this.onLog(msg, cls),
         setStatus: () => {},

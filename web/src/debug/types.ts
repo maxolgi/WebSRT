@@ -1,119 +1,13 @@
 // Shared type contract for the debug panel. All agents and components agree
 // on these interfaces. Do not change field names without updating all
 // consumers (sampler, components, diagnostics export).
+//
+// The five core stat interfaces live in ../shared/types so the core modules
+// (worker, decode, render) can typecheck without depending on debug/**.
+// Re-exported here for backwards compatibility with existing consumers.
+import type { VideoStats, AudioStats, RenderStats, DemuxStatsSerialized } from '../shared/types';
 
-export interface VideoStats {
-  codec: 'h264' | 'hevc' | 'av1' | null;
-  codecString: string | null;
-  decoderState: string;
-  decodeQueueSize: number;
-  decodedCount: number;
-  decodeFps: number;
-  droppedFrames: number;
-  hwAcceleration: string | undefined;
-  hwModePreference: 'prefer-hardware' | 'prefer-software';
-  reconfigureCount: number;
-  profile: number;
-  level: number;
-  codedWidth: number;
-  codedHeight: number;
-}
-
-export interface AudioStats {
-  codec: string | null;
-  decoderState: string;
-  decodeQueueSize: number;
-  packetsDecoded: number;
-  droppedPackets: number;
-  sampleRate: number;
-  channels: number;
-  outputMode: 'MediaStreamTrackGenerator' | 'AudioWorklet' | null;
-}
-
-export interface RenderStats {
-  frameCount: number;
-  droppedLate: number;
-  droppedOverflow: number;
-  ringLength: number;
-  ringCap: number;
-  currentPtsUs: number | null;
-  fps: number;
-  rafDeltaMs: number;
-}
-
-// Mirrors the WASM `DebugSnapshot` (crates/mpeg2ts-wasm/src/lib.rs).
-// Every typed array is a fresh JS-owned copy; the snapshot struct is GC'd.
-// Per-PID arrays are parallel to `pids`; `scramblingCounts`/`afControlCounts`
-// are flat 4×N, `nalStats` is flat 9×M (see WASM doc comment).
-export interface DemuxStats {
-  programNum: number;
-  pmtPid: number;
-  pmtPids: Uint16Array;
-  pmtStreamTypes: Uint8Array;
-  pmtFormatIds: string[];
-  pids: Uint16Array;
-  pesCounts: Float64Array;
-  byteTotals: Float64Array;
-  bitratesMbps: Float64Array;
-  raCounts: Float64Array;
-  lastPts: Float64Array;
-  lastDts: Float64Array;
-  ptsJumps: Float64Array;
-  ccErrors: Float64Array;
-  teiCounts: Float64Array;
-  pusiCounts: Float64Array;
-  scramblingCounts: Float64Array;
-  afControlCounts: Float64Array;
-  pcrPids: Uint16Array;
-  pcrIntervalsMs: Float64Array;
-  pcrJitterMs: Float64Array;
-  nalPids: Uint16Array;
-  nalStats: Float64Array;
-  errorT: Float64Array;
-  errorMsg: string[];
-  // Packet ring — populated by WASM, rendered by the packet-timeline commit.
-  ringT: Float64Array;
-  ringPid: Uint16Array;
-  ringKind: Uint8Array;
-  ringPts: Float64Array;
-  ringDts: Float64Array;
-  ringSize: Float64Array;
-  ringRa: Uint8Array;
-  ringTei: Uint8Array;
-  ringPusi: Uint8Array;
-  ringNal: Uint8Array;
-  ringNalOffsets: Uint32Array;
-}
-
-// Plain-JSON form of DemuxStats (typed arrays → number[]) for the
-// diagnostics export, so the downloaded JSON reads as arrays not index-objects.
-export interface DemuxStatsSerialized {
-  programNum: number;
-  pmtPid: number;
-  pmtPids: number[];
-  pmtStreamTypes: number[];
-  pmtFormatIds: string[];
-  pids: number[];
-  pesCounts: number[];
-  byteTotals: number[];
-  bitratesMbps: number[];
-  raCounts: number[];
-  lastPts: number[];
-  lastDts: number[];
-  ptsJumps: number[];
-  ccErrors: number[];
-  teiCounts: number[];
-  pusiCounts: number[];
-  scramblingCounts: number[];
-  afControlCounts: number[];
-  pcrPids: number[];
-  pcrIntervalsMs: number[];
-  pcrJitterMs: number[];
-  nalPids: number[];
-  nalStats: number[];
-  errorT: number[];
-  errorMsg: string[];
-}
+export type { VideoStats, AudioStats, RenderStats, DemuxStats, DemuxStatsSerialized } from '../shared/types';
 
 export interface GpuInfo {
   vendor: string | null;

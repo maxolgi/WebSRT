@@ -1,7 +1,7 @@
 import init, { SrtReceiver, type SrtAction, type SrtStats } from '../wasm/srt-wasm/srt_wasm.js';
 import { Demuxer } from './demux';
 import { looksLikeAv1 } from './shared/av1';
-import type { DemuxStats, VideoStats, AudioStats } from './debug/types';
+import type { DemuxStats, VideoStats, AudioStats } from './shared/types';
 import { summarizePmt, ST_PRIVATE, type PmtEntry } from './shared/pmt';
 import { VideoPipeline, OpusAudioPipeline, AacAudioPipeline } from './decode';
 

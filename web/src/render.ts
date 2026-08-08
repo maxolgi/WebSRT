@@ -206,7 +206,7 @@ export class CanvasRenderer {
     }
   }
 
-  getStats(): import('./debug/types').RenderStats {
+  getStats(): import('./shared/types').RenderStats {
     return {
       frameCount: this.frameCount,
       droppedLate: this.droppedLate,

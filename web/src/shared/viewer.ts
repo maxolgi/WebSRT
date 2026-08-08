@@ -79,6 +79,14 @@ export interface ViewerConfig {
   /** When true (default), auto-reconnect with exponential backoff on disconnect.
    *  Set to false for apps that manage their own reconnection lifecycle. */
   autoReconnect?: boolean;
+  /** Override the worker script URL. Defaults to the vite-resolved
+   *  '../worker.ts'. Set this when embedding outside Vite (point it at
+   *  your bundled worker output, e.g. '/vendor/worker.js'). */
+  workerUrl?: string;
+  /** Full WebTransport endpoint URL (e.g. 'https://host:4433/wt'). When set,
+   *  overrides host/port/stream/token construction. Stream name and token
+   *  are appended as query params if not already present in the URL. */
+  url?: string;
 }
 
 export interface ViewerHandle {
@@ -122,6 +130,8 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
     getStreamName,
     decodeInWorker = false,
     autoReconnect = true,
+    workerUrl,
+    url: configUrl,
   } = config;
 
   // --- closure state (was module-level `let` in the entrypoints) ---
@@ -310,15 +320,23 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
       // The worker transfers decoded frames; we emit them via ui callbacks.
     }
 
-    const pageHost = location.hostname || '127.0.0.1';
-    const urlParams = new URLSearchParams(location.search);
-    const wtHost = host ?? urlParams.get('host') ?? (pageHost === 'localhost' ? '127.0.0.1' : pageHost);
-    const wtPort = (port ?? urlParams.get('port') ?? '4433').toString();
-    const authToken = token ?? urlParams.get('token') ?? undefined;
-    const streamName = getStreamName?.() ?? stream ?? urlParams.get('stream') ?? 'default';
-    const qp = new URLSearchParams({ stream: streamName });
-    if (authToken) qp.set('token', authToken);
-    const wtUrl = `https://${wtHost}:${wtPort}/wt?${qp}`;
+    const authToken = token ?? new URLSearchParams(location.search).get('token') ?? undefined;
+    const streamName = getStreamName?.() ?? stream ?? new URLSearchParams(location.search).get('stream') ?? 'default';
+    let wtUrl: string;
+    if (configUrl) {
+      const parsed = new URL(configUrl);
+      if (!parsed.searchParams.has('stream')) parsed.searchParams.set('stream', streamName);
+      if (authToken && !parsed.searchParams.has('token')) parsed.searchParams.set('token', authToken);
+      wtUrl = parsed.toString();
+    } else {
+      const pageHost = location.hostname || '127.0.0.1';
+      const urlParams = new URLSearchParams(location.search);
+      const wtHost = host ?? urlParams.get('host') ?? (pageHost === 'localhost' ? '127.0.0.1' : pageHost);
+      const wtPort = (port ?? urlParams.get('port') ?? '4433').toString();
+      const qp = new URLSearchParams({ stream: streamName });
+      if (authToken) qp.set('token', authToken);
+      wtUrl = `https://${wtHost}:${wtPort}/wt?${qp}`;
+    }
 
     const latencyMs = latencyInput ? +latencyInput.value : currentLatencyMs;
     appliedLatencyMs = latencyMs;
@@ -329,7 +347,7 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
     log(`connecting to ${wtUrl} (${hashLabel}) …`, 'info');
 
     if (!worker) {
-      worker = new Worker(new URL('../worker.ts', import.meta.url), { type: 'module' });
+      worker = new Worker(workerUrl ?? new URL('../worker.ts', import.meta.url), { type: 'module' });
       worker.onmessage = (e: MessageEvent) => handleWorkerMsg(e.data as WorkerMsg);
       worker.onerror = (e) => {
         log(`worker error: ${e.message}`, 'err');

@@ -1211,7 +1211,7 @@ export class VideoPipeline {
     this.deferred = keep;
   }
 
-  getStats(): import('./debug/types').VideoStats {
+  getStats(): import('./shared/types').VideoStats {
     return {
       codec: this.codec,
       codecString: this.lastCodecString ?? null,
@@ -1451,7 +1451,7 @@ abstract class AudioPipelineBase {
     return this.lastWrittenPtsUs + (performance.now() - this.lastWrittenWallMs) * 1000;
   }
 
-  getStats(): import('./debug/types').AudioStats {
+  getStats(): import('./shared/types').AudioStats {
     const MTG = (typeof window !== 'undefined' && (window as any).MediaStreamTrackGenerator);
     return {
       codec: this.codecString ?? null,
