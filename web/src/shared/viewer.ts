@@ -40,8 +40,9 @@ export interface ViewerUi {
 }
 
 export interface ViewerConfig {
-  /** Canvas element to render into. */
-  canvas: HTMLCanvasElement;
+  /** Canvas element to render into. Required when decodeInWorker is false;
+   *  unused (may be omitted) when decodeInWorker is true. */
+  canvas?: HTMLCanvasElement;
   /** Latency input element (millisecond slider/input). Optional for embedders
    *  that drive latency via `setLatencyMs()` instead. */
   latencyInput?: HTMLInputElement;
@@ -75,6 +76,9 @@ export interface ViewerConfig {
    *  to main. The SDK does NOT create a CanvasRenderer, VideoPipeline, or <audio> element.
    *  The host receives frames via the ViewerUi.onDecodedFrame / onDecodedAudio callbacks. */
   decodeInWorker?: boolean;
+  /** When true (default), auto-reconnect with exponential backoff on disconnect.
+   *  Set to false for apps that manage their own reconnection lifecycle. */
+  autoReconnect?: boolean;
 }
 
 export interface ViewerHandle {
@@ -117,6 +121,7 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
     maxReconnectDelayMs = 30000,
     getStreamName,
     decodeInWorker = false,
+    autoReconnect = true,
   } = config;
 
   // --- closure state (was module-level `let` in the entrypoints) ---
@@ -270,6 +275,11 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
     manualDisconnect = false;
     setConnState('connecting');
 
+    if (!decodeInWorker && !canvas) {
+      log('canvas element required when decodeInWorker is false', 'err');
+      return;
+    }
+
     const hashHex = certHash !== undefined
       ? certHash
       : (window as any).CERT_HASH as string | null | undefined;
@@ -281,7 +291,9 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
 
     firstFrame = true;
     if (!decodeInWorker) {
-      renderer = new CanvasRenderer(canvas);
+      // The guard above guarantees canvas is present whenever !decodeInWorker;
+      // TS cannot carry that relational narrowing here, hence the assertion.
+      renderer = new CanvasRenderer(canvas!);
       video = new VideoPipeline({
         onFrame: (frame) => {
           renderer?.draw(frame);
@@ -389,7 +401,7 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
         if (msg.error) log(`WT closed (err): ${msg.error}`, 'err');
         else log('WT closed', 'info');
         setStatus('closed');
-        if (!manualDisconnect) scheduleReconnect();
+        if (!manualDisconnect && autoReconnect) scheduleReconnect();
         break;
       case 'stats':
         ui.onStats?.(msg.stats, msg.demux ?? null);
@@ -397,7 +409,7 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
       case 'close':
         log('SRT closed', 'err');
         setStatus('closed');
-        if (!manualDisconnect) scheduleReconnect();
+        if (!manualDisconnect && autoReconnect) scheduleReconnect();
         break;
     }
   }

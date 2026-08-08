@@ -27,6 +27,8 @@ export interface PlayerOptions {
   /** Decode in the Web Worker; emit decodedframe/decodedaudio events instead of
    *  owning canvas/audio sinks. Default false. */
   decodeInWorker?: boolean;
+  /** Auto-reconnect on disconnect. Default true. Set false for custom reconnection. */
+  autoReconnect?: boolean;
 }
 
 export type PlayerState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
@@ -70,7 +72,7 @@ export interface PlayerHandle extends EventTarget {
   getWorker(): Worker | null;
 }
 
-export function mountPlayer(canvas: HTMLCanvasElement, opts: PlayerOptions = {}): PlayerHandle {
+export function mountPlayer(canvas: HTMLCanvasElement | null, opts: PlayerOptions = {}): PlayerHandle {
   return new Player(canvas, opts);
 }
 
@@ -95,14 +97,14 @@ class Player extends EventTarget implements PlayerHandle {
   private resolveConnect: (() => void) | null = null;
   private rejectConnect: ((e: Error) => void) | null = null;
 
-  constructor(canvas: HTMLCanvasElement, opts: PlayerOptions) {
+  constructor(canvas: HTMLCanvasElement | null, opts: PlayerOptions) {
     super();
     this._muted = opts.muted ?? true;
     this.renderPacingPref = opts.renderPacing ?? true;
     this.decodePacingPref = opts.decodePacing ?? false;
 
     this.viewer = createViewer({
-      canvas,
+      canvas: canvas ?? undefined,
       host: opts.host,
       port: opts.port,
       stream: opts.stream,
@@ -110,6 +112,7 @@ class Player extends EventTarget implements PlayerHandle {
       certHash: opts.certHash,
       latencyMs: opts.latencyMs ?? 120,
       decodeInWorker: opts.decodeInWorker ?? false,
+      autoReconnect: opts.autoReconnect ?? true,
       ui: {
         log: (msg, cls) => this.onLog(msg, cls),
         setStatus: () => {},

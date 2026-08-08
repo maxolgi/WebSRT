@@ -1,7 +1,7 @@
 import init, { SrtReceiver, type SrtAction, type SrtStats } from '../wasm/srt-wasm/srt_wasm.js';
 import { Demuxer } from './demux';
 import { looksLikeAv1 } from './shared/av1';
-import type { DemuxStats } from './debug/types';
+import type { DemuxStats, VideoStats, AudioStats } from './debug/types';
 import { summarizePmt, ST_PRIVATE, type PmtEntry } from './shared/pmt';
 import { VideoPipeline, OpusAudioPipeline, AacAudioPipeline } from './decode';
 
@@ -24,6 +24,8 @@ export interface StatsMsg {
   txLoss: number;
   txBuffered: number;
   pollMaxMs: number;
+  videoStats?: VideoStats;
+  audioStats?: AudioStats;
 }
 
 export type DemuxStatsMsg = DemuxStats;
@@ -110,7 +112,10 @@ self.onmessage = async (e: MessageEvent) => {
           if (!s) return;
           emitLossEvents(s);
           if (VERBOSE) console.debug('srt stats', serializeStats(s));
-          queue({ type: 'stats', stats: serializeStats(s), demux: getDemuxStats() });
+          const statsMsg = serializeStats(s);
+          if (videoPipeline) statsMsg.videoStats = videoPipeline.getStats();
+          if (audioPipeline) statsMsg.audioStats = audioPipeline.getStats();
+          queue({ type: 'stats', stats: statsMsg, demux: getDemuxStats() });
           flushOutgoing();
         }, rate);
       }
@@ -275,7 +280,10 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
       if (!s) return;
       emitLossEvents(s);
       if (VERBOSE) console.debug('srt stats', serializeStats(s));
-      queue({ type: 'stats', stats: serializeStats(s), demux: getDemuxStats() });
+      const statsMsg = serializeStats(s);
+      if (videoPipeline) statsMsg.videoStats = videoPipeline.getStats();
+      if (audioPipeline) statsMsg.audioStats = audioPipeline.getStats();
+      queue({ type: 'stats', stats: statsMsg, demux: getDemuxStats() });
       flushOutgoing();
     }, 1000);
   } catch (e) {
@@ -309,7 +317,7 @@ function ensureVideoPipeline(): void {
   if (videoPipeline) return;
   if (videoCodecResolved === null) return;
   videoPipeline = new VideoPipeline({
-    onFrame: (frame) => { queue({ type: 'videoFrame', frame }); flushOutgoing(); },
+    onFrame: (frame) => { queue({ type: 'videoFrame', frame }); },
     onError: (e) => { queue({ type: 'log', msg: `video err: ${e}`, cls: 'err' }); flushOutgoing(); },
     onConfigured: () => {},
   });
@@ -323,7 +331,7 @@ function ensureAudioPipeline(): void {
   const cb = {
     onError: (e: unknown) => { queue({ type: 'log', msg: `audio err: ${e}`, cls: 'err' }); flushOutgoing(); },
     onReady: () => {},
-    onFrame: (data: AudioData) => { queue({ type: 'audioData', data }); flushOutgoing(); },
+    onFrame: (data: AudioData) => { queue({ type: 'audioData', data }); },
   };
   audioPipeline = isOpus ? new OpusAudioPipeline(cb) : new AacAudioPipeline(cb);
 }
