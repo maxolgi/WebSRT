@@ -349,7 +349,11 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
     log(`connecting to ${wtUrl} (${hashLabel}) …`, 'info');
 
     if (!worker) {
-      worker = new Worker(workerUrl ?? new URL('../worker.ts', import.meta.url), { type: 'module' });
+      if (workerUrl) {
+        worker = new Worker(workerUrl, { type: 'module' });
+      } else {
+        worker = new Worker(new URL('../worker.ts', import.meta.url), { type: 'module' });
+      }
       worker.onmessage = (e: MessageEvent) => handleWorkerMsg(e.data as WorkerMsg);
       worker.onerror = (e) => {
         log(`worker error: ${e.message}`, 'err');
