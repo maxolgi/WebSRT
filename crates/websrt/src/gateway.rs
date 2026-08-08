@@ -262,9 +262,27 @@ impl Gateway {
                             tracing::info!(
                                 path = path_only,
                                 origin = ?origin_header,
-                                "session rejected by policy"
+                                "session rejected by policy (404)"
                             );
                             session_request.not_found().await;
+                            continue;
+                        }
+                        crate::hooks::Decision::Forbidden => {
+                            tracing::info!(
+                                path = path_only,
+                                origin = ?origin_header,
+                                "session rejected by policy (403)"
+                            );
+                            session_request.forbidden().await;
+                            continue;
+                        }
+                        crate::hooks::Decision::TooManyRequests => {
+                            tracing::info!(
+                                path = path_only,
+                                origin = ?origin_header,
+                                "session rejected by policy (429)"
+                            );
+                            session_request.too_many_requests().await;
                             continue;
                         }
                     }
@@ -280,7 +298,7 @@ impl Gateway {
                                 per_ip = tracker.per_ip(&peer_ip),
                                 "session rejected: connection limit exceeded"
                             );
-                            session_request.not_found().await;
+                            session_request.too_many_requests().await;
                             continue;
                         }
                     };

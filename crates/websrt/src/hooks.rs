@@ -75,9 +75,14 @@ impl<'a> SessionRequest<'a> {
 pub enum Decision {
     /// Accept the session and proceed with the WebTransport handshake.
     Accept,
-    /// Reject the session. The gateway responds 404 and continues listening
-    /// for the next incoming connection.
+    /// Reject with 404 Not Found. Use for unknown paths or missing streams.
     Reject,
+    /// Reject with 403 Forbidden. Use for failed authentication or
+    /// disallowed origins.
+    Forbidden,
+    /// Reject with 429 Too Many Requests. Use for rate limits and
+    /// connection caps.
+    TooManyRequests,
 }
 
 /// Pluggable session-acceptance policy.
@@ -137,7 +142,7 @@ impl SessionPolicy for OriginAllowlistPolicy {
     async fn decide(&self, req: &SessionRequest) -> Decision {
         match req.origin {
             Some(o) if self.allowed.iter().any(|a| a == o) => Decision::Accept,
-            _ => Decision::Reject,
+            _ => Decision::Forbidden,
         }
     }
 }
@@ -167,7 +172,7 @@ impl SessionPolicy for AuthTokenPolicy {
         if token_valid {
             Decision::Accept
         } else {
-            Decision::Reject
+            Decision::Forbidden
         }
     }
 }
@@ -178,7 +183,8 @@ pub fn auth_token_policy(expected: String) -> impl SessionPolicy {
 }
 
 /// Policy that accepts only if BOTH `a` and `b` accept. Short-circuits on
-/// the first `Reject`. Useful for composing the built-in policies.
+/// the first rejection (propagating the rejection variant). Useful for
+/// composing the built-in policies.
 pub struct Chain<A, B> {
     pub first: A,
     pub second: B,
@@ -189,7 +195,7 @@ impl<A: SessionPolicy, B: SessionPolicy> SessionPolicy for Chain<A, B> {
     async fn decide(&self, req: &SessionRequest) -> Decision {
         match self.first.decide(req).await {
             Decision::Accept => self.second.decide(req).await,
-            Decision::Reject => Decision::Reject,
+            reject => reject,
         }
     }
 }
@@ -268,14 +274,14 @@ mod tests {
         let p = origin_allowlist_policy(vec!["https://example.com".into()]);
         assert_eq!(
             p.decide(&req("/wt", "", Some("https://evil.test"))).await,
-            Decision::Reject
+            Decision::Forbidden
         );
     }
 
     #[tokio::test]
     async fn origin_allowlist_rejects_missing_origin() {
         let p = origin_allowlist_policy(vec!["https://example.com".into()]);
-        assert_eq!(p.decide(&req("/wt", "", None)).await, Decision::Reject);
+        assert_eq!(p.decide(&req("/wt", "", None)).await, Decision::Forbidden);
     }
 
     #[tokio::test]
@@ -283,7 +289,7 @@ mod tests {
         let p = origin_allowlist_policy(vec![]);
         assert_eq!(
             p.decide(&req("/wt", "", Some("https://example.com"))).await,
-            Decision::Reject
+            Decision::Forbidden
         );
     }
 
@@ -311,7 +317,7 @@ mod tests {
         let p = auth_token_policy("s3cret".into());
         assert_eq!(
             p.decide(&req("/wt", "token=wrong", None)).await,
-            Decision::Reject
+            Decision::Forbidden
         );
     }
 
@@ -320,14 +326,14 @@ mod tests {
         let p = auth_token_policy("s3cret".into());
         assert_eq!(
             p.decide(&req("/wt", "stream=foo", None)).await,
-            Decision::Reject
+            Decision::Forbidden
         );
     }
 
     #[tokio::test]
     async fn auth_token_rejects_empty_query() {
         let p = auth_token_policy("s3cret".into());
-        assert_eq!(p.decide(&req("/wt", "", None)).await, Decision::Reject);
+        assert_eq!(p.decide(&req("/wt", "", None)).await, Decision::Forbidden);
     }
 
     #[tokio::test]
@@ -363,7 +369,7 @@ mod tests {
         let p = chain(path_policy("/wt".into()), auth_token_policy("t".into()));
         assert_eq!(
             p.decide(&req("/wt", "token=wrong", None)).await,
-            Decision::Reject
+            Decision::Forbidden
         );
     }
 
@@ -381,6 +387,35 @@ mod tests {
         assert_eq!(
             p.decide(&req("/other", "token=t", Some("https://x.test"))).await,
             Decision::Reject
+        );
+    }
+
+    #[tokio::test]
+    async fn chain_propagates_forbidden_from_first() {
+        let p = chain(
+            origin_allowlist_policy(vec!["https://x.test".into()]),
+            auth_token_policy("t".into()),
+        );
+        // Wrong origin → Forbidden from first policy, second never checked.
+        assert_eq!(
+            p.decide(&req("/wt", "token=t", Some("https://evil.test"))).await,
+            Decision::Forbidden
+        );
+    }
+
+    #[tokio::test]
+    async fn chain_propagates_too_many_requests_from_second() {
+        struct RateLimit;
+        #[async_trait::async_trait]
+        impl SessionPolicy for RateLimit {
+            async fn decide(&self, _req: &SessionRequest) -> Decision {
+                Decision::TooManyRequests
+            }
+        }
+        let p = chain(path_policy("/wt".into()), RateLimit);
+        assert_eq!(
+            p.decide(&req("/wt", "", None)).await,
+            Decision::TooManyRequests
         );
     }
 
