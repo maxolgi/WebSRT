@@ -52,10 +52,13 @@ to other browsers). A browser can even do both simultaneously.
   on the main thread.
 - **Automatic OBS reconnect.** If OBS disconnects, the gateway waits for a new
   connection — no restart needed.
-- **rAF-gated video presentation.** Decoded frames are drawn on the next
-  `requestAnimationFrame`. SRT's TSBPD already provides delivery-time pacing;
-  the renderer simply presents the latest decoded frame without additional
-  playout delay or PTS-based scheduling.
+- **PTS-paced video presentation.** Decoded frames are queued in a small
+  bounded ring and drawn on `requestAnimationFrame` when their PTS is due,
+  measured against a wall-clock ↔ PTS mapping that resets on large gaps
+  (seek, stream restart, backgrounded tab). SRT's TSBPD paces delivery; PTS
+  pacing absorbs downstream bursts (decoder reorder, worker→main batching) so
+  the canvas updates at the source frame rate. Opt out via the player SDK's
+  `setRenderPacing(false)` to fall back to "latest frame only" skip-ahead.
 - **Bounded audio buffering.** The AudioWorklet path uses a fixed-size ring
   buffer with drop-oldest and skip-ahead to prevent latency accumulation.
 
@@ -272,6 +275,7 @@ Options:
       --sim-seed <SIM_SEED>      RNG seed for sim-loss (deterministic) [default: 42]
       --latency <LATENCY>        OBS↔gateway SRT TSBPD latency in milliseconds [default: 120]
       --health-port <HEALTH_PORT> HTTP health/metrics port (0 = disabled) [default: 0]
+      --health-bind <HEALTH_BIND> Bind address for the HTTP health/metrics server [default: 127.0.0.1]
       --auth-token <AUTH_TOKEN>  Viewer auth token; browsers must pass ?token=<value>
 ```
 
@@ -341,7 +345,7 @@ sends resulting SRT packets as WT datagrams.
                         main thread                    │   Web Worker
                                                        │
 WT datagram ──────────────────────────────────────────►│ SrtReceiver (WASM)
-  (batched, up to 16 per tick)                        │   ↓ TSBPD-paced
+  (one per read; 5 ms tick coalesce)                  │   ↓ TSBPD-paced
                                                       │ SrtAction::DeliverMessage
                                                       │   ↓ raw TS bytes
                                                       │ Demuxer (WASM, mpeg2ts)
@@ -351,7 +355,7 @@ WT datagram ──────────────────────�
   ├── VideoPipeline                                   │
   │   H.264 SPS parse → avcC → VideoDecoder           │
   │   ↓ VideoFrame                                    │
-  │   CanvasRenderer (rAF-gated PTS presentation)     │
+  │   CanvasRenderer (PTS-paced, rAF-driven)            │
   │                                                   │
   ├── OpusAudioPipeline / AacAudioPipeline            │
   │   AudioDecoder → MediaStreamTrackGenerator        │
@@ -361,14 +365,18 @@ WT datagram ──────────────────────�
 ```
 
 The SRT receiver and TS demuxer run in a **Web Worker** (`worker.ts`) to keep
-the main thread free for decoding and rendering. Datagrams are batched (up to
-16 per tick) before posting to the worker. The worker polls the SRT state
-machine every 10ms via `setInterval`.
+the main thread free for decoding and rendering. The worker races a datagram
+read against a 5 ms tick so the SRT state machine advances even when no data
+arrives; outgoing messages (PES packets, stats, logs) coalesce into a single
+batched `postMessage` to the main thread.
 
-**Video presentation:** The latest decoded `VideoFrame` is drawn on the next
-`requestAnimationFrame` callback. No PTS-based ring scheduling or playout
-delay — SRT's TSBPD already paces delivery. If multiple frames are decoded
-between rAF callbacks, only the newest is drawn (skip-ahead, low latency).
+**Video presentation:** Decoded frames are queued in a small bounded ring and
+drawn on `requestAnimationFrame` when their PTS is due (PTS-paced presentation,
+on by default). A wall-clock ↔ PTS mapping established on the first frame and
+reset on large gaps (seek, restart, backgrounded tab) gates each draw. Frames
+that missed their slot are dropped as late (the newest is always kept so the
+canvas never freezes). Opt out via `setRenderPacing(false)` to fall back to
+"latest frame only" skip-ahead drawing.
 
 **Audio output:** On Chrome, `MediaStreamTrackGenerator` provides implicit
 pacing. On Firefox, the AudioWorklet path uses a bounded `Float32Array` ring
@@ -500,7 +508,7 @@ Config file `websrt.conf` is deployed to `/etc/supervisor/conf.d/`:
 
 ```ini
 [program:websrt]
-command=/opt/WebSRT/target/release/websrt-gateway --input srt --srt-mode listener --srt-port 9000 --bind 0.0.0.0 --latency 1000
+command=/opt/WebSRT/target/release/websrt-gateway --input srt --srt-mode listener --srt-port 9000 --bind 0.0.0.0 --latency 1000 --health-port 9090
 directory=/opt/WebSRT
 autostart=true
 autorestart=true
@@ -579,12 +587,16 @@ WebSRT/
         stream_registry.rs    # multi-stream name → Broadcaster map (?stream= / ?publish=)
         srt_sender.rs         # SrtInitiator: wraps srt-protocol Connect → DuplexConnection
         broadcaster.rs        # broadcast fanout with alive-flag + per-stream viewer cap
-        cert.rs               # self-signed / mkcert cert management
+        cert.rs               # self-signed / mkcert / in-memory PEM cert management
+        hooks.rs              # pluggable SessionPolicy (path/origin/auth-token, chainable)
+        limits.rs             # GatewayLimits: per-IP (/64) + global session caps, timeouts
         ingest/
           mod.rs              # Ingester trait + TsMessage type
           channel.rs          # ChannelIngester: mpsc-backed ingester (browser publish path)
           srt.rs              # SrtIngester: srt-tokio listener/caller with reconnect
+          srt_listener.rs     # SrtListenerService: multi-publisher SRT accept loop
           file.rs             # FileIngester: fixture loop with real-time pacing
+          continuity.rs       # TsContinuityChecker: read-only MPEG-TS CC gap probe
     websrt-gateway/           # reference binary: CLI wrapper around the websrt library
       src/
         main.rs               # CLI parsing, cert-hash.js writing, Gateway::run()
@@ -599,19 +611,29 @@ WebSRT/
     mpeg2ts-wasm/             # wasm-bindgen wrapper around mpeg2ts::TsDemuxer (+ nal.rs + DebugSnapshot)
     ts-muxer-wasm/            # wasm-bindgen wrapper around the publisher-side TS muxer
   web/
-    index.html                # default page — loads advanced.tsx (full debug panel)
+    index.html                # default page — loads pages/viewer.ts (player SDK + lazy debug panel)
     simple.html               # stripped-down page — loads main.ts (no debug panel)
+    stream.html               # publisher page — loads stream.tsx
     package.json              # vite + typescript + preact + chart.js
     vite.config.ts            # HTTPS dev server (basic-ssl), multi-page input
     tsconfig.json
     smoke.mjs                 # Node smoke test for WASM modules
     src/
-      advanced.tsx            # default entry: same pipeline as main.ts + Preact debug overlay
-      main.ts                 # simple-page entry: WT connect, PMT codec detection, auto-reconnect
-      worker.ts               # Web Worker: SrtReceiver + Demuxer (off main thread)
+      main.ts                 # simple-page entry: thin UI wrapper around mountPlayer()
+      pages/
+        viewer.ts             # default-page entry: mountPlayer + opt-in debug panel (lazy-loaded)
+      player/
+        index.ts              # mountPlayer(): framework-agnostic player SDK → PlayerHandle (EventTarget)
+      shared/
+        viewer.ts             # viewer lifecycle: WT URL build, worker mgmt, backoff reconnect, audio wiring
+        pmt.ts                # PMT summarization (video/audio PID + codec from stream types + descriptors)
+        av1.ts                # AV1 OBU content-probe (disambiguate 0x06 AV1 vs Opus)
+      stream.tsx              # publisher page: screen capture → VideoEncoder → TsMuxer → SRT
+      stream-worker.ts        # publisher Web Worker: VideoEncoder/AudioEncoder → TsMuxer → SrtReceiver.sendMessage
+      worker.ts               # viewer Web Worker: WebTransport + SrtReceiver + Demuxer
       demux.ts                # Demuxer: wraps mpeg2ts-wasm, dispatches PES events
       decode.ts               # H.264/HEVC/AV1 parsers, VideoPipeline, Opus/AAC audio pipelines
-      render.ts               # CanvasRenderer: draws latest decoded frame on rAF
+      render.ts               # CanvasRenderer: PTS-paced presentation (bounded ring, rAF-driven)
       wasm.d.ts               # Type declarations for MediaStreamTrackGenerator
       debug/                  # debug panel (Preact + signals)
         store.ts              # DebugStore: reactive signals consumed by all tabs
@@ -620,7 +642,7 @@ WebSRT/
         diagnostics.ts        # "Download/Copy Info" JSON exporter
         gpu-info.ts, media-capabilities.ts
         components/           # Panel, StreamTab, CodecTab, GpuTab, SrtTab, DemuxTab,
-                              # DevToolsTab, ConsoleTab, TestTab, PacketTimeline
+                              # ConsoleTab, TestTab, PacketTimeline, packetUtils, streamTypes
         components/charts/    # BitrateChart, PidDonutChart, CcHeatmap, RaTimeline,
                               # PtsJumpSparkline, PcrChart, NalStackedBar, …
     public/
@@ -644,7 +666,7 @@ There are two independent SRT TSBPD latencies in the reference binary:
 - **`--latency` (default 120 ms)** — controls the **OBS → gateway** ingester
   link (passed to `SrtIngester::bind_with_latency`). Raise it if OBS is on a
   high-latency network.
-- **Browser latency slider (default 300 ms in the UI)** — controls the
+- **Browser latency slider (default 120 ms in the UI)** — controls the
   **gateway → browser** link. The gateway-side floor is 10 ms
   (`SrtConfig::default().send_latency`); the browser's requested latency wins
   via `max(sender, receiver)` during HSv5 handshake.
