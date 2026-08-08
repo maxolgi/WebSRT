@@ -2,7 +2,8 @@ use super::{Ingester, TsMessage};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
-use srt_protocol::options::ByteCount;
+use srt_protocol::options::{ByteCount, KeySize};
+use srt_protocol::settings::KeySettings;
 use srt_tokio::{SrtIncoming, SrtListener, SrtSocket};
 use std::time::Duration;
 
@@ -10,6 +11,30 @@ use std::time::Duration;
 /// default is only 64 KB, which holds ~57ms of OBS data — easily overflowed
 /// when the tokio runtime is briefly starved on a loaded machine.
 const UDP_BUF_SIZE: ByteCount = ByteCount(8_388_608);
+
+/// Validate an optional passphrase against SRT's 10–79 char requirement.
+fn validate_passphrase(passphrase: &Option<String>) -> Result<()> {
+    if let Some(ref p) = passphrase {
+        if !(10..=79).contains(&p.len()) {
+            anyhow::bail!("SRT passphrase must be 10–79 chars, got {}", p.len());
+        }
+    }
+    Ok(())
+}
+
+/// Build per-connection `KeySettings` from an optional passphrase string.
+/// The passphrase must have been validated beforehand (via `validate_passphrase`).
+fn build_key_settings(passphrase: &Option<String>) -> Result<Option<KeySettings>> {
+    passphrase
+        .as_ref()
+        .map(|p| {
+            Ok(KeySettings {
+                key_size: KeySize::Unspecified,
+                passphrase: p.clone().try_into().map_err(|e| anyhow!("{e:?}"))?,
+            })
+        })
+        .transpose()
+}
 
 enum Kind {
     Listener(#[allow(dead_code)] SrtListener, SrtIncoming, Option<String>),
@@ -20,6 +45,9 @@ pub struct SrtIngester {
     kind: Kind,
     latency: Duration,
     socket: Option<SrtSocket>,
+    /// SRT encryption passphrase (validated 10–79 chars). When `Some`,
+    /// AES encryption is negotiated on every accept/dial.
+    passphrase: Option<String>,
     /// The stream_id of the currently-connected peer (set on each successful
     /// accept/dial). Used by the reference binary to route the published stream
     /// under a name derived from OBS's `?streamid=...`, so viewers can
@@ -33,14 +61,16 @@ impl SrtIngester {
     }
 
     pub async fn bind_with_addr(addr: impl AsRef<str>, streamid: Option<String>) -> Result<Self> {
-        Self::bind_with_latency(addr, streamid, Duration::from_millis(120)).await
+        Self::bind_with_latency(addr, streamid, Duration::from_millis(120), None).await
     }
 
     pub async fn bind_with_latency(
         addr: impl AsRef<str>,
         streamid: Option<String>,
         latency: Duration,
+        passphrase: Option<String>,
     ) -> Result<Self> {
+        validate_passphrase(&passphrase)?;
         let (listener, mut incoming) = SrtListener::builder()
             .latency(latency)
             .set(|o| {
@@ -51,11 +81,13 @@ impl SrtIngester {
             .await
             .map_err(|e| anyhow!("srt listener bind: {e}"))?;
         tracing::info!("SRT listener bound, awaiting OBS connection…");
-        let (socket, accepted_stream_id) = Self::accept_one(&mut incoming, &streamid).await?;
+        let (socket, accepted_stream_id) =
+            Self::accept_one(&mut incoming, &streamid, &passphrase).await?;
         Ok(Self {
             kind: Kind::Listener(listener, incoming, streamid),
             latency,
             socket: Some(socket),
+            passphrase,
             accepted_stream_id,
         })
     }
@@ -63,7 +95,9 @@ impl SrtIngester {
     async fn accept_one(
         incoming: &mut SrtIncoming,
         filter: &Option<String>,
+        passphrase: &Option<String>,
     ) -> Result<(SrtSocket, Option<String>)> {
+        let key_settings = build_key_settings(passphrase)?;
         loop {
             let request = incoming
                 .incoming()
@@ -79,7 +113,7 @@ impl SrtIngester {
                 }
             }
             tracing::info!(%remote, ?stream_id, "SRT connection accepted from OBS");
-            match request.accept(None).await {
+            match request.accept(key_settings.clone()).await {
                 Ok(socket) => return Ok((socket, stream_id)),
                 Err(e) => {
                     tracing::warn!(?e, "SRT accept failed; retrying");
@@ -94,40 +128,52 @@ impl SrtIngester {
     }
 
     pub async fn call_with_streamid(addr: impl AsRef<str>, streamid: Option<String>) -> Result<Self> {
-        Self::call_with_latency(addr, streamid, Duration::from_millis(120)).await
+        Self::call_with_latency(addr, streamid, Duration::from_millis(120), None).await
     }
 
     pub async fn call_with_latency(
         addr: impl AsRef<str>,
         streamid: Option<String>,
         latency: Duration,
+        passphrase: Option<String>,
     ) -> Result<Self> {
+        validate_passphrase(&passphrase)?;
         let addr_str = addr.as_ref().to_string();
         tracing::info!(addr = %addr_str, "SRT caller: dialing OBS…");
-        let socket = Self::dial(&addr_str, &streamid, latency).await?;
+        let socket = Self::dial(&addr_str, &streamid, latency, &passphrase).await?;
         Ok(Self {
             kind: Kind::Caller(addr_str, streamid.clone()),
             latency,
             socket: Some(socket),
+            passphrase,
             // For caller mode the streamid we *sent* is the best routing hint
             // (peer's response streamid isn't surfaced by srt-tokio).
             accepted_stream_id: streamid,
         })
     }
 
-    async fn dial(addr: &str, streamid: &Option<String>, latency: Duration) -> Result<SrtSocket> {
+    async fn dial(
+        addr: &str,
+        streamid: &Option<String>,
+        latency: Duration,
+        passphrase: &Option<String>,
+    ) -> Result<SrtSocket> {
         let socket_addr: srt_protocol::options::SocketAddress = addr
             .try_into()
             .map_err(|e| anyhow!("invalid SRT address {addr}: {e:?}"))?;
-    let socket = SrtSocket::builder()
-        .latency(latency)
-        .set(|o| {
-            o.connect.udp_recv_buffer_size = UDP_BUF_SIZE;
-            o.connect.udp_send_buffer_size = UDP_BUF_SIZE;
-        })
-        .call(socket_addr, streamid.as_deref())
-        .await
-        .map_err(|e| anyhow!("srt call to {addr}: {e}"))?;
+        let mut builder = SrtSocket::builder()
+            .latency(latency)
+            .set(|o| {
+                o.connect.udp_recv_buffer_size = UDP_BUF_SIZE;
+                o.connect.udp_send_buffer_size = UDP_BUF_SIZE;
+            });
+        if let Some(ref p) = passphrase {
+            builder = builder.encryption(0, p);
+        }
+        let socket = builder
+            .call(socket_addr, streamid.as_deref())
+            .await
+            .map_err(|e| anyhow!("srt call to {addr}: {e}"))?;
         tracing::info!(addr, "SRT caller: connected to OBS");
         Ok(socket)
     }
@@ -136,14 +182,15 @@ impl SrtIngester {
         match &mut self.kind {
             Kind::Listener(_, incoming, streamid) => {
                 tracing::info!("SRT: OBS disconnected; waiting for reconnect…");
-                let (socket, accepted) = Self::accept_one(incoming, streamid).await?;
+                let (socket, accepted) =
+                    Self::accept_one(incoming, streamid, &self.passphrase).await?;
                 self.accepted_stream_id = accepted;
                 Ok(socket)
             }
             Kind::Caller(addr, streamid) => {
                 tracing::info!(addr, "SRT caller: re-dialing OBS…");
                 loop {
-                    match Self::dial(addr, streamid, self.latency).await {
+                    match Self::dial(addr, streamid, self.latency, &self.passphrase).await {
                         Ok(s) => {
                             self.accepted_stream_id = streamid.clone();
                             return Ok(s);

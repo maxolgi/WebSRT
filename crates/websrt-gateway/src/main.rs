@@ -105,6 +105,11 @@ pub struct Cli {
     #[arg(long, default_value_t = 120u64)]
     pub latency: u64,
 
+    /// SRT encryption passphrase for the OBS leg (10–79 chars).
+    /// If set, AES encryption is negotiated on the SRT connection.
+    #[arg(long)]
+    pub srt_passphrase: Option<String>,
+
     /// Health/metrics HTTP port (0 to disable).
     #[arg(long, default_value_t = 0u16)]
     pub health_port: u16,
@@ -326,6 +331,7 @@ async fn main() -> Result<()> {
                         let listener = match SrtListenerService::bind(
                             format!("0.0.0.0:{srt_port}"),
                             std::time::Duration::from_millis(latency_ms),
+                            cli.srt_passphrase.clone(),
                         )
                         .await
                         {
@@ -361,6 +367,7 @@ async fn main() -> Result<()> {
                                     &addr,
                                     streamid,
                                     std::time::Duration::from_millis(latency_ms),
+                                    cli.srt_passphrase.clone(),
                                 )
                                 .await
                             }

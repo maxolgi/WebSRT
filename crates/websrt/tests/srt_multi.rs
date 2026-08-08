@@ -33,6 +33,7 @@ async fn multi_publisher_accepts_distinct_streamids() {
     let listener = SrtListenerService::bind(
         format!("127.0.0.1:{port}"),
         Duration::from_millis(120),
+        None,
     )
     .await
     .expect("bind");

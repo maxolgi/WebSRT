@@ -2,7 +2,8 @@ use super::{Ingester, SrtConnectionIngester};
 use crate::stream_registry::StreamRegistry;
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
-use srt_protocol::options::ByteCount;
+use srt_protocol::options::{ByteCount, KeySize};
+use srt_protocol::settings::KeySettings;
 use srt_tokio::{SrtIncoming, SrtListener};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,10 +15,28 @@ pub struct SrtListenerService {
     #[allow(dead_code)]
     listener: SrtListener,
     incoming: SrtIncoming,
+    key_settings: Option<KeySettings>,
 }
 
 impl SrtListenerService {
-    pub async fn bind(addr: impl AsRef<str>, latency: Duration) -> Result<Self> {
+    pub async fn bind(
+        addr: impl AsRef<str>,
+        latency: Duration,
+        passphrase: Option<String>,
+    ) -> Result<Self> {
+        let key_settings = passphrase
+            .as_ref()
+            .map(|p| {
+                if !(10..=79).contains(&p.len()) {
+                    anyhow::bail!("SRT passphrase must be 10–79 chars, got {}", p.len());
+                }
+                Ok::<_, anyhow::Error>(KeySettings {
+                    key_size: KeySize::Unspecified,
+                    passphrase: p.clone().try_into().map_err(|e| anyhow!("{e:?}"))?,
+                })
+            })
+            .transpose()?;
+
         let (listener, incoming) = SrtListener::builder()
             .latency(latency)
             .set(|o| {
@@ -27,8 +46,15 @@ impl SrtListenerService {
             .bind(addr.as_ref())
             .await
             .map_err(|e| anyhow!("srt listener bind: {e}"))?;
-        tracing::info!("SRT multi-publisher listener bound");
-        Ok(Self { listener, incoming })
+        tracing::info!(
+            encrypted = key_settings.is_some(),
+            "SRT multi-publisher listener bound"
+        );
+        Ok(Self {
+            listener,
+            incoming,
+            key_settings,
+        })
     }
 
     pub async fn serve<I, F>(
@@ -44,6 +70,7 @@ impl SrtListenerService {
         let Self {
             listener: _listener,
             mut incoming,
+            key_settings,
         } = self;
 
         loop {
@@ -61,7 +88,7 @@ impl SrtListenerService {
                         tracing::warn!(%remote, "SRT connection rejected: no streamid");
                         continue;
                     };
-                    let socket = match request.accept(None).await {
+                    let socket = match request.accept(key_settings.clone()).await {
                         Ok(s) => s,
                         Err(e) => {
                             tracing::warn!(?e, %remote, "SRT accept failed");
