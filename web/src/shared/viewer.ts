@@ -333,7 +333,7 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
       worker.onmessage = (e: MessageEvent) => handleWorkerMsg(e.data as WorkerMsg);
       worker.onerror = (e) => {
         log(`worker error: ${e.message}`, 'err');
-        if (!manualDisconnect) scheduleReconnect();
+        if (!manualDisconnect && autoReconnect) scheduleReconnect();
       };
     }
 
@@ -379,7 +379,7 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
       case 'videoFrame':
         if (firstFrame) {
           firstFrame = false;
-          ui.onFirstFrame(msg.frame.codedWidth, msg.frame.codedHeight);
+          ui.onFirstFrame(msg.frame.displayWidth, msg.frame.displayHeight);
         }
         ui.onDecodedFrame?.(msg.frame);
         break;
