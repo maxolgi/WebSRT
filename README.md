@@ -20,7 +20,7 @@ A browser can even do both simultaneously.
  [OBS] --SRT/UDP─▶│ srt-tokio listener (ingest)        │       ┌── Browser (viewer) ──────────────┐
                   │   ↓ (Instant, Bytes)               │       │ JS: WebTransport datagram I/O    │
                   │ broadcaster (broadcast channel)    │       │   ↓ bytes                        │
- [Browser] ─WT──▶ │ SrtInitiator (ingest, publish)     │──WT──▶│ WASM: srt-protocol::receiver     │
+ [Browser] ─WT───▶│ SrtInitiator (ingest, publish)     │──WT──▶│ WASM: srt-protocol::receiver     │
   (publisher)     │   ↓ (Instant, Bytes)               │       │   ↓ (Instant, Bytes) messages    │
                   │   ↓                                │       │ WASM: mpeg2ts demux              │
                   │ srt-protocol::sender (per viewer)  │       │   ↓ PES / NAL / Opus             │
