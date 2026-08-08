@@ -91,7 +91,8 @@ pub enum Decision {
 /// the policy behind an `Arc` and consults it from the accept loop.
 #[async_trait::async_trait]
 pub trait SessionPolicy: Send + Sync + 'static {
-    /// Inspect `req` and return [`Decision::Accept`] or [`Decision::Reject`].
+    /// Inspect `req` and return a [`Decision`] (`Accept`, `Reject`,
+    /// `Forbidden`, or `TooManyRequests`).
     async fn decide(&self, req: &SessionRequest) -> Decision;
 }
 
