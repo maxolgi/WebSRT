@@ -12,7 +12,7 @@ export async function ensureMpeg2tsWasm(): Promise<void> {
 export interface DemuxCallbacks {
   onPat?: (programNum: number, pmtPid: number) => void;
   onPmt?: (entries: { pid: number; streamType: number; formatId: string | null }[]) => void;
-  onPes?: (pid: number, pts: number | null, dts: number | null, bytes: Uint8Array, randomAccess: boolean) => void;
+  onPes?: (pid: number, pts: number | null, dts: number | null, bytes: Uint8Array, randomAccess: boolean, nalOffsets: Uint32Array, nalTypes: Uint8Array) => void;
   onRandomAccess?: (pid: number) => void;
   onError?: (msg: string) => void;
 }
@@ -34,7 +34,10 @@ export class Demuxer {
   /** Feed SRT-delivered TS message bytes. */
   feed(bytes: Uint8Array) {
     const events = this.demux.feed(bytes);
-    for (const e of events) this.dispatch(e);
+    for (const e of events) {
+      this.dispatch(e);
+      e.free();
+    }
   }
 
   /**
@@ -75,6 +78,8 @@ export class Demuxer {
           e.dts < 0 ? null : e.dts,
           e.data,
           e.randomAccess,
+          e.nalOffsets,
+          e.nalTypes,
         );
         break;
       case 3: // random_access

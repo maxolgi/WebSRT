@@ -407,7 +407,7 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
         ui.onDecodedAudio?.(msg.data);
         break;
       case 'videoPes':
-        video?.feed(msg.data, msg.pts, msg.isKeyframe, msg.dts);
+        video?.feed(msg.data, msg.pts, msg.isKeyframe, msg.dts, msg.nalOffsets, msg.nalTypes);
         break;
       case 'audioPes':
         audio?.feed(msg.data, msg.pts);

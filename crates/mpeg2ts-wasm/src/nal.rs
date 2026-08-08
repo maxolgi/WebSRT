@@ -122,33 +122,44 @@ fn scan_nal_ranges(payload: &[u8]) -> Vec<(usize, usize)> {
     ranges
 }
 
-/// Walk NAL units and return their raw type codes (H.264: low 5 bits of byte 0;
-/// HEVC: bits 1..6 of byte 0). Compact per-packet summary, e.g. `[9, 7, 8, 5]`
-/// for `AUD SPS PPS IDR`.
-pub fn nal_summary(payload: &[u8], is_hevc: bool) -> Vec<u8> {
-    let mut out = Vec::new();
-    for (start, end) in scan_nal_ranges(payload) {
-        if start >= end {
-            continue;
-        }
-        let nal_type = if is_hevc {
-            (payload[start] >> 1) & 0x3F
-        } else {
-            payload[start] & 0x1F
-        };
-        out.push(nal_type);
-    }
-    out
+/// Result of a single NAL scan: start-code ranges + type codes, computed in one pass.
+pub struct NalScan {
+    /// (data_start, data_end) per NAL unit, excluding the start code prefix.
+    /// Same format as `scan_nal_ranges` output.
+    pub ranges: Vec<(usize, usize)>,
+    /// NAL type code per NAL unit (H.264: low 5 bits of byte 0; HEVC: bits 1-6 of byte 0).
+    pub types: Vec<u8>,
 }
 
-/// Parse a PES payload (Annex B byte stream) and accumulate NAL + slice-type
-/// statistics. Never panics: malformed/truncated NALs are counted as
-/// `non_idr_slice` without slice classification.
+/// Scan Annex B start codes ONCE and extract both ranges and type codes.
+/// `is_hevc`: false for stream_type 0x1b (H.264), true for 0x24 (HEVC).
+pub fn scan_nal(payload: &[u8], is_hevc: bool) -> NalScan {
+    let ranges = scan_nal_ranges(payload);
+    let types = ranges
+        .iter()
+        .map(|&(start, end)| {
+            if start >= end {
+                return 0u8;
+            }
+            if is_hevc {
+                (payload[start] >> 1) & 0x3F
+            } else {
+                payload[start] & 0x1F
+            }
+        })
+        .collect();
+    NalScan { ranges, types }
+}
+
+/// Accumulate NAL + slice-type statistics from a pre-scanned result.
+/// Same logic as a fresh scan, but reuses the scan instead of re-scanning.
+/// Never panics: malformed/truncated NALs are counted as `non_idr_slice`
+/// without slice classification.
 ///
 /// `is_hevc`: `false` for `stream_type 0x1b` (H.264), `true` for `0x24` (HEVC).
-pub fn parse_nal_stats(payload: &[u8], is_hevc: bool) -> NalStats {
+pub fn parse_nal_stats_from_scan(payload: &[u8], scan: &NalScan, is_hevc: bool) -> NalStats {
     let mut stats = NalStats::default();
-    for (start, end) in scan_nal_ranges(payload) {
+    for &(start, end) in &scan.ranges {
         let nal = &payload[start..end];
         if nal.is_empty() {
             continue;

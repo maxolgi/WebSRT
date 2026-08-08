@@ -234,8 +234,14 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
       : SrtReceiver.newWithLatency(latencyMs);
     const dg = wt.datagrams as any;
     const datagrams = typeof dg === 'function' ? dg() : dg;
-    reader = datagrams.readable.getReader();
-    writer = datagrams.writable.getWriter();
+    const readableStream = typeof datagrams.createReadable === 'function'
+      ? datagrams.createReadable()
+      : datagrams.readable;
+    const writableStream = typeof datagrams.createWritable === 'function'
+      ? datagrams.createWritable()
+      : datagrams.writable;
+    reader = readableStream.getReader();
+    writer = writableStream.getWriter();
 
     wt.closed
       .then(() => { if (myGen === gen) { queue({ type: 'wtClosed' }); flushOutgoing(); } })

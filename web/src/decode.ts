@@ -20,13 +20,10 @@ export interface DecoderCallbacks {
 }
 
 // H.264 NAL types we care about.
-const NAL_UNSPECIFIED = 0;
 const NAL_SLICE = 1;
 const NAL_IDR = 5;
-const NAL_SEI = 6;
 const NAL_SPS = 7;
 const NAL_PPS = 8;
-const NAL_AUD = 9;
 
 // HEVC NAL types.
 const HEVC_TRAIL_N = 0;
@@ -45,52 +42,6 @@ const HEVC_PPS = 34;
  */
 export function ptsToUs(pts: number | null): number | undefined {
   return pts != null ? Math.floor((pts * 100) / 9) : undefined;
-}
-
-interface NalUnit {
-  type: number;     // H.264 type: data[0] & 0x1f
-  hevcType: number; // HEVC type: (data[0] >> 1) & 0x3f
-  data: Uint8Array; // includes the 1-byte header (H.264) or 2-byte header (HEVC)
-}
-
-/** Split an Annex-B byte stream into individual NALUs (no start codes). */
-export function parseAnnexB(payload: Uint8Array): NalUnit[] {
-  const out: NalUnit[] = [];
-  // Track each start code's first byte (00 of 00 00 01 / 00 00 00 01) so each
-  // NALU spans from just after its start code to the start of the next one.
-  const scBegin: number[] = [];
-  for (let i = 0; i + 2 < payload.length; ) {
-    if (
-      i + 3 < payload.length &&
-      payload[i] === 0 &&
-      payload[i + 1] === 0 &&
-      payload[i + 2] === 0 &&
-      payload[i + 3] === 1
-    ) {
-      scBegin.push(i);
-      i += 4;
-    } else if (payload[i] === 0 && payload[i + 1] === 0 && payload[i + 2] === 1) {
-      scBegin.push(i);
-      i += 3;
-    } else {
-      i++;
-    }
-  }
-  for (let s = 0; s < scBegin.length; s++) {
-    const begin = scBegin[s];
-    const scLen = payload[begin + 2] === 1 ? 3 : 4;
-    const start = begin + scLen;
-    const end = s + 1 < scBegin.length ? scBegin[s + 1] : payload.length;
-    if (end > start) {
-      const data = payload.subarray(start, end);
-      if (data.length > 0) {
-        const type = data[0] & 0x1f;
-        const hevcType = (data[0] >> 1) & 0x3f;
-        out.push({ type, hevcType, data });
-      }
-    }
-  }
-  return out;
 }
 
 /** Minimal bit-stream reader for SPS exp-Golomb parsing. */
@@ -264,20 +215,39 @@ function buildAvcC(sps: Uint8Array, pps: Uint8Array): Uint8Array {
   return buf;
 }
 
-/** Convert a list of NALUs into a single length-prefixed byte stream. */
-function nalusToLengthPrefixed(nalus: NalUnit[]): Uint8Array {
+/**
+ * Build a 4-byte-length-prefixed byte stream from pre-parsed NALU offsets.
+ * Only includes NALUs whose type passes `typeFilter`. Single allocation, two
+ * passes (count + write) — no intermediate objects.
+ */
+function nalOffsetsToLengthPrefixed(
+  payload: Uint8Array,
+  nalOffsets: Uint32Array,
+  nalTypes: Uint8Array,
+  typeFilter: (t: number) => boolean,
+): Uint8Array {
   let total = 0;
-  for (const n of nalus) total += 4 + n.data.length;
+  let count = 0;
+  for (let i = 0; i < nalTypes.length; i++) {
+    if (typeFilter(nalTypes[i])) {
+      total += 4 + nalOffsets[i * 2 + 1];
+      count++;
+    }
+  }
+  if (count === 0) return new Uint8Array(0);
   const out = new Uint8Array(total);
   let p = 0;
-  for (const n of nalus) {
-    const len = n.data.length;
-    out[p++] = (len >>> 24) & 0xff;
-    out[p++] = (len >>> 16) & 0xff;
-    out[p++] = (len >>> 8) & 0xff;
-    out[p++] = len & 0xff;
-    out.set(n.data, p);
-    p += len;
+  for (let i = 0; i < nalTypes.length; i++) {
+    if (typeFilter(nalTypes[i])) {
+      const off = nalOffsets[i * 2];
+      const len = nalOffsets[i * 2 + 1];
+      out[p++] = (len >>> 24) & 0xff;
+      out[p++] = (len >>> 16) & 0xff;
+      out[p++] = (len >>> 8) & 0xff;
+      out[p++] = len & 0xff;
+      out.set(payload.subarray(off, off + len), p);
+      p += len;
+    }
   }
   return out;
 }
@@ -623,7 +593,7 @@ export class VideoPipeline {
   // Pending NALU batches seen between SPS/PPS arrival and decoder.configure().
   // Each batch retains its original PTS so flushed chunks don't get stamped
   // with the wrong timestamp.
-  private pendingNalus: { nalus: NalUnit[]; pts: number | null; dts: number | null; isKeyframe: boolean }[] = [];
+  private pendingNalus: { payload: Uint8Array; nalOffsets: Uint32Array; nalTypes: Uint8Array; pts: number | null; dts: number | null; isKeyframe: boolean }[] = [];
   // Pending AV1 access units seen between SH capture and decoder.configure().
   private pendingAv1: { payload: Uint8Array; pts: number | null; dts: number | null; isKey: boolean }[] = [];
   private static readonly PENDING_CAP = 30;
@@ -725,15 +695,14 @@ export class VideoPipeline {
   }
 
   /** Feed a PES payload from the demuxer (Annex-B byte stream, or AV1 OBUs). */
-  feed(payload: Uint8Array, pts: number | null, isKeyframe: boolean, dts: number | null = null) {
+  feed(payload: Uint8Array, pts: number | null, isKeyframe: boolean, dts: number | null = null, nalOffsets: Uint32Array = new Uint32Array(), nalTypes: Uint8Array = new Uint8Array()) {
     // AV1 path: low-overhead OBU bitstream, not Annex B. Honor an explicit
-    // PMT hint, or a previously-pinned av1 detection.
+    // PMT hint, or a previously-pinned av1 detection. nalOffsets/nalTypes are
+    // empty for AV1 PES.
     if (this.codecHint === 'av1' || this.codec === 'av1') {
       this.feedAv1(payload, pts, isKeyframe, dts);
       return;
     }
-
-    const nalus = parseAnnexB(payload);
 
     // Auto-detect codec on first recognizable NAL.
     if (this.codec === null) {
@@ -745,12 +714,13 @@ export class VideoPipeline {
       if (this.codecHint === 'h264' || this.codecHint === 'hevc') {
         this.codec = this.codecHint;
       } else {
-        for (const n of nalus) {
-          if (n.hevcType === HEVC_VPS || n.hevcType === HEVC_SPS || n.hevcType === HEVC_PPS) {
-            this.codec = 'hevc';
-            break;
-          }
-          if (n.type === NAL_SPS || n.type === NAL_PPS || n.type === NAL_IDR) {
+        // Try to detect from nalTypes. The demuxer scanned this PES as either
+        // H.264 or HEVC based on the PMT; without a hint we can't tell which
+        // encoding rule produced these type codes, but recognizable H.264
+        // types (SPS=7, PPS=8, IDR=5) are a safe fallback.
+        for (let i = 0; i < nalTypes.length; i++) {
+          const t = nalTypes[i];
+          if (t === NAL_SPS || t === NAL_PPS || t === NAL_IDR) {
             this.codec = 'h264';
             break;
           }
@@ -767,23 +737,35 @@ export class VideoPipeline {
     }
 
     const isHevc = this.codec === 'hevc';
-    const nt = (n: NalUnit) => isHevc ? n.hevcType : n.type;
 
-    // Collect parameter sets. HEVC needs VPS+SPS+PPS; H.264 needs SPS+PPS.
-    for (const n of nalus) {
-      if (isHevc && nt(n) === HEVC_VPS) {
-        if (!bytesEqual(this.vps, n.data)) { this.vps = n.data; this.configured = false; }
-      } else if (nt(n) === (isHevc ? HEVC_SPS : NAL_SPS)) {
-        if (!bytesEqual(this.sps, n.data)) { this.sps = n.data; this.configured = false; }
-      } else if (nt(n) === (isHevc ? HEVC_PPS : NAL_PPS)) {
-        if (!bytesEqual(this.pps, n.data)) { this.pps = n.data; this.configured = false; }
+    // Collect parameter sets directly from pre-parsed offsets (no NalUnit
+    // objects). HEVC needs VPS+SPS+PPS; H.264 needs SPS+PPS.
+    for (let i = 0; i < nalTypes.length; i++) {
+      const t = nalTypes[i];
+      const off = nalOffsets[i * 2];
+      const len = nalOffsets[i * 2 + 1];
+      const data = payload.subarray(off, off + len);
+      if (isHevc) {
+        if (t === HEVC_VPS) {
+          if (!bytesEqual(this.vps, data)) { this.vps = data; this.configured = false; }
+        } else if (t === HEVC_SPS) {
+          if (!bytesEqual(this.sps, data)) { this.sps = data; this.configured = false; }
+        } else if (t === HEVC_PPS) {
+          if (!bytesEqual(this.pps, data)) { this.pps = data; this.configured = false; }
+        }
+      } else {
+        if (t === NAL_SPS) {
+          if (!bytesEqual(this.sps, data)) { this.sps = data; this.configured = false; }
+        } else if (t === NAL_PPS) {
+          if (!bytesEqual(this.pps, data)) { this.pps = data; this.configured = false; }
+        }
       }
     }
 
     if (!this.configured) {
       const ready = isHevc ? (this.vps && this.sps && this.pps) : (this.sps && this.pps);
       if (ready) this.configure();
-      this.pendingNalus.push({ nalus, pts, dts, isKeyframe });
+      this.pendingNalus.push({ payload, nalOffsets, nalTypes, pts, dts, isKeyframe });
       if (this.pendingNalus.length > VideoPipeline.PENDING_CAP) {
         this.pendingNalus.splice(0, this.pendingNalus.length - VideoPipeline.PENDING_CAP);
       }
@@ -791,7 +773,7 @@ export class VideoPipeline {
     }
 
     if (!this.decoder || this.decoder.state !== 'configured') {
-      this.pendingNalus.push({ nalus, pts, dts, isKeyframe });
+      this.pendingNalus.push({ payload, nalOffsets, nalTypes, pts, dts, isKeyframe });
       if (this.pendingNalus.length > VideoPipeline.PENDING_CAP) {
         this.pendingNalus.splice(0, this.pendingNalus.length - VideoPipeline.PENDING_CAP);
       }
@@ -802,25 +784,31 @@ export class VideoPipeline {
     const batches = this.pendingNalus;
     this.pendingNalus = [];
     for (const b of batches) {
-      this.emitAu(b.nalus, b.pts, b.dts, b.isKeyframe);
+      this.emitAu(b.payload, b.nalOffsets, b.nalTypes, b.pts, b.dts);
     }
-    this.emitAu(nalus, pts, dts, isKeyframe);
+    this.emitAu(payload, nalOffsets, nalTypes, pts, dts);
   }
 
-  private emitAu(nalus: NalUnit[], pts: number | null, dts: number | null, _hint: boolean) {
+  private emitAu(payload: Uint8Array, nalOffsets: Uint32Array, nalTypes: Uint8Array, pts: number | null, dts: number | null) {
     if (!this.decoder || this.decoder.state !== 'configured') return;
     const isHevc = this.codec === 'hevc';
-    const nt = (n: NalUnit) => isHevc ? n.hevcType : n.type;
-    const isKey = (n: NalUnit) => isHevc
-      ? (nt(n) === HEVC_IDR_W_RADL || nt(n) === HEVC_IDR_N_LP)
-      : (nt(n) === NAL_IDR);
-    const hasIdr = nalus.some(isKey);
-    const decodeNalus = isHevc
-      ? nalus.filter((n) => nt(n) < 32)
-      : nalus.filter((n) => nt(n) >= 1 && nt(n) <= 5);
-    if (decodeNalus.length === 0) return;
+
+    // Check for IDR
+    const hasIdr = isHevc
+      ? nalTypes.some(t => t === HEVC_IDR_W_RADL || t === HEVC_IDR_N_LP)
+      : nalTypes.some(t => t === NAL_IDR);
+
+    // Build length-prefixed data for decode-relevant NALUs
+    const typeFilter = isHevc
+      ? (t: number) => t < 32
+      : (t: number) => t >= NAL_SLICE && t <= NAL_IDR;
+    const data = nalOffsetsToLengthPrefixed(payload, nalOffsets, nalTypes, typeFilter);
+    if (data.length === 0) return;
+
     if (!this.seenKeyframe && !hasIdr) return;
     if (hasIdr) this.seenKeyframe = true;
+
+    // Queue depth backpressure (unchanged)
     const qDepth = this.decoder.decodeQueueSize;
     if (!hasIdr && qDepth > 8) {
       this.droppedVideo++;
@@ -829,7 +817,7 @@ export class VideoPipeline {
       }
       return;
     }
-    const data = nalusToLengthPrefixed(decodeNalus);
+
     const tsUs = ptsToUs(pts);
     const chunk = new EncodedVideoChunk({
       type: hasIdr ? 'key' : 'delta',
@@ -1257,17 +1245,6 @@ export class VideoPipeline {
 function toHex(n: number): string {
   return n.toString(16).padStart(2, '0');
 }
-
-// Suppress unused-export lint for these constants; kept for completeness.
-export const NAL_TYPES = {
-  UNSPECIFIED: NAL_UNSPECIFIED,
-  SLICE: NAL_SLICE,
-  IDR: NAL_IDR,
-  SEI: NAL_SEI,
-  SPS: NAL_SPS,
-  PPS: NAL_PPS,
-  AUD: NAL_AUD,
-};
 
 // ---------------------------------------------------------------------------
 // Audio pipelines for MPEG-TS.

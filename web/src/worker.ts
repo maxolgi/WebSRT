@@ -40,7 +40,7 @@ export type WorkerMsg =
   | { type: 'log'; msg: string; cls?: string }
   | { type: 'handshakeComplete' }
   | { type: 'pmt'; videoPid: number; audioPid: number; audioStreamType: number; videoCodec: 'av1' | 'h264' | 'hevc' | null }
-  | { type: 'videoPes'; data: Uint8Array; pts: number | null; dts: number | null; isKeyframe: boolean }
+  | { type: 'videoPes'; data: Uint8Array; pts: number | null; dts: number | null; isKeyframe: boolean; nalOffsets: Uint32Array; nalTypes: Uint8Array }
   | { type: 'audioPes'; data: Uint8Array; pts: number | null }
   | { type: 'videoFrame'; frame: VideoFrame }
   | { type: 'audioData'; data: AudioData }
@@ -139,6 +139,10 @@ function flushOutgoing() {
     ) {
       transfer.push(m.data.buffer);
     }
+    if (m.type === 'videoPes') {
+      if (m.nalOffsets?.buffer instanceof ArrayBuffer) transfer.push(m.nalOffsets.buffer);
+      if (m.nalTypes?.buffer instanceof ArrayBuffer) transfer.push(m.nalTypes.buffer);
+    }
     if (m.type === 'videoFrame' && m.frame) transfer.push(m.frame as unknown as ArrayBuffer);
     if (m.type === 'audioData' && m.data) transfer.push(m.data as unknown as ArrayBuffer);
   }
@@ -195,7 +199,7 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
           ensureAudioPipeline();
         }
       },
-      onPes: (pid, pts, dts, bytes, ra) => {
+      onPes: (pid, pts, dts, bytes, ra, nalOffsets, nalTypes) => {
         // 1. Content-probe descriptor-less 0x06 PIDs first (may resolve codec)
         if (probePids.has(pid)) {
           probePids.delete(pid);
@@ -222,7 +226,7 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
           // Construct pipeline if codec resolved but pipeline not yet built, then feed
           if (pid === videoPid) {
             ensureVideoPipeline();
-            videoPipeline?.feed(bytes, pts, ra, dts);
+            videoPipeline?.feed(bytes, pts, ra, dts, nalOffsets, nalTypes);
           } else if (pid === audioPid) {
             ensureAudioPipeline();
             audioPipeline?.feed(bytes, pts);
@@ -230,7 +234,7 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
         } else {
           // Current path: queue PES bytes to main thread
           if (pid === videoPid) {
-            queue({ type: 'videoPes', data: bytes, pts, dts, isKeyframe: ra });
+            queue({ type: 'videoPes', data: bytes, pts, dts, isKeyframe: ra, nalOffsets, nalTypes });
           } else if (pid === audioPid) {
             queue({ type: 'audioPes', data: bytes, pts });
           }
@@ -265,8 +269,14 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
       : SrtReceiver.newWithLatency(latencyMs);
     const dg = wt.datagrams as any;
     const datagrams = typeof dg === 'function' ? dg() : dg;
-    reader = datagrams.readable.getReader();
-    writer = datagrams.writable.getWriter();
+    const readableStream = typeof datagrams.createReadable === 'function'
+      ? datagrams.createReadable()
+      : datagrams.readable;
+    const writableStream = typeof datagrams.createWritable === 'function'
+      ? datagrams.createWritable()
+      : datagrams.writable;
+    reader = readableStream.getReader();
+    writer = writableStream.getWriter();
     wt.closed
       .then(() => { if (myGen === gen) { queue({ type: 'wtClosed' }); flushOutgoing(); } })
       .catch((e) => { if (myGen === gen) { queue({ type: 'wtClosed', error: String(e) }); flushOutgoing(); } });

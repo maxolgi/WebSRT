@@ -192,6 +192,8 @@ pub struct TsEvent {
     // PMT events: per-entry registration-descriptor format identifier
     // (4-char ASCII e.g. "AV01"/"Opus"/"HEVC"), or empty string when absent.
     pmt_format_ids: Vec<String>,
+    nal_offsets: Vec<u32>, // flat [offset0, length0, offset1, length1, ...] relative to payload bytes
+    nal_types: Vec<u8>,    // NAL type code per NALU (empty for non-video PIDs)
 }
 
 #[wasm_bindgen]
@@ -242,6 +244,16 @@ impl TsEvent {
     pub fn pmt_format_ids(&self) -> Vec<String> {
         self.pmt_format_ids.clone()
     }
+
+    #[wasm_bindgen(getter, js_name = nalOffsets)]
+    pub fn nal_offsets(&self) -> Vec<u32> {
+        self.nal_offsets.clone()
+    }
+
+    #[wasm_bindgen(getter, js_name = nalTypes)]
+    pub fn nal_types(&self) -> Vec<u8> {
+        self.nal_types.clone()
+    }
 }
 
 impl TsEvent {
@@ -250,6 +262,7 @@ impl TsEvent {
             kind: 0, pid: pmt_pid, pts: -1, dts: -1, stream_type: 0,
             data: Vec::new(), text: String::new(),
             program_num, random_access: false, pmt_format_ids: Vec::new(),
+            nal_offsets: Vec::new(), nal_types: Vec::new(),
         }
     }
     fn pmt(entries: &[(Pid, StreamType)], format_ids: &[String]) -> Self {
@@ -263,15 +276,24 @@ impl TsEvent {
             data, text: String::new(),
             program_num: 0, random_access: false,
             pmt_format_ids: format_ids.to_vec(),
+            nal_offsets: Vec::new(), nal_types: Vec::new(),
         }
     }
-    fn pes(pid: Pid, header: &PesHeader, payload: Vec<u8>, random_access: bool) -> Self {
+    fn pes(
+        pid: Pid,
+        header: &PesHeader,
+        payload: Vec<u8>,
+        random_access: bool,
+        nal_offsets: Vec<u32>,
+        nal_types: Vec<u8>,
+    ) -> Self {
         let pts = header.pts.map(|t| t.as_u64() as i64).unwrap_or(-1);
         let dts = header.dts.map(|t| t.as_u64() as i64).unwrap_or(-1);
         Self {
             kind: 2, pid: pid.as_u16(), pts, dts, stream_type: 0,
             data: payload, text: String::new(),
             program_num: 0, random_access, pmt_format_ids: Vec::new(),
+            nal_offsets, nal_types,
         }
     }
     fn random_access(pid: Pid) -> Self {
@@ -279,6 +301,7 @@ impl TsEvent {
             kind: 3, pid: pid.as_u16(), pts: -1, dts: -1, stream_type: 0,
             data: Vec::new(), text: String::new(),
             program_num: 0, random_access: true, pmt_format_ids: Vec::new(),
+            nal_offsets: Vec::new(), nal_types: Vec::new(),
         }
     }
     fn error(s: impl Into<String>) -> Self {
@@ -286,6 +309,7 @@ impl TsEvent {
             kind: 4, pid: 0, pts: -1, dts: -1, stream_type: 0,
             data: Vec::new(), text: s.into(),
             program_num: 0, random_access: false, pmt_format_ids: Vec::new(),
+            nal_offsets: Vec::new(), nal_types: Vec::new(),
         }
     }
 }
@@ -467,8 +491,6 @@ impl TsDemuxer {
         events: &mut Vec<TsEvent>,
     ) {
         let pid_u16 = pid.as_u16();
-        events.push(TsEvent::pes(pid, hdr, payload.to_vec(), ra));
-
         let pts = hdr.pts.map(|t| t.as_u64() as i64).unwrap_or(-1);
         let dts = hdr.dts.map(|t| t.as_u64() as i64).unwrap_or(-1);
         {
@@ -493,13 +515,26 @@ impl TsDemuxer {
 
         // NAL classification for video PIDs only (H.264 0x1b / HEVC 0x24).
         // AV1 (OBU syntax) and audio PIDs carry no Annex-B NAL units.
-        let mut nal_summary: Vec<u8> = Vec::new();
+        // Start codes are scanned ONCE here; the offsets + type codes are
+        // reused for both the TsEvent and the PacketEntry (no re-scan).
+        let mut nal_offsets: Vec<u32> = Vec::new();
+        let mut nal_types: Vec<u8> = Vec::new();
         if let Some(st) = self.stream_type_for_pid(pid_u16) {
             let is_hevc = st == 0x24;
             let is_h264 = st == 0x1B;
             if is_hevc || is_h264 {
-                let nstats = nal::parse_nal_stats(payload, is_hevc);
-                nal_summary = nal::nal_summary(payload, is_hevc);
+                let scan = nal::scan_nal(payload, is_hevc);
+
+                // Flat offsets array [off0, len0, off1, len1, ...].
+                nal_offsets = Vec::with_capacity(scan.ranges.len() * 2);
+                nal_types = scan.types.clone();
+                for &(start, end) in &scan.ranges {
+                    nal_offsets.push(start as u32);
+                    nal_offsets.push((end - start) as u32);
+                }
+
+                // Accumulate debug stats from the same scan (no re-scan).
+                let nstats = nal::parse_nal_stats_from_scan(payload, &scan, is_hevc);
                 let entry = self.nal_stats.entry(pid_u16).or_default();
                 entry.aud = entry.aud.saturating_add(nstats.aud);
                 entry.sps = entry.sps.saturating_add(nstats.sps);
@@ -515,6 +550,16 @@ impl TsDemuxer {
             }
         }
 
+        // Emit event with pre-parsed NAL data; clone types for the ring entry.
+        events.push(TsEvent::pes(
+            pid,
+            hdr,
+            payload.to_vec(),
+            ra,
+            nal_offsets,
+            nal_types.clone(),
+        ));
+
         self.push_packet(PacketEntry {
             t_ms,
             pid: pid_u16,
@@ -523,7 +568,7 @@ impl TsDemuxer {
             dts,
             size: payload.len() as u32,
             ra,
-            nal_summary,
+            nal_summary: nal_types,
             tei,
             pusi,
         });
