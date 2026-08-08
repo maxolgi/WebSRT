@@ -56,15 +56,7 @@ pub struct SrtIngester {
 }
 
 impl SrtIngester {
-    pub async fn bind(port: u16) -> Result<Self> {
-        Self::bind_with_addr(format!("0.0.0.0:{port}"), None).await
-    }
-
-    pub async fn bind_with_addr(addr: impl AsRef<str>, streamid: Option<String>) -> Result<Self> {
-        Self::bind_with_latency(addr, streamid, Duration::from_millis(120), None).await
-    }
-
-    pub async fn bind_with_latency(
+    pub async fn bind(
         addr: impl AsRef<str>,
         streamid: Option<String>,
         latency: Duration,
@@ -123,15 +115,7 @@ impl SrtIngester {
         }
     }
 
-    pub async fn call(addr: impl AsRef<str>) -> Result<Self> {
-        Self::call_with_streamid(addr, None).await
-    }
-
-    pub async fn call_with_streamid(addr: impl AsRef<str>, streamid: Option<String>) -> Result<Self> {
-        Self::call_with_latency(addr, streamid, Duration::from_millis(120), None).await
-    }
-
-    pub async fn call_with_latency(
+    pub async fn call(
         addr: impl AsRef<str>,
         streamid: Option<String>,
         latency: Duration,

@@ -23,7 +23,7 @@
 //! // Deferred ingester: connect OBS in background
 //! let source = gateway.source_handle();
 //! tokio::spawn(async move {
-//!     let ingester = SrtIngester::bind(9000).await.unwrap();
+//!     let ingester = SrtIngester::bind("0.0.0.0:9000", None, std::time::Duration::from_millis(120), None).await.unwrap();
 //!     source.publish_stream("default", ingester);
 //! });
 //!

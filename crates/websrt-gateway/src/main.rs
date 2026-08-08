@@ -363,7 +363,7 @@ async fn main() -> Result<()> {
                         let result = match call_addr {
                             Some(addr) => {
                                 tracing::info!(%addr, "SRT caller mode: dialing OBS");
-                                SrtIngester::call_with_latency(
+                                SrtIngester::call(
                                     &addr,
                                     streamid,
                                     std::time::Duration::from_millis(latency_ms),
