@@ -6,7 +6,8 @@ import type { DebugStore } from './store';
 import type { VideoPipeline } from '../decode';
 import type { OpusAudioPipeline, AacAudioPipeline } from '../decode';
 import type { CanvasRenderer } from '../render';
-import type { DemuxStats, TimeSeriesBucket } from './types';
+import type { DemuxStats } from '../shared/types';
+import type { TimeSeriesBucket } from './types';
 import { summarizePmt, type PmtEntry } from '../shared/pmt';
 
 export interface PipelineRefs {

@@ -2,7 +2,8 @@
 // GitHub issue reports. Called from the "Copy Info" and "Download" buttons.
 
 import type { DebugStore } from './store';
-import type { DebugDiagnostics, DemuxStats } from './types';
+import type { DebugDiagnostics } from './types';
+import type { DemuxStats } from '../shared/types';
 
 export async function buildDiagnostics(store: DebugStore): Promise<DebugDiagnostics> {
   const nav = navigator as any;

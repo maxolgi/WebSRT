@@ -5,15 +5,12 @@
 
 import { signal } from '@preact/signals-core';
 import type {
-  VideoStats,
-  AudioStats,
-  RenderStats,
   GpuInfo,
   MediaCapResult,
   TimeSeriesBucket,
-  DemuxStats,
   TestActions,
 } from './types';
+import type { VideoStats, AudioStats, RenderStats, DemuxStats } from '../shared/types';
 import type { StatsMsg } from '../worker';
 
 const HISTORY_CAP = 300;

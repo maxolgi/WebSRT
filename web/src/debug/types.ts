@@ -4,10 +4,8 @@
 //
 // The five core stat interfaces live in ../shared/types so the core modules
 // (worker, decode, render) can typecheck without depending on debug/**.
-// Re-exported here for backwards compatibility with existing consumers.
+// Debug-specific types (GpuInfo, MediaCapResult, etc.) are defined here.
 import type { VideoStats, AudioStats, RenderStats, DemuxStatsSerialized } from '../shared/types';
-
-export type { VideoStats, AudioStats, RenderStats, DemuxStats, DemuxStatsSerialized } from '../shared/types';
 
 export interface GpuInfo {
   vendor: string | null;

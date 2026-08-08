@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'preact/hooks';
 import type { JSX } from 'preact';
 import type { DebugStore } from '../store';
-import type { DemuxStats } from '../types';
+import type { DemuxStats } from '../../shared/types';
 import { streamTypeName } from './streamTypes';
 import { BitrateChart } from './charts/BitrateChart';
 import { PidDonutChart } from './charts/PidDonutChart';

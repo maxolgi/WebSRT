@@ -2,9 +2,6 @@
 // render) and the debug panel. These interfaces are part of the public core
 // surface: an embedder that excludes debug/** must still be able to typecheck
 // against the core, so the definitions live here rather than under debug/.
-//
-// The debug panel re-exports these from ../debug/types for backwards
-// compatibility — do not change field names without updating all consumers.
 
 export interface VideoStats {
   codec: 'h264' | 'hevc' | 'av1' | null;
