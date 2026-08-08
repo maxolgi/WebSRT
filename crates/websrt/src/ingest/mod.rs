@@ -11,10 +11,30 @@ pub use continuity::{TsContinuityChecker, TsStatsHandle};
 pub use srt::SrtConnectionIngester;
 pub use srt_listener::SrtListenerService;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
+use srt_protocol::options::KeySize;
+use srt_protocol::settings::KeySettings;
 use std::time::Instant;
+
+/// Build per-connection `KeySettings` from an optional passphrase string.
+/// Validates the SRT 10–79 char requirement and converts to the wire type.
+/// Returns `None` when no passphrase is set (unencrypted).
+pub(super) fn build_key_settings(passphrase: &Option<String>) -> Result<Option<KeySettings>> {
+    passphrase
+        .as_ref()
+        .map(|p| {
+            if !(10..=79).contains(&p.len()) {
+                anyhow::bail!("SRT passphrase must be 10–79 chars, got {}", p.len());
+            }
+            Ok(KeySettings {
+                key_size: KeySize::Unspecified,
+                passphrase: p.clone().try_into().map_err(|e| anyhow!("{e:?}"))?,
+            })
+        })
+        .transpose()
+}
 
 /// One TS message: N × 188-byte TS packets, with the `Instant` indicating when
 /// this message became available to the gateway. For SRT-backed ingesters

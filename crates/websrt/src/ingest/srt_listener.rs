@@ -1,8 +1,8 @@
-use super::{Ingester, SrtConnectionIngester};
+use super::{build_key_settings, Ingester, SrtConnectionIngester};
 use crate::stream_registry::StreamRegistry;
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
-use srt_protocol::options::{ByteCount, KeySize};
+use srt_protocol::options::ByteCount;
 use srt_protocol::settings::KeySettings;
 use srt_tokio::{SrtIncoming, SrtListener};
 use std::sync::Arc;
@@ -24,18 +24,7 @@ impl SrtListenerService {
         latency: Duration,
         passphrase: Option<String>,
     ) -> Result<Self> {
-        let key_settings = passphrase
-            .as_ref()
-            .map(|p| {
-                if !(10..=79).contains(&p.len()) {
-                    anyhow::bail!("SRT passphrase must be 10–79 chars, got {}", p.len());
-                }
-                Ok::<_, anyhow::Error>(KeySettings {
-                    key_size: KeySize::Unspecified,
-                    passphrase: p.clone().try_into().map_err(|e| anyhow!("{e:?}"))?,
-                })
-            })
-            .transpose()?;
+        let key_settings = build_key_settings(&passphrase)?;
 
         let (listener, incoming) = SrtListener::builder()
             .latency(latency)
