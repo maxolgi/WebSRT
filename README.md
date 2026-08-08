@@ -7,14 +7,13 @@
 
 Pure-Rust gateway that bridges native SRT (from OBS or any SRT sender) to
 browsers running **the real SRT protocol over WebTransport datagrams** — same
-wire format, same NAK/ACK/retransmit semantics, no stream-per-frame remuxing,
-no codec-specific server logic.
+wire format, same NAK/ACK/retransmit semantics.
 
 The browser runs `srt-protocol` and `mpeg2ts` compiled to WASM; JS is glue only.
 
-The gateway supports **both directions**: OBS → viewers (the original use case)
-and browser → viewers (browser publishes via WebTransport, gateway re-originates
-to other browsers). A browser can even do both simultaneously.
+The gateway supports **both directions**: OBS → viewersand browser → viewers
+(browser publishes via WebTransport, gateway re-originates to other browsers).
+A browser can even do both simultaneously.
 
 ```
                   ┌─────── Rust gateway ───────────────┐
@@ -36,22 +35,19 @@ to other browsers). A browser can even do both simultaneously.
 - **Gateway is a dumb SRT repeater.** It terminates OBS's SRT connection, takes
   the resulting `(Instant, Bytes)` messages, and re-originates them as a new
   SRT sender to each browser. TS bytes are never inspected server-side.
-- **Browser publishing.** A browser can publish upstream via WebTransport
-  (the gateway runs an SRT receiver over WT datagrams). Published streams are
-  fanned out to viewers exactly like OBS streams — same broadcaster, same
-  per-viewer SRT sender. The publisher muxes TS locally (`ts-muxer-wasm`),
-  sends SRT over WT datagrams to the gateway.
+- **Browser publishing.** A browser can publish upstream via WebTransport.
+  Published streams are fanned out to viewers exactly like OBS streams
+  same broadcaster, same per-viewer SRT sender. The publisher muxes TS
+  locally (`ts-muxer-wasm`), sends SRT over WT datagrams to the gateway.
 - **Each browser gets its own SRT sender instance** (independent seq numbers,
   independent retransmit buffer) via `tokio::sync::broadcast` fanout.
 - **Browser runs the same Rust state machines** the gateway does, compiled to
-  WASM. No JS-side SRT logic; no wire-format drift risk.
+  WASM.
 - **SRT crypto disabled** between gateway and browser. WebTransport TLS
   replaces it.
 - **Web Worker architecture.** The SRT receiver and TS demuxer run in a Web
   Worker off the main thread. Only WebCodecs decode and canvas rendering happen
   on the main thread.
-- **Automatic OBS reconnect.** If OBS disconnects, the gateway waits for a new
-  connection — no restart needed.
 - **PTS-paced video presentation.** Decoded frames are queued in a small
   bounded ring and drawn on `requestAnimationFrame` when their PTS is due,
   measured against a wall-clock ↔ PTS mapping that resets on large gaps
