@@ -29,3 +29,7 @@ fixtures/*.ts
 # logs and tmp
 logs/
 tmp/
+
+# local scratch/planning notes — reused, not history; never commit
+/plan.md
+/call-plan.md
