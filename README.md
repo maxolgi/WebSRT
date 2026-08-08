@@ -3,7 +3,7 @@
 > **NOTE: THIS IS NOT PRODUCTION READY.** This is an experimental project that
 > implements SRT over WebTransport datagrams. The protocol works, streams play,
 > and NAK/retransmit recovers from packet loss, but it has not been hardened,
-> audited, or tested at scale. Use at your own risk.
+> audited, or tested at scale.
 
 Pure-Rust gateway that bridges native SRT (from OBS or any SRT sender) to
 browsers running **the real SRT protocol over WebTransport datagrams** — same
@@ -17,18 +17,18 @@ and browser → viewers (browser publishes via WebTransport, gateway re-originat
 to other browsers). A browser can even do both simultaneously.
 
 ```
-                 ┌─────── Rust gateway ──────────────┐
- [OBS] --SRT/UDP─▶│ srt-tokio listener (ingest)        │       ┌── Browser (viewer) ─────────────┐
-                 │   ↓ (Instant, Bytes)               │       │ JS: WebTransport datagram I/O    │
-                 │ broadcaster (broadcast channel)    │       │   ↓ bytes                       │
- [Browser] ─WT──▶│ SrtInitiator (ingest, publish)     │──WT──▶│ WASM: srt-protocol::receiver     │
-  (publisher)    │   ↓ (Instant, Bytes)               │       │   ↓ (Instant, Bytes) messages    │
-                 │   ↓                                │       │ WASM: mpeg2ts demux              │
-                 │ srt-protocol::sender (per viewer)  │       │   ↓ PES / NAL / Opus             │
-                 │   ↓ SRT packets (bytes)            │       │ JS: WebCodecs decode + render    │
-                 │ wtransport datagram driver         │       └──────────────────────────────────┘
-                 │   ↑ ACK/NAK (bytes)                │
-                 └────────────────────────────────────┘
+                  ┌─────── Rust gateway ───────────────┐
+ [OBS] --SRT/UDP─▶│ srt-tokio listener (ingest)        │       ┌── Browser (viewer) ──────────────┐
+                  │   ↓ (Instant, Bytes)               │       │ JS: WebTransport datagram I/O    │
+                  │ broadcaster (broadcast channel)    │       │   ↓ bytes                        │
+ [Browser] ─WT──▶ │ SrtInitiator (ingest, publish)     │──WT──▶│ WASM: srt-protocol::receiver     │
+  (publisher)     │   ↓ (Instant, Bytes)               │       │   ↓ (Instant, Bytes) messages    │
+                  │   ↓                                │       │ WASM: mpeg2ts demux              │
+                  │ srt-protocol::sender (per viewer)  │       │   ↓ PES / NAL / Opus             │
+                  │   ↓ SRT packets (bytes)            │       │ JS: WebCodecs decode + render    │
+                  │ wtransport datagram driver         │       └──────────────────────────────────┘
+                  │   ↑ ACK/NAK (bytes)                │
+                  └────────────────────────────────────┘
 ```
 
 ## Key design points
