@@ -31,8 +31,12 @@ export interface ViewerUi {
   /** Cert mode determined from cert-hash.js. Optional. */
   onCertMode?(mode: 'self' | 'mkcert'): void;
   /** Called after the `init` message is posted to a (fresh or reused) worker.
-   *  Useful for posting follow-up commands like `debug-rate`. */
+    *  Useful for posting follow-up commands like `debug-rate`. */
   onWorkerReady?(worker: Worker): void;
+  /** Decoded video frame (decodeInWorker mode only). Host owns lifecycle — must call frame.close(). */
+  onDecodedFrame?(frame: VideoFrame): void;
+  /** Decoded audio data (decodeInWorker mode only). Host owns lifecycle — must call data.close(). */
+  onDecodedAudio?(data: AudioData): void;
 }
 
 export interface ViewerConfig {
@@ -67,6 +71,10 @@ export interface ViewerConfig {
   maxReconnectDelayMs?: number;
   /** Stream name resolver. When provided, overrides the URL `?stream=` param. */
   getStreamName?(): string;
+  /** When true, the worker handles decode and transfers decoded VideoFrame/AudioData
+   *  to main. The SDK does NOT create a CanvasRenderer, VideoPipeline, or <audio> element.
+   *  The host receives frames via the ViewerUi.onDecodedFrame / onDecodedAudio callbacks. */
+  decodeInWorker?: boolean;
 }
 
 export interface ViewerHandle {
@@ -108,6 +116,7 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
     baseReconnectDelayMs = 2000,
     maxReconnectDelayMs = 30000,
     getStreamName,
+    decodeInWorker = false,
   } = config;
 
   // --- closure state (was module-level `let` in the entrypoints) ---
@@ -120,6 +129,7 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
   let reconnectTimer: number | null = null;
   let reconnectAttempts = 0;
   let manualDisconnect = false;
+  let firstFrame = true;
   let connState: ConnectionState = 'idle';
   let driftTimer: ReturnType<typeof setInterval> | null = null;
   let latestDriftMs: number | null = null;
@@ -269,20 +279,24 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
     }
     ui.onCertMode?.(hashHex ? 'self' : 'mkcert');
 
-    renderer = new CanvasRenderer(canvas);
-    let firstFrame = true;
-
-    video = new VideoPipeline({
-      onFrame: (frame) => {
-        renderer?.draw(frame);
-        if (firstFrame) {
-          firstFrame = false;
-          ui.onFirstFrame(frame.displayWidth, frame.displayHeight);
-        }
-      },
-      onError: (e) => log(`video err: ${e}`, 'err'),
-      onConfigured: (info) => ui.onVideoConfigured(info),
-    });
+    firstFrame = true;
+    if (!decodeInWorker) {
+      renderer = new CanvasRenderer(canvas);
+      video = new VideoPipeline({
+        onFrame: (frame) => {
+          renderer?.draw(frame);
+          if (firstFrame) {
+            firstFrame = false;
+            ui.onFirstFrame(frame.displayWidth, frame.displayHeight);
+          }
+        },
+        onError: (e) => log(`video err: ${e}`, 'err'),
+        onConfigured: (info) => ui.onVideoConfigured(info),
+      });
+    } else {
+      // Frame pump mode: no renderer, no main-side pipeline.
+      // The worker transfers decoded frames; we emit them via ui callbacks.
+    }
 
     const pageHost = location.hostname || '127.0.0.1';
     const urlParams = new URLSearchParams(location.search);
@@ -312,12 +326,12 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
     }
 
     worker.postMessage(
-      { cmd: 'init', url: wtUrl, certHash: hashBytes, latencyMs },
+      { cmd: 'init', url: wtUrl, certHash: hashBytes, latencyMs, decodeInWorker },
       hashBytes ? [hashBytes.buffer as ArrayBuffer] : [],
     );
     ui.onWorkerReady?.(worker);
 
-    startDriftMonitor();
+    if (!decodeInWorker) startDriftMonitor();
   }
 
   function handleWorkerMsg(msg: WorkerMsg) {
@@ -337,16 +351,28 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
       case 'pmt':
         // PMT always precedes PES — set the codec hint before any videoPes
         // arrives so VideoPipeline routes AV1 OBU payloads correctly.
-        if (msg.videoPid >= 0) {
-          video?.setCodecHint(msg.videoCodec);
+        if (!decodeInWorker) {
+          if (msg.videoPid >= 0) {
+            video?.setCodecHint(msg.videoCodec);
+          }
+          if (msg.audioPid >= 0 && msg.audioStreamType >= 0 && !audio) {
+            const isOpus = msg.audioStreamType === 0x06;
+            log(`audio PID ${msg.audioPid}: ${isOpus ? 'Opus' : 'AAC'} (stream type 0x${msg.audioStreamType.toString(16)})`, 'info');
+            audio = isOpus
+              ? new OpusAudioPipeline(audioCb)
+              : new AacAudioPipeline(audioCb);
+          }
         }
-        if (msg.audioPid >= 0 && msg.audioStreamType >= 0 && !audio) {
-          const isOpus = msg.audioStreamType === 0x06;
-          log(`audio PID ${msg.audioPid}: ${isOpus ? 'Opus' : 'AAC'} (stream type 0x${msg.audioStreamType.toString(16)})`, 'info');
-          audio = isOpus
-            ? new OpusAudioPipeline(audioCb)
-            : new AacAudioPipeline(audioCb);
+        break;
+      case 'videoFrame':
+        if (firstFrame) {
+          firstFrame = false;
+          ui.onFirstFrame(msg.frame.codedWidth, msg.frame.codedHeight);
         }
+        ui.onDecodedFrame?.(msg.frame);
+        break;
+      case 'audioData':
+        ui.onDecodedAudio?.(msg.data);
         break;
       case 'videoPes':
         video?.feed(msg.data, msg.pts, msg.isKeyframe, msg.dts);

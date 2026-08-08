@@ -24,6 +24,9 @@ export interface PlayerOptions {
   decodePacing?: boolean;
   /** Initial mute state. Default true (browser autoplay policy). */
   muted?: boolean;
+  /** Decode in the Web Worker; emit decodedframe/decodedaudio events instead of
+   *  owning canvas/audio sinks. Default false. */
+  decodeInWorker?: boolean;
 }
 
 export type PlayerState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
@@ -43,6 +46,9 @@ export interface PlayerResizeDetail {
 }
 
 export interface PlayerHandle extends EventTarget {
+  // Events (via addEventListener):
+  //   'decodedframe'  → CustomEvent<VideoFrame>   (decodeInWorker mode only; host owns lifecycle)
+  //   'decodedaudio'  → CustomEvent<AudioData>    (decodeInWorker mode only; host owns lifecycle)
   /** Connect; resolves on first decoded frame, rejects on a terminal error
    *  (or if disconnect()/destroy() interrupts the initial connect). */
   connect(): Promise<void>;
@@ -103,6 +109,7 @@ class Player extends EventTarget implements PlayerHandle {
       token: opts.token,
       certHash: opts.certHash,
       latencyMs: opts.latencyMs ?? 120,
+      decodeInWorker: opts.decodeInWorker ?? false,
       ui: {
         log: (msg, cls) => this.onLog(msg, cls),
         setStatus: () => {},
@@ -112,6 +119,8 @@ class Player extends EventTarget implements PlayerHandle {
         onAudioReady: () => {},
         onStats: (stats, demux) => this.emit('stats', { stats, demux } satisfies PlayerStatsDetail),
         onDrift: (driftMs) => { if (driftMs !== null) this.emit('drift', driftMs); },
+        onDecodedFrame: (frame) => this.emit('decodedframe', frame),
+        onDecodedAudio: (data) => this.emit('decodedaudio', data),
       },
     });
 
@@ -256,11 +265,13 @@ class Player extends EventTarget implements PlayerHandle {
   setLatencyMs(ms: number): void { this.viewer.setLatencyMs(ms); }
 
   setRenderPacing(enabled: boolean): void {
+    // No-op in decodeInWorker mode (no renderer on main thread).
     this.renderPacingPref = enabled;
     this.viewer.getRenderer()?.setRenderPacing(enabled);
   }
 
   setDecodePacing(enabled: boolean): void {
+    // No-op in decodeInWorker mode (decoder lives in worker).
     this.decodePacingPref = enabled;
     this.viewer.getVideo()?.setDecodePacing(enabled);
   }

@@ -666,7 +666,7 @@ export class VideoPipeline {
   private dtsOriginUs: number | null = null;
   private wallOriginMs = 0;
   private deferred: { chunk: EncodedVideoChunk; dtsUs: number | null; isKey: boolean }[] = [];
-  private rafId: number | null = null;
+  private rafId: ReturnType<typeof setTimeout> | null = null;
   // DTS-paced decode is off by default (trust SRT TSBPD). Enable via
   // setDecodePacing(true) to defer decode submission by DTS.
   private decodePacing = false;
@@ -717,7 +717,7 @@ export class VideoPipeline {
     if (!enabled) {
       this.flushDeferred();
       if (this.rafId !== null) {
-        cancelAnimationFrame(this.rafId);
+        clearTimeout(this.rafId as any);
         this.rafId = null;
       }
       this.dtsOriginUs = null;
@@ -1191,10 +1191,10 @@ export class VideoPipeline {
       this.rafId = null;
       this.drainDeferred();
       if (this.deferred.length > 0 && this.decoder && this.decoder.state === 'configured') {
-        this.rafId = requestAnimationFrame(tick);
+        this.rafId = setTimeout(tick, 4);
       }
     };
-    this.rafId = requestAnimationFrame(tick);
+    this.rafId = setTimeout(tick, 4);
   }
 
   private drainDeferred() {
@@ -1242,7 +1242,7 @@ export class VideoPipeline {
     this.pendingNalus = [];
     this.pendingAv1 = [];
     if (this.rafId !== null) {
-      cancelAnimationFrame(this.rafId);
+      clearTimeout(this.rafId as any);
       this.rafId = null;
     }
     this.deferred = [];
@@ -1283,6 +1283,7 @@ export const NAL_TYPES = {
 export interface AudioDecoderCallbacks {
   onError: (e: unknown) => void;
   onReady: () => void;
+  onFrame?: (data: AudioData) => void;
 }
 
 /** Opus TOC byte frame durations in microseconds, indexed by config (0-31). */
@@ -1346,6 +1347,15 @@ abstract class AudioPipelineBase {
 
   /** Set up the output path. Sync for MediaStreamTrackGenerator, async for AudioWorklet. */
   protected async initOutput(): Promise<void> {
+    // Worker mode: no sink (MSTG/AudioContext unavailable in dedicated worker).
+    // MUST set configured = true — canFeed() gates all feed() on this flag,
+    // and startInit() sets it to false before calling initOutput(). A missing
+    // assignment here means every audio packet is silently dropped.
+    if (this.cb.onFrame) {
+      this.configured = true;
+      this.cb.onReady();
+      return;
+    }
     const MTG = (window as unknown as {
       MediaStreamTrackGenerator?: new (init: { kind: string }) => MediaStreamTrackGenerator;
     }).MediaStreamTrackGenerator;
@@ -1380,6 +1390,10 @@ abstract class AudioPipelineBase {
   protected routeFrame(frame: AudioData) {
     this.lastWrittenPtsUs = frame.timestamp;
     this.lastWrittenWallMs = performance.now();
+    if (this.cb.onFrame) {
+      this.cb.onFrame(frame);
+      return;
+    }
     if (this.writer) {
       this.writer.write(frame).catch(() => frame.close());
     } else if (this.workletNode) {

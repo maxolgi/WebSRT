@@ -3,6 +3,7 @@ import { Demuxer } from './demux';
 import { looksLikeAv1 } from './shared/av1';
 import type { DemuxStats } from './debug/types';
 import { summarizePmt, ST_PRIVATE, type PmtEntry } from './shared/pmt';
+import { VideoPipeline, OpusAudioPipeline, AacAudioPipeline } from './decode';
 
 export interface StatsMsg {
   elapsedMs: number;
@@ -28,7 +29,7 @@ export interface StatsMsg {
 export type DemuxStatsMsg = DemuxStats;
 
 export type WorkerCmd =
-  | { cmd: 'init'; url: string; certHash: Uint8Array | null; latencyMs: number }
+  | { cmd: 'init'; url: string; certHash: Uint8Array | null; latencyMs: number; decodeInWorker?: boolean }
   | { cmd: 'visibility'; visible: boolean }
   | { cmd: 'stop' }
   | { cmd: 'debug-rate'; ms: number };
@@ -39,6 +40,8 @@ export type WorkerMsg =
   | { type: 'pmt'; videoPid: number; audioPid: number; audioStreamType: number; videoCodec: 'av1' | 'h264' | 'hevc' | null }
   | { type: 'videoPes'; data: Uint8Array; pts: number | null; dts: number | null; isKeyframe: boolean }
   | { type: 'audioPes'; data: Uint8Array; pts: number | null }
+  | { type: 'videoFrame'; frame: VideoFrame }
+  | { type: 'audioData'; data: AudioData }
   | { type: 'wtReady' }
   | { type: 'wtClosed'; error?: string }
   | { type: 'stats'; stats: StatsMsg; demux?: DemuxStatsMsg }
@@ -67,12 +70,15 @@ let audioStreamType: number | null = null;
 const probePids: Set<number> = new Set();
 let inited = false;
 let outgoing: WorkerMsg[] = [];
+let decodeInWorker = false;
+let videoPipeline: VideoPipeline | null = null;
+let audioPipeline: OpusAudioPipeline | AacAudioPipeline | null = null;
 
 self.onmessage = async (e: MessageEvent) => {
   const cmd = e.data as WorkerCmd;
   switch (cmd.cmd) {
     case 'init':
-      await doInit(cmd.url, cmd.certHash, cmd.latencyMs);
+      await doInit(cmd.url, cmd.certHash, cmd.latencyMs, cmd.decodeInWorker);
       break;
     case 'visibility':
       if (cmd.visible) {
@@ -128,6 +134,8 @@ function flushOutgoing() {
     ) {
       transfer.push(m.data.buffer);
     }
+    if (m.type === 'videoFrame' && m.frame) transfer.push(m.frame as unknown as ArrayBuffer);
+    if (m.type === 'audioData' && m.data) transfer.push(m.data as unknown as ArrayBuffer);
   }
   (self as unknown as Worker).postMessage(
     { type: 'batch', msgs: outgoing },
@@ -136,8 +144,9 @@ function flushOutgoing() {
   outgoing = [];
 }
 
-async function doInit(url: string, certHash: Uint8Array | null, latencyMs: number) {
+async function doInit(url: string, certHash: Uint8Array | null, latencyMs: number, decodeInWorkerFlag?: boolean) {
   const myGen = ++gen;
+  decodeInWorker = decodeInWorkerFlag ?? false;
   try {
     doStop();
     await init();
@@ -176,11 +185,14 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
             videoCodec: videoCodecResolved,
           });
         }
+        if (decodeInWorker) {
+          ensureVideoPipeline();
+          ensureAudioPipeline();
+        }
       },
       onPes: (pid, pts, dts, bytes, ra) => {
+        // 1. Content-probe descriptor-less 0x06 PIDs first (may resolve codec)
         if (probePids.has(pid)) {
-          // Content-probe: distinguish AV1 video from Opus audio by sniffing
-          // the first OBU header. Runs once per PID, then pins the decision.
           probePids.delete(pid);
           if (looksLikeAv1(bytes)) {
             videoPid = pid;
@@ -189,20 +201,34 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
             audioPid = pid;
             audioStreamType = ST_PRIVATE;
           }
-          // PMT reaches main.ts (sets the codec hint) before the video/audio
-          // Pes queued immediately after, since both land in the same batch.
-          queue({
-            type: 'pmt',
-            videoPid: videoPid ?? -1,
-            audioPid: audioPid ?? -1,
-            audioStreamType: audioStreamType ?? -1,
-            videoCodec: videoCodecResolved,
-          });
+          // Emit updated PMT so main thread knows the resolved codec
+          if (videoPid !== null || audioPid !== null) {
+            queue({
+              type: 'pmt',
+              videoPid: videoPid ?? -1,
+              audioPid: audioPid ?? -1,
+              audioStreamType: audioStreamType ?? -1,
+              videoCodec: videoCodecResolved,
+            });
+          }
         }
-        if (pid === videoPid) {
-          queue({ type: 'videoPes', data: bytes, pts, dts, isKeyframe: ra });
-        } else if (pid === audioPid) {
-          queue({ type: 'audioPes', data: bytes, pts });
+
+        if (decodeInWorker) {
+          // Construct pipeline if codec resolved but pipeline not yet built, then feed
+          if (pid === videoPid) {
+            ensureVideoPipeline();
+            videoPipeline?.feed(bytes, pts, ra, dts);
+          } else if (pid === audioPid) {
+            ensureAudioPipeline();
+            audioPipeline?.feed(bytes, pts);
+          }
+        } else {
+          // Current path: queue PES bytes to main thread
+          if (pid === videoPid) {
+            queue({ type: 'videoPes', data: bytes, pts, dts, isKeyframe: ra });
+          } else if (pid === audioPid) {
+            queue({ type: 'audioPes', data: bytes, pts });
+          }
         }
       },
       onError: (msg_) => queue({ type: 'log', msg: `demux err: ${msg_}`, cls: 'err' }),
@@ -274,7 +300,32 @@ function doStop() {
   rx = null;
   demux = null;
   inited = false;
+  if (videoPipeline) { try { videoPipeline.reset(); } catch {} videoPipeline = null; }
+  if (audioPipeline) { try { audioPipeline.reset(); } catch {} audioPipeline = null; }
   if (w) { try { w.close({}); } catch {} }
+}
+
+function ensureVideoPipeline(): void {
+  if (videoPipeline) return;
+  if (videoCodecResolved === null) return;
+  videoPipeline = new VideoPipeline({
+    onFrame: (frame) => { queue({ type: 'videoFrame', frame }); flushOutgoing(); },
+    onError: (e) => { queue({ type: 'log', msg: `video err: ${e}`, cls: 'err' }); flushOutgoing(); },
+    onConfigured: () => {},
+  });
+  videoPipeline.setCodecHint(videoCodecResolved);
+}
+
+function ensureAudioPipeline(): void {
+  if (audioPipeline) return;
+  if (audioStreamType === null || audioStreamType < 0) return;
+  const isOpus = audioStreamType === 0x06;
+  const cb = {
+    onError: (e: unknown) => { queue({ type: 'log', msg: `audio err: ${e}`, cls: 'err' }); flushOutgoing(); },
+    onReady: () => {},
+    onFrame: (data: AudioData) => { queue({ type: 'audioData', data }); flushOutgoing(); },
+  };
+  audioPipeline = isOpus ? new OpusAudioPipeline(cb) : new AacAudioPipeline(cb);
 }
 
 function writeDatagram(bytes: Uint8Array) {
