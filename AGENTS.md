@@ -239,3 +239,5 @@ For multi-step tasks, state a brief plan:
 ```
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+If you are not sure about something dont overthink it and use internet search
