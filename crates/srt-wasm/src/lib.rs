@@ -133,8 +133,6 @@ enum State {
     Handshaking(Listen),
     /// Handshake complete; data plane running.
     Connected(DuplexConnection),
-    /// Never started.
-    New,
     /// Closed (peer shutdown or error).
     Closed,
 }
@@ -222,9 +220,6 @@ impl SrtReceiver {
 
         let mut state = self.state.borrow_mut();
         match &mut *state {
-            State::New => {
-                out.push(SrtAction::log("received datagram before start"));
-            }
             State::Closed => {
                 // ignore
             }
