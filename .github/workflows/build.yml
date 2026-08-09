@@ -189,9 +189,9 @@ jobs:
       - name: Stage release assets
         run: |
           mkdir -p release
-          cp artifacts/websrt-gateway-linux-x64/websrt-gateway release/
-          cp artifacts/websrt-gateway-windows-x64/websrt-gateway.exe release/
-          cp artifacts/websrt-gateway-macos-arm64/websrt-gateway release/
+          cp artifacts/websrt-gateway-linux-x64/websrt-gateway      release/websrt-gateway-linux
+          cp artifacts/websrt-gateway-windows-x64/websrt-gateway.exe release/websrt-gateway-windows.exe
+          cp artifacts/websrt-gateway-macos-arm64/websrt-gateway     release/websrt-gateway-macos
           cp artifacts/websrt-gateway-deb/*.deb release/
           (cd artifacts/websrt-web-dist && zip -r "$GITHUB_WORKSPACE/release/websrt-web-dist.zip" .)
 
