@@ -512,6 +512,19 @@ fn draw_config_form(ui: &mut egui::Ui, config: &mut GuiConfig, enabled: bool) {
             );
             ui.end_row();
 
+            // Web server
+            ui.label("Web UI:");
+            ui.add_enabled(enabled, egui::Checkbox::new(&mut config.no_web, "disable"));
+            ui.end_row();
+
+            ui.label("Web HTTPS port:");
+            ui.add_enabled(enabled, egui::DragValue::new(&mut config.web_port).range(0..=65535));
+            ui.end_row();
+
+            ui.label("Web bind addr:");
+            ui.add_enabled(enabled, egui::TextEdit::singleline(&mut config.web_bind).desired_width(160.0));
+            ui.end_row();
+
             // Cert mode
             ui.label("Cert mode:");
             ui.add_enabled_ui(enabled, |ui| {
@@ -571,18 +584,6 @@ fn draw_config_form(ui: &mut egui::Ui, config: &mut GuiConfig, enabled: bool) {
                         enabled,
                         egui::TextEdit::singleline(&mut config.health_bind).desired_width(160.0),
                     );
-                    ui.end_row();
-
-                    ui.label("Serve web UI:");
-                    ui.add_enabled(enabled, egui::Checkbox::new(&mut config.no_web, "disable (use Vite)"));
-                    ui.end_row();
-
-                    ui.label("Web HTTPS port:");
-                    ui.add_enabled(enabled, egui::DragValue::new(&mut config.web_port).range(0..=65535));
-                    ui.end_row();
-
-                    ui.label("Web bind addr:");
-                    ui.add_enabled(enabled, egui::TextEdit::singleline(&mut config.web_bind).desired_width(160.0));
                     ui.end_row();
                 });
 
