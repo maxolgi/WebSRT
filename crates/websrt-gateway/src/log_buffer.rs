@@ -38,6 +38,11 @@ impl LogBuffer {
         let start = g.len().saturating_sub(n);
         g.iter().skip(start).cloned().collect()
     }
+
+    /// Remove all stored log lines.
+    pub fn clear(&self) {
+        self.lines.lock().unwrap().clear();
+    }
 }
 
 /// `MakeWriter` impl that produces a `BufferWriter` for each log event.
