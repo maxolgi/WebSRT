@@ -55,7 +55,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: tsc --noEmit
-        run: cd web && npx tsc --noEmit
+        run: cd web && npm ci && npx tsc --noEmit
 
   # ---------------------------------------------------------------------------
   # 2. Full Linux build.
