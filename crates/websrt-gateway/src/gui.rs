@@ -10,15 +10,21 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use tokio::sync::Notify;
-use tokio::task::JoinHandle;
 
 use websrt::{GatewayStats, GatewayStatsHandle};
 
 use crate::log_buffer::LogBuffer;
 use crate::{CertMode, Cli, InputMode, SrtMode};
 
-/// Result from the spawned `run_gateway` task.
-type StartResult = Result<(GatewayStatsHandle, JoinHandle<anyhow::Result<()>>, Arc<Notify>), String>;
+/// Messages from the spawned gateway task to the GUI thread.
+enum GatewayMessage {
+    /// Gateway setup succeeded, now running. Includes stats handle + shutdown trigger.
+    Started(GatewayStatsHandle, Arc<Notify>),
+    /// Gateway exited cleanly (Stop button or ctrl-c).
+    Stopped,
+    /// Gateway failed — setup error, bind error, or runtime crash.
+    Error(String),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RunState {
@@ -126,10 +132,9 @@ pub struct GuiApp {
     log_buffer: Arc<LogBuffer>,
 
     state: RunState,
-    startup_rx: Option<std::sync::mpsc::Receiver<StartResult>>,
+    msg_rx: Option<std::sync::mpsc::Receiver<GatewayMessage>>,
     stats_handle: Option<GatewayStatsHandle>,
     shutdown: Option<Arc<Notify>>,
-    task: Option<JoinHandle<anyhow::Result<()>>>,
 
     stats: Option<GatewayStats>,
     last_stats_poll: Instant,
@@ -151,10 +156,9 @@ impl GuiApp {
             handle,
             log_buffer,
             state: RunState::Stopped,
-            startup_rx: None,
+            msg_rx: None,
             stats_handle: None,
             shutdown: None,
-            task: None,
             stats: None,
             last_stats_poll: Instant::now(),
             error: None,
@@ -164,19 +168,24 @@ impl GuiApp {
     fn start(&mut self) {
         let cli = self.config.to_cli();
         let (tx, rx) = std::sync::mpsc::channel();
-        self.startup_rx = Some(rx);
+        self.msg_rx = Some(rx);
         self.state = RunState::Starting;
         self.error = None;
 
         self.handle.spawn(async move {
             let shutdown = Arc::new(Notify::new());
-            let result = crate::run_gateway(cli, shutdown.clone()).await;
-            match result {
-                Ok((stats_handle, task)) => {
-                    let _ = tx.send(Ok((stats_handle, task, shutdown)));
+            match crate::run_gateway(cli, shutdown.clone()).await {
+                Ok((stats_handle, gateway_task)) => {
+                    let _ = tx.send(GatewayMessage::Started(stats_handle, shutdown));
+                    // Await the gateway run loop — reports bind errors, crashes, etc.
+                    match gateway_task.await {
+                        Ok(Ok(())) => { let _ = tx.send(GatewayMessage::Stopped); }
+                        Ok(Err(e)) => { let _ = tx.send(GatewayMessage::Error(format!("{e}"))); }
+                        Err(e) => { let _ = tx.send(GatewayMessage::Error(format!("gateway task: {e}"))); }
+                    }
                 }
                 Err(e) => {
-                    let _ = tx.send(Err(e.to_string()));
+                    let _ = tx.send(GatewayMessage::Error(e.to_string()));
                 }
             }
         });
@@ -191,52 +200,44 @@ impl GuiApp {
 
     /// Non-blocking state machine poll — called every frame.
     fn poll(&mut self) {
-        // 1. Check startup result (Starting → Running or Error)
-        let startup_recv = self.startup_rx.as_ref().and_then(|rx| {
-            match rx.try_recv() {
-                Ok(v) => Some(Ok(v)),
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(())),
-                Err(std::sync::mpsc::TryRecvError::Empty) => None,
-            }
-        });
-        if let Some(result) = startup_recv {
-            match result {
-                Ok(Ok((stats_handle, task, shutdown))) => {
+        // 1. Drain all pending messages from the gateway task.
+        loop {
+            let msg = self
+                .msg_rx
+                .as_ref()
+                .and_then(|rx| rx.try_recv().ok());
+            match msg {
+                Some(GatewayMessage::Started(stats_handle, shutdown)) => {
                     self.stats_handle = Some(stats_handle);
-                    self.task = Some(task);
-                    self.shutdown = Some(shutdown);
-                    self.startup_rx = None;
-                    self.state = RunState::Running;
-                    self.last_stats_poll = Instant::now();
+                    self.shutdown = Some(shutdown.clone());
+                    if self.state == RunState::Stopping {
+                        // User clicked Stop before gateway finished starting.
+                        shutdown.notify_one();
+                    } else {
+                        self.state = RunState::Running;
+                        self.last_stats_poll = Instant::now();
+                    }
                 }
-                Ok(Err(e)) => {
+                Some(GatewayMessage::Error(e)) => {
                     self.error = Some(e);
-                    self.startup_rx = None;
+                    self.stats_handle = None;
+                    self.shutdown = None;
+                    self.stats = None;
                     self.state = RunState::Stopped;
+                    self.msg_rx = None;
                 }
-                Err(()) => {
-                    self.error = Some("gateway startup task failed".to_string());
-                    self.startup_rx = None;
+                Some(GatewayMessage::Stopped) => {
+                    self.stats_handle = None;
+                    self.shutdown = None;
+                    self.stats = None;
                     self.state = RunState::Stopped;
+                    self.msg_rx = None;
                 }
+                None => break,
             }
         }
 
-        // 2. Check stopping completion (Stopping → Stopped)
-        let task_done = self
-            .task
-            .as_ref()
-            .map(|t| t.is_finished())
-            .unwrap_or(false);
-        if task_done && self.state == RunState::Stopping {
-            self.task = None;
-            self.shutdown = None;
-            self.stats_handle = None;
-            self.stats = None;
-            self.state = RunState::Stopped;
-        }
-
-        // 3. Poll stats (every 500ms while running)
+        // 2. Poll stats (every 500ms while running)
         if self.state == RunState::Running
             && self.last_stats_poll.elapsed() > Duration::from_millis(500)
         {
@@ -274,7 +275,7 @@ impl eframe::App for GuiApp {
             ui.heading("WebSRT Gateway");
             ui.add_space(6.0);
 
-            let editable = self.state == RunState::Stopped && self.startup_rx.is_none();
+            let editable = self.state == RunState::Stopped && self.msg_rx.is_none();
 
             draw_config_form(ui, &mut self.config, editable);
 
@@ -286,7 +287,7 @@ impl eframe::App for GuiApp {
             let running = self.state == RunState::Running;
             let starting = self.state == RunState::Starting;
             let stopping = self.state == RunState::Stopping;
-            let stopped = self.state == RunState::Stopped && self.startup_rx.is_none();
+            let stopped = self.state == RunState::Stopped && self.msg_rx.is_none();
 
             ui.horizontal(|ui| {
                 ui.add_space(40.0);
