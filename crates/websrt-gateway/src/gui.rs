@@ -183,6 +183,10 @@ pub struct GuiApp {
     stats: Option<GatewayStats>,
     last_stats_poll: Instant,
     error: Option<String>,
+
+    /// Current text selection in the log panel, if any.
+    /// Updated each frame from the TextEdit's persisted cursor state.
+    log_selection: Option<String>,
 }
 
 impl GuiApp {
@@ -206,6 +210,7 @@ impl GuiApp {
             stats: None,
             last_stats_poll: Instant::now(),
             error: None,
+            log_selection: None,
         }
     }
 
@@ -224,13 +229,18 @@ impl GuiApp {
                     let _ = tx.send(GatewayMessage::Started(stats_handle, shutdown.clone()));
                     // Await the gateway run loop — reports bind errors, crashes, etc.
                     match gateway_task.await {
-                        Ok(Ok(())) => { let _ = tx.send(GatewayMessage::Stopped); }
+                        Ok(Ok(())) => {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            let _ = tx.send(GatewayMessage::Stopped);
+                        }
                         Ok(Err(e)) => {
                             shutdown.notify_waiters();
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                             let _ = tx.send(GatewayMessage::Error(format!("{e}")));
                         }
                         Err(e) => {
                             shutdown.notify_waiters();
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                             let _ = tx.send(GatewayMessage::Error(format!("gateway task: {e}")));
                         }
                     }
@@ -418,25 +428,46 @@ impl eframe::App for GuiApp {
             ui.add_space(4.0);
 
             // Log panel
+            let lines = self.log_buffer.recent(200);
+            let log_text = lines.join("\n");
+            let has_logs = !log_text.is_empty();
+
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Logs").strong());
+                if ui.add_enabled(has_logs, egui::Button::new("Copy")).clicked() {
+                    let text = self
+                        .log_selection
+                        .clone()
+                        .unwrap_or_else(|| log_text.clone());
+                    ctx.copy_text(text);
+                }
+                if ui.add_enabled(has_logs, egui::Button::new("Clear")).clicked() {
+                    self.log_buffer.clear();
+                    self.log_selection = None;
+                }
             });
             egui::ScrollArea::vertical()
                 .max_height(ui.available_height() - 4.0)
                 .stick_to_bottom(true)
                 .auto_shrink([false; 2])
                 .show(ui, |ui| {
-                    let lines = self.log_buffer.recent(200);
-                    if lines.is_empty() {
+                    if has_logs {
+                        let mut text_ref = log_text.as_str();
+                        let output = egui::TextEdit::multiline(&mut text_ref)
+                            .frame(false)
+                            .desired_width(f32::MAX)
+                            .font(egui::FontId::monospace(12.0))
+                            .show(ui);
+                        if let Some(cr) = output.state.cursor.range(&output.galley) {
+                            if cr.is_empty() {
+                                self.log_selection = None;
+                            } else {
+                                self.log_selection =
+                                    Some(cr.slice_str(&log_text).to_owned());
+                            }
+                        }
+                    } else {
                         ui.small("(no logs yet)");
-                    }
-                    for line in &lines {
-                        let color = log_color(line);
-                        ui.monospace(
-                            egui::RichText::new(line)
-                                .color(color)
-                                .size(12.0),
-                        );
                     }
                 });
         });
@@ -605,19 +636,5 @@ fn cert_mode_label(m: CertMode) -> &'static str {
     match m {
         CertMode::Self_ => "Self-signed",
         CertMode::Mkcert => "mkcert (PEM)",
-    }
-}
-
-fn log_color(line: &str) -> egui::Color32 {
-    if line.contains("ERROR") {
-        egui::Color32::from_rgb(240, 100, 100)
-    } else if line.contains("WARN") {
-        egui::Color32::from_rgb(230, 190, 90)
-    } else if line.contains("DEBUG") {
-        egui::Color32::from_gray(140)
-    } else if line.contains("TRACE") {
-        egui::Color32::from_gray(100)
-    } else {
-        egui::Color32::from_gray(200)
     }
 }
