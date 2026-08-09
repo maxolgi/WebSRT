@@ -14,7 +14,7 @@ use tokio::sync::Notify;
 use websrt::{GatewayStats, GatewayStatsHandle};
 
 use crate::log_buffer::LogBuffer;
-use crate::{CertMode, Cli, InputMode, SrtMode};
+use crate::{CertMode, Cli};
 
 /// Messages from the spawned gateway task to the GUI thread.
 enum GatewayMessage {
@@ -36,12 +36,7 @@ enum RunState {
 
 /// Form state with `String` fields (egui edits `&mut String`, not `PathBuf`).
 struct GuiConfig {
-    input: InputMode,
-    fixture: String,
-    fixture_duration: f64,
     srt_port: u16,
-    srt_mode: SrtMode,
-    srt_call: String,
     srt_streamid: String,
     wt_port: u16,
     bind: String,
@@ -74,15 +69,10 @@ fn opt_path(s: &str) -> Option<PathBuf> {
 impl GuiConfig {
     fn from_cli(cli: &Cli) -> Self {
         Self {
-            input: cli.input,
-            fixture: cli.fixture.display().to_string(),
-            fixture_duration: cli.fixture_duration,
             srt_port: cli.srt_port,
-            srt_mode: cli.srt_mode,
-            srt_call: cli.srt_call.clone().unwrap_or_default(),
             srt_streamid: cli.srt_streamid.clone().unwrap_or_default(),
             wt_port: cli.wt_port,
-            bind: cli.bind.clone(),
+            bind: "0.0.0.0".to_string(),
             cert_mode: cli.cert_mode,
             cert_pem: cli.cert_pem.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
             key_pem: cli.key_pem.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
@@ -93,7 +83,7 @@ impl GuiConfig {
             auth_token: cli.auth_token.clone().unwrap_or_default(),
             no_web: cli.no_web,
             web_port: cli.web_port,
-            web_bind: cli.web_bind.clone(),
+            web_bind: "0.0.0.0".to_string(),
             #[cfg(feature = "sim-loss")]
             sim_loss: cli.sim_loss,
             #[cfg(feature = "sim-loss")]
@@ -104,12 +94,12 @@ impl GuiConfig {
     fn to_cli(&self) -> Cli {
         Cli {
             no_gui: false,
-            input: self.input,
-            fixture: PathBuf::from(&self.fixture),
-            fixture_duration: self.fixture_duration,
+            input: crate::InputMode::Srt,
+            fixture: std::path::PathBuf::from("fixtures/test.ts"),
+            fixture_duration: 10.0,
             srt_port: self.srt_port,
-            srt_mode: self.srt_mode,
-            srt_call: opt_string(&self.srt_call),
+            srt_mode: crate::SrtMode::Listener,
+            srt_call: None,
             srt_streamid: opt_string(&self.srt_streamid),
             wt_port: self.wt_port,
             bind: self.bind.clone(),
@@ -415,93 +405,36 @@ fn draw_config_form(ui: &mut egui::Ui, config: &mut GuiConfig, enabled: bool) {
         .num_columns(2)
         .spacing([10.0, 6.0])
         .show(ui, |ui| {
-            // Input source
-            ui.label("Input Source:");
-            ui.add_enabled_ui(enabled, |ui| {
-                egui::ComboBox::from_id_salt("input")
-                    .selected_text(input_label(config.input))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut config.input, InputMode::File, "File (fixture)");
-                        ui.selectable_value(&mut config.input, InputMode::Srt, "SRT (OBS)");
-                    });
-            });
+            // SRT listener params
+            ui.label("SRT listen port:");
+            ui.add_enabled(
+                enabled,
+                egui::DragValue::new(&mut config.srt_port).range(1..=65535),
+            );
             ui.end_row();
 
-            // Input-specific fields
-            match config.input {
-                InputMode::File => {
-                    ui.label("Fixture path:");
-                    ui.add_enabled(
-                        enabled,
-                        egui::TextEdit::singleline(&mut config.fixture)
-                            .desired_width(280.0)
-                            .hint_text("fixtures/test.ts"),
-                    );
-                    ui.end_row();
+            ui.label("SRT streamid:");
+            ui.add_enabled(
+                enabled,
+                egui::TextEdit::singleline(&mut config.srt_streamid).desired_width(200.0),
+            );
+            ui.end_row();
 
-                    ui.label("Fixture duration (s):");
-                    ui.add_enabled(
-                        enabled,
-                        egui::DragValue::new(&mut config.fixture_duration)
-                            .speed(0.1)
-                            .range(0.1..=100_000.0),
-                    );
-                    ui.end_row();
-                }
-                InputMode::Srt => {
-                    ui.label("SRT mode:");
-                    ui.add_enabled_ui(enabled, |ui| {
-                        egui::ComboBox::from_id_salt("srt_mode")
-                            .selected_text(srt_mode_label(config.srt_mode))
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut config.srt_mode, SrtMode::Listener, "Listener");
-                                ui.selectable_value(&mut config.srt_mode, SrtMode::Caller, "Caller");
-                            });
-                    });
-                    ui.end_row();
+            ui.label("SRT latency (ms):");
+            ui.add_enabled(
+                enabled,
+                egui::DragValue::new(&mut config.latency).range(1..=10_000),
+            );
+            ui.end_row();
 
-                    if config.srt_mode == SrtMode::Listener {
-                        ui.label("SRT listen port:");
-                        ui.add_enabled(
-                            enabled,
-                            egui::DragValue::new(&mut config.srt_port).range(1..=65535),
-                        );
-                        ui.end_row();
-                    } else {
-                        ui.label("SRT call addr:");
-                        ui.add_enabled(
-                            enabled,
-                            egui::TextEdit::singleline(&mut config.srt_call)
-                                .desired_width(200.0)
-                                .hint_text("192.168.1.3:1234"),
-                        );
-                        ui.end_row();
-                    }
-
-                    ui.label("SRT streamid:");
-                    ui.add_enabled(
-                        enabled,
-                        egui::TextEdit::singleline(&mut config.srt_streamid).desired_width(200.0),
-                    );
-                    ui.end_row();
-
-                    ui.label("SRT latency (ms):");
-                    ui.add_enabled(
-                        enabled,
-                        egui::DragValue::new(&mut config.latency).range(1..=10_000),
-                    );
-                    ui.end_row();
-
-                    ui.label("SRT passphrase:");
-                    ui.add_enabled(
-                        enabled,
-                        egui::TextEdit::singleline(&mut config.srt_passphrase)
-                            .password(true)
-                            .desired_width(200.0),
-                    );
-                    ui.end_row();
-                }
-            }
+            ui.label("SRT passphrase:");
+            ui.add_enabled(
+                enabled,
+                egui::TextEdit::singleline(&mut config.srt_passphrase)
+                    .password(true)
+                    .desired_width(200.0),
+            );
+            ui.end_row();
 
             // WebTransport
             ui.label("WT port:");
@@ -621,20 +554,6 @@ fn draw_config_form(ui: &mut egui::Ui, config: &mut GuiConfig, enabled: bool) {
                     });
             }
         });
-}
-
-fn input_label(m: InputMode) -> &'static str {
-    match m {
-        InputMode::File => "File (fixture)",
-        InputMode::Srt => "SRT (OBS)",
-    }
-}
-
-fn srt_mode_label(m: SrtMode) -> &'static str {
-    match m {
-        SrtMode::Listener => "Listener",
-        SrtMode::Caller => "Caller",
-    }
 }
 
 fn cert_mode_label(m: CertMode) -> &'static str {

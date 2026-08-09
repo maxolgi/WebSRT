@@ -242,13 +242,27 @@ pub(crate) async fn run_gateway(
     shutdown: Arc<Notify>,
 ) -> Result<(GatewayStatsHandle, JoinHandle<Result<()>>)> {
     let cert_src = match cli.cert_mode {
-        CertMode::Self_ => CertSource::SelfSigned {
-            sans: vec![
-                "localhost".to_string(),
-                "127.0.0.1".to_string(),
-                "::1".to_string(),
-            ],
-        },
+        CertMode::Self_ => {
+            // Try to reuse a previously-generated self-signed cert so the
+            // browser's cert exception / cert-hash pinning stays stable.
+            let cert_path = std::path::PathBuf::from("gateway-cert.pem");
+            let key_path = std::path::PathBuf::from("gateway-key.pem");
+            if cert_path.exists() && key_path.exists() {
+                tracing::info!("reusing persisted self-signed cert");
+                CertSource::Mkcert {
+                    cert: cert_path,
+                    key: key_path,
+                }
+            } else {
+                CertSource::SelfSigned {
+                    sans: vec![
+                        "localhost".to_string(),
+                        "127.0.0.1".to_string(),
+                        "::1".to_string(),
+                    ],
+                }
+            }
+        }
         CertMode::Mkcert => {
             let cert_pem = cli
                 .cert_pem
@@ -265,7 +279,33 @@ pub(crate) async fn run_gateway(
         }
     };
 
-    let cert = Cert::build(cert_src).await?;
+    let mut cert = Cert::build(cert_src).await?;
+
+    // When the cert was loaded from persisted PEM (mkcert path), the hash
+    // isn't set by the builder — recompute it from the leaf DER so the
+    // browser's cert-hash pinning works.
+    if cert.der_sha256.is_none() {
+        if let Some(leaf) = cert.identity.certificate_chain().as_slice().first() {
+            cert.der_sha256 = Some(*leaf.hash().as_ref());
+        }
+    }
+
+    // Persist newly-generated self-signed cert for reuse across restarts.
+    if cli.cert_mode == CertMode::Self_
+        && !std::path::Path::new("gateway-cert.pem").exists()
+    {
+        if let Some(leaf) = cert.identity.certificate_chain().as_slice().first() {
+            let cert_pem = leaf.to_pem();
+            let key_pem = cert.identity.private_key().to_secret_pem();
+            if let Err(e) = std::fs::write("gateway-cert.pem", &cert_pem)
+                .and_then(|()| std::fs::write("gateway-key.pem", &key_pem))
+            {
+                tracing::warn!(?e, "failed to persist self-signed cert; will regenerate next start");
+            } else {
+                tracing::info!("persisted self-signed cert to gateway-cert.pem + gateway-key.pem");
+            }
+        }
+    }
 
     // Write cert-hash.js so the browser knows which mode we're in.
     let hash_file = {

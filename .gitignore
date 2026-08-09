@@ -20,6 +20,8 @@ certs/*.key
 /*.pem
 /*.key
 /*.crt
+gateway-cert.pem
+gateway-key.pem
 
 # runtime-generated cert hash (written by gateway on boot)
 web/public/cert-hash.js
