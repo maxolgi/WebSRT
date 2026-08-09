@@ -22,6 +22,11 @@ srt-tokio.workspace = true
 wtransport.workspace = true
 futures.workspace = true
 eframe.workspace = true
+axum.workspace = true
+axum-server.workspace = true
+rust-embed.workspace = true
+mime_guess.workspace = true
+rustls.workspace = true
 
 [[bin]]
 name = "websrt-gateway"

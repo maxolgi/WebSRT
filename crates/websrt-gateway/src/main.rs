@@ -8,6 +8,7 @@
 
 mod gui;
 mod log_buffer;
+mod web_server;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
@@ -57,6 +58,22 @@ pub struct Cli {
     /// Skip the GUI and run in headless CLI mode (original behavior).
     #[arg(long)]
     pub no_gui: bool,
+
+    /// Disable the built-in HTTPS web server (use Vite dev server instead).
+    #[arg(long)]
+    pub no_web: bool,
+
+    /// HTTPS port for the built-in web server (0 to disable).
+    #[arg(long, default_value_t = 5173u16)]
+    pub web_port: u16,
+
+    /// Bind address for the HTTPS web server.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub web_bind: String,
+
+    /// Root directory for web files (auto-detected: web/dist → web if unset).
+    #[arg(long)]
+    pub web_root: Option<PathBuf>,
 
     /// Input source.
     #[arg(long, value_enum, default_value_t = InputMode::File)]
@@ -141,6 +158,11 @@ pub struct Cli {
 }
 
 fn main() -> Result<()> {
+    // Install the ring crypto provider early — both wtransport (quinn) and
+    // axum-server (rustls) need a provider; without this, axum-server panics
+    // with "Could not automatically determine the process-level CryptoProvider".
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let log_buffer = LogBuffer::new(500);
 
     let filter = EnvFilter::from_default_env().add_directive("info".parse()?);
@@ -274,6 +296,30 @@ pub(crate) async fn run_gateway(
         std::fs::write(&hash_file, js)
             .with_context(|| format!("failed to write cert hash to {}", hash_file.display()))?;
         tracing::info!("Wrote cert-hash.js (null for mkcert mode) to {}", hash_file.display());
+    }
+
+    // Spawn the HTTPS web server (unless --no-web or --web-port 0)
+    if !cli.no_web && cli.web_port > 0 {
+        let cert_hash_js = if let Some(ref hash) = cert.der_sha256 {
+            format!("window.CERT_HASH = \"{}\";", hex::encode(hash))
+        } else {
+            "window.CERT_HASH = null;".to_string()
+        };
+        let cert_pem = cert
+            .identity
+            .certificate_chain()
+            .as_slice()
+            .first()
+            .map(|c| c.to_pem().into_bytes())
+            .unwrap_or_default();
+        let key_pem = cert.identity.private_key().to_secret_pem().into_bytes();
+        let web_bind = cli.web_bind.clone();
+        let web_port = cli.web_port;
+        tokio::spawn(async move {
+            if let Err(e) = web_server::run_web_server(web_bind, web_port, cert_hash_js, cert_pem, key_pem).await {
+                tracing::error!(?e, "web server failed");
+            }
+        });
     }
 
     // Build gateway

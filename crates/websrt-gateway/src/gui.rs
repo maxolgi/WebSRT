@@ -53,6 +53,9 @@ struct GuiConfig {
     health_port: u16,
     health_bind: String,
     auth_token: String,
+    no_web: bool,
+    web_port: u16,
+    web_bind: String,
     #[cfg(feature = "sim-loss")]
     sim_loss: u8,
     #[cfg(feature = "sim-loss")]
@@ -88,6 +91,9 @@ impl GuiConfig {
             health_port: cli.health_port,
             health_bind: cli.health_bind.clone(),
             auth_token: cli.auth_token.clone().unwrap_or_default(),
+            no_web: cli.no_web,
+            web_port: cli.web_port,
+            web_bind: cli.web_bind.clone(),
             #[cfg(feature = "sim-loss")]
             sim_loss: cli.sim_loss,
             #[cfg(feature = "sim-loss")]
@@ -115,6 +121,10 @@ impl GuiConfig {
             health_port: self.health_port,
             health_bind: self.health_bind.clone(),
             auth_token: opt_string(&self.auth_token),
+            no_web: self.no_web,
+            web_port: self.web_port,
+            web_bind: self.web_bind.clone(),
+            web_root: None,
             #[cfg(feature = "sim-loss")]
             sim_loss: self.sim_loss,
             #[cfg(feature = "sim-loss")]
@@ -561,6 +571,18 @@ fn draw_config_form(ui: &mut egui::Ui, config: &mut GuiConfig, enabled: bool) {
                         enabled,
                         egui::TextEdit::singleline(&mut config.health_bind).desired_width(160.0),
                     );
+                    ui.end_row();
+
+                    ui.label("Serve web UI:");
+                    ui.add_enabled(enabled, egui::Checkbox::new(&mut config.no_web, "disable (use Vite)"));
+                    ui.end_row();
+
+                    ui.label("Web HTTPS port:");
+                    ui.add_enabled(enabled, egui::DragValue::new(&mut config.web_port).range(0..=65535));
+                    ui.end_row();
+
+                    ui.label("Web bind addr:");
+                    ui.add_enabled(enabled, egui::TextEdit::singleline(&mut config.web_bind).desired_width(160.0));
                     ui.end_row();
                 });
 

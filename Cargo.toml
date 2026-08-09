@@ -36,6 +36,11 @@ async-trait = "0.1"
 percent-encoding = "2"
 parking_lot = "0.12"
 eframe = "0.29"
+axum = "0.8"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rust-embed = { version = "8", features = ["mime-guess", "interpolate-folder-path"] }
+mime_guess = "2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 
 [profile.release]
 lto = true
