@@ -433,6 +433,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "real QUIC loopback — run locally: cargo test -- --ignored"]
     async fn insert_and_snapshot() {
         let (server, addr, hash) = make_test_server().await;
         let conn = accept_one_conn(&server, hash, addr.port()).await;
@@ -446,6 +447,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "real QUIC loopback — run locally: cargo test -- --ignored"]
     async fn remove_drops_entry() {
         let (server, addr, hash) = make_test_server().await;
         let conn = accept_one_conn(&server, hash, addr.port()).await;
@@ -459,6 +461,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "real QUIC loopback — run locally: cargo test -- --ignored"]
     async fn clear_empties_registry() {
         let (server, addr, hash) = make_test_server().await;
         let reg = SessionRegistry::new();
@@ -474,6 +477,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "real QUIC loopback — run locally: cargo test -- --ignored"]
     async fn active_session_count_excludes_finished() {
         let (server, addr, hash) = make_test_server().await;
         let reg = SessionRegistry::new();
@@ -492,6 +496,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "real QUIC loopback — run locally: cargo test -- --ignored"]
     async fn snapshot_sessions_filters_finished_and_reads_counters() {
         let (server, addr, hash) = make_test_server().await;
         let reg = SessionRegistry::new();
@@ -521,6 +526,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "real QUIC loopback — run locally: cargo test -- --ignored"]
     async fn tick_all_removes_finished_entries() {
         let (server, addr, hash) = make_test_server().await;
         let reg = SessionRegistry::new();
@@ -548,6 +554,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "real QUIC loopback — run locally: cargo test -- --ignored"]
     async fn tick_all_stats_log_gating_does_not_panic() {
         // Two rapid tick_all calls exercise both branches of the 5s gate:
         // first call sets `last_stats_log`, second sees <5s elapsed and skips.
@@ -568,6 +575,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "real QUIC loopback — run locally: cargo test -- --ignored"]
     async fn route_release_data_increments_publish_dropped_on_full_channel() {
         // Exercises item #9: a full publish channel must increment the
         // publish_dropped counter rather than silently dropping.
@@ -606,6 +614,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "real QUIC loopback — run locally: cargo test -- --ignored"]
     async fn tick_all_drains_viewer_messages() {
         use crate::broadcaster::Broadcaster;
         use crate::ingest::ChannelIngester;
@@ -638,6 +647,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "real QUIC loopback — run locally: cargo test -- --ignored"]
     async fn tick_all_increments_viewer_lag_count_on_overflow() {
         use crate::broadcaster::Broadcaster;
         use crate::ingest::ChannelIngester;

@@ -26,6 +26,7 @@ async fn wait_until_alive(registry: &StreamRegistry, name: &str, timeout: Durati
 }
 
 #[tokio::test]
+#[ignore = "real SRT loopback — run locally: cargo test -- --ignored"]
 async fn multi_publisher_accepts_distinct_streamids() {
     let registry = Arc::new(StreamRegistry::new(16, 128));
     let shutdown = Arc::new(Notify::new());
