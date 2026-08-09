@@ -168,13 +168,16 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # 3. Attach artifacts to a GitHub Release, only on v* tag push.
-  #    Create a tag locally and push it to trigger:  git tag v0.1.0 && git push origin v0.1.0
+  # 3. Publish a GitHub Release for every successful build.
+  #    - Push to master  → prerelease tagged dev-<short_sha>
+  #    - v* tag push      → stable release tagged <version>, marked "latest"
   # ---------------------------------------------------------------------------
   release:
     name: Publish release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -192,8 +195,31 @@ jobs:
           cp artifacts/websrt-gateway-deb/*.deb release/
           (cd artifacts/websrt-web-dist && zip -r "$GITHUB_WORKSPACE/release/websrt-web-dist.zip" .)
 
+      - name: Set release metadata
+        id: meta
+        env:
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
+        run: |
+          short="${SHA:0:7}"
+          if [[ "$REF" == refs/tags/v* ]]; then
+            echo "tag=${REF#refs/tags/}"    >> "$GITHUB_OUTPUT"
+            echo "name=${REF#refs/tags/}"   >> "$GITHUB_OUTPUT"
+            echo "prerelease=false"         >> "$GITHUB_OUTPUT"
+            echo "make_latest=true"         >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=dev-${short}"         >> "$GITHUB_OUTPUT"
+            echo "name=Dev ${short}"        >> "$GITHUB_OUTPUT"
+            echo "prerelease=true"          >> "$GITHUB_OUTPUT"
+            echo "make_latest=false"        >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          make_latest: ${{ steps.meta.outputs.make_latest }}
           files: release/*
           generate_release_notes: true
           fail_on_unmatched_files: true
