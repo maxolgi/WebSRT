@@ -274,7 +274,7 @@ fn run_gui(cli: Cli, log_buffer: Arc<LogBuffer>) -> Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([520.0, 780.0])
+            .with_inner_size([520.0, 580.0])
             .with_min_inner_size([400.0, 500.0])
             .with_icon(std::sync::Arc::new(load_icon())),
         ..Default::default()
