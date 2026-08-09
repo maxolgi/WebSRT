@@ -322,7 +322,7 @@ fn process_hs_result(
         }
         ConnectionResult::NoAction => {}
         ConnectionResult::NotHandled(e) => {
-            tracing::warn!(%e, "hs not-handled");
+            tracing::debug!(%e, "hs not-handled");
         }
         ConnectionResult::Reject(maybe_pkt, rej) => {
             if let Some((pkt, _)) = maybe_pkt {
