@@ -5037,6 +5037,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "websrt",
+ "windows-sys 0.59.0",
  "wtransport",
 ]
 

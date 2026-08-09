@@ -6,6 +6,12 @@
 //! This is the reference application built on the `websrt` library.
 //! For embedding, use the library crate directly.
 
+// Use the Windows GUI subsystem for release builds so no background console
+// window appears alongside the egui window. `--no-gui` mode reattaches to the
+// parent terminal's console (see `reattach_parent_console`) so CLI output still
+// works. Debug builds keep the console for `println!`-based development.
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 mod gui;
 mod log_buffer;
 mod web_server;
@@ -163,6 +169,16 @@ fn main() -> Result<()> {
     // with "Could not automatically determine the process-level CryptoProvider".
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    // Parse CLI early so `--no-gui` can reattach to the parent terminal's
+    // console before logging is initialized (the windows_subsystem="windows"
+    // attribute otherwise leaves stdout/stderr disconnected).
+    let cli = Cli::parse();
+
+    #[cfg(all(target_os = "windows", not(debug_assertions)))]
+    if cli.no_gui {
+        reattach_parent_console();
+    }
+
     let log_buffer = LogBuffer::new(500);
 
     let filter = EnvFilter::from_default_env().add_directive("info".parse()?);
@@ -178,12 +194,42 @@ fn main() -> Result<()> {
         )
         .init();
 
-    let cli = Cli::parse();
-
     if cli.no_gui {
         run_headless(cli)
     } else {
         run_gui(cli, log_buffer)
+    }
+}
+
+/// On Windows release builds the binary uses `windows_subsystem = "windows"`,
+/// which means stdout/stderr are not connected to a console. When `--no-gui` is
+/// run from an existing terminal, reattach to that terminal's console and
+/// rebind stdout/stderr so tracing output is visible. No-op when double-clicked
+/// (no parent console exists) — redirect to a file in that case.
+#[cfg(all(target_os = "windows", not(debug_assertions)))]
+fn reattach_parent_console() {
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    extern "C" {
+        fn _open_osfhandle(osfhandle: isize, flags: i32) -> i32;
+        fn _dup2(filedes1: i32, filedes2: i32) -> i32;
+    }
+    const O_TEXT: i32 = 0x4000;
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return;
+        }
+        for (handle_id, fd) in [(STD_OUTPUT_HANDLE, 1), (STD_ERROR_HANDLE, 2)] {
+            let handle = GetStdHandle(handle_id) as isize;
+            if handle == 0 || handle == -1 {
+                continue;
+            }
+            let new_fd = _open_osfhandle(handle, O_TEXT);
+            if new_fd != -1 {
+                _dup2(new_fd, fd);
+            }
+        }
     }
 }
 

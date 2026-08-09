@@ -30,6 +30,9 @@ rustls.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+
 [[bin]]
 name = "websrt-gateway"
 path = "src/main.rs"
