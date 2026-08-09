@@ -14,4 +14,16 @@ fn main() {
         );
     }
     println!("cargo:rerun-if-changed=../../web/dist");
+
+    // Embed the icon into the Windows executable (shown in Explorer/taskbar).
+    #[cfg(windows)]
+    {
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("assets/icon.ico");
+        res.set("FileDescription", "WebSRT Gateway");
+        if let Err(e) = res.compile() {
+            println!("cargo:warning=failed to embed Windows icon resource: {e}");
+        }
+    }
+    println!("cargo:rerun-if-changed=assets/icon.ico");
 }

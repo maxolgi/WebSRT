@@ -254,6 +254,19 @@ fn run_headless(cli: Cli) -> Result<()> {
     })
 }
 
+/// Decode the embedded PNG into RGBA pixels for the eframe window icon.
+fn load_icon() -> eframe::egui::IconData {
+    let img = image::load_from_memory(include_bytes!("../assets/icon.png"))
+        .expect("failed to decode embedded icon")
+        .to_rgba8();
+    let (width, height) = img.dimensions();
+    eframe::egui::IconData {
+        rgba: img.into_raw(),
+        width,
+        height,
+    }
+}
+
 /// GUI mode — launches an eframe window. Falls back to CLI if no display.
 fn run_gui(cli: Cli, log_buffer: Arc<LogBuffer>) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
@@ -262,7 +275,8 @@ fn run_gui(cli: Cli, log_buffer: Arc<LogBuffer>) -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([520.0, 780.0])
-            .with_min_inner_size([400.0, 500.0]),
+            .with_min_inner_size([400.0, 500.0])
+            .with_icon(std::sync::Arc::new(load_icon())),
         ..Default::default()
     };
 
