@@ -196,7 +196,7 @@ fn run_headless(cli: Cli) -> Result<()> {
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("ctrl-c received, shutting down");
-            s.notify_one();
+            s.notify_waiters();
         });
         let (_stats, task) = run_gateway(cli, shutdown).await?;
         let _ = task.await;
@@ -236,7 +236,7 @@ fn run_gui(cli: Cli, log_buffer: Arc<LogBuffer>) -> Result<()> {
 /// ingester, then spawn `gateway.run()` as a background task.
 ///
 /// Returns the stats handle (for polling) and the gateway task join handle.
-/// The caller triggers shutdown via `shutdown.notify_one()`.
+/// The caller triggers shutdown via `shutdown.notify_waiters()`.
 pub(crate) async fn run_gateway(
     cli: Cli,
     shutdown: Arc<Notify>,
@@ -362,6 +362,7 @@ pub(crate) async fn run_gateway(
         let bind = cli.health_bind.clone();
         let port = cli.health_port;
         let ts_stats = ts_stats.clone();
+        let health_shutdown = shutdown.clone();
         tokio::spawn(async move {
             let listener = match tokio::net::TcpListener::bind((bind.as_str(), port)).await {
                 Ok(l) => l,
@@ -372,8 +373,15 @@ pub(crate) async fn run_gateway(
             };
             tracing::info!(port, "health server listening");
             loop {
-                match listener.accept().await {
-                    Ok((mut stream, _addr)) => {
+                tokio::select! {
+                    biased;
+                    _ = health_shutdown.notified() => {
+                        tracing::info!("health server shutting down");
+                        break;
+                    }
+                    accept_result = listener.accept() => {
+                        match accept_result {
+                            Ok((mut stream, _addr)) => {
                         let stats = stats_handle.stats();
                         let per_stream: String = stats
                             .per_stream
@@ -429,9 +437,11 @@ pub(crate) async fn run_gateway(
                         let _ = stream.write_all(response.as_bytes()).await;
                         let _ = stream.flush().await;
                     }
-                    Err(e) => {
-                        tracing::warn!(?e, "health accept error");
-                        continue;
+                            Err(e) => {
+                                tracing::warn!(?e, "health accept error");
+                                continue;
+                            }
+                        }
                     }
                 }
             }
@@ -459,6 +469,7 @@ pub(crate) async fn run_gateway(
             let latency_ms = cli.latency;
             let srt_passphrase = cli.srt_passphrase.clone();
             let ts_stats = ts_stats.clone();
+            let srt_shutdown = shutdown.clone();
             tokio::spawn(async move {
                 match srt_mode {
                     SrtMode::Listener => {
@@ -477,12 +488,11 @@ pub(crate) async fn run_gateway(
                             }
                         };
                         let registry = source.registry();
-                        let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
                         tracing::info!("SRT multi-publisher listener ready, awaiting OBS connections");
                         listener
                             .serve(
                                 registry,
-                                shutdown,
+                                srt_shutdown,
                                 move |name, conn| {
                                     let checker = TsContinuityChecker::new(conn);
                                     ts_stats

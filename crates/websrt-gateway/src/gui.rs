@@ -191,11 +191,11 @@ impl GuiApp {
                     match gateway_task.await {
                         Ok(Ok(())) => { let _ = tx.send(GatewayMessage::Stopped); }
                         Ok(Err(e)) => {
-                            shutdown.notify_one();
+                            shutdown.notify_waiters();
                             let _ = tx.send(GatewayMessage::Error(format!("{e}")));
                         }
                         Err(e) => {
-                            shutdown.notify_one();
+                            shutdown.notify_waiters();
                             let _ = tx.send(GatewayMessage::Error(format!("gateway task: {e}")));
                         }
                     }
@@ -209,7 +209,7 @@ impl GuiApp {
 
     fn stop(&mut self) {
         if let Some(shutdown) = &self.shutdown {
-            shutdown.notify_one();
+            shutdown.notify_waiters();
         }
         self.state = RunState::Stopping;
     }
@@ -228,7 +228,7 @@ impl GuiApp {
                     self.shutdown = Some(shutdown.clone());
                     if self.state == RunState::Stopping {
                         // User clicked Stop before gateway finished starting.
-                        shutdown.notify_one();
+                        shutdown.notify_waiters();
                     } else {
                         self.state = RunState::Running;
                         self.last_stats_poll = Instant::now();
@@ -269,7 +269,7 @@ impl GuiApp {
 impl Drop for GuiApp {
     fn drop(&mut self) {
         if let Some(shutdown) = &self.shutdown {
-            shutdown.notify_one();
+            shutdown.notify_waiters();
         }
         if let Some(rt) = self.runtime.take() {
             rt.shutdown_timeout(Duration::from_secs(5));
