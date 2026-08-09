@@ -54,23 +54,44 @@ jobs:
   # WASM first.
 
   # ---------------------------------------------------------------------------
-  # 2. Full Linux build.
-  #    Order matters: rust-embed embeds web/dist/ into the gateway binary at
-  #    compile time (crates/websrt-gateway/src/web_server.rs:19), so we MUST
-  #    build WASM → web/dist BEFORE cargo build for the gateway. Skipping this
-  #    (as naive workflows do) either fails the build or ships an empty UI.
+  # 2. Full build — Linux, Windows, macOS (ARM).
+  #    Each matrix entry builds WASM → web/dist → gateway binary independently,
+  #    because rust-embed embeds web/dist/ at compile time.
   # ---------------------------------------------------------------------------
   build:
-    name: Build gateway + web + .deb
-    runs-on: ubuntu-latest
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-latest
+            binary: websrt-gateway
+            artifact: websrt-gateway-linux-x64
+          - name: Windows x64
+            os: windows-latest
+            binary: websrt-gateway.exe
+            artifact: websrt-gateway-windows-x64
+          - name: macOS ARM
+            os: macos-latest
+            binary: websrt-gateway
+            artifact: websrt-gateway-macos-arm64
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - name: Install wasm-pack
+
+      - name: Install wasm-pack (Unix)
+        if: runner.os != 'Windows'
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Install wasm-pack (Windows)
+        if: runner.os == 'Windows'
+        run: cargo install wasm-pack --locked
+
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
@@ -79,6 +100,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Install Linux build deps (eframe/egui needs X11/Wayland headers)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config \
@@ -86,11 +108,19 @@ jobs:
             libxi-dev libxext-dev libxkbcommon-dev libwayland-dev
 
       # Step 1: WASM crates → web/wasm/  (gitignored, must be built in CI)
-      - name: Build WASM crates (srt-wasm, mpeg2ts-wasm, ts-muxer-wasm)
-        run: ./build.sh wasm
+      # Inlined (not build.sh) with shell: bash for Windows compatibility.
+      - name: Build WASM crates
+        shell: bash
+        run: |
+          for crate in srt-wasm mpeg2ts-wasm ts-muxer-wasm; do
+            (cd "crates/$crate" && wasm-pack build --target web --release)
+            mkdir -p "web/wasm/$crate"
+            cp -f "crates/$crate/pkg/"* "web/wasm/$crate/"
+          done
 
       # Step 2: web/dist/  (consumed by rust-embed at gateway compile time)
       - name: Build web UI (npm ci + vite build)
+        shell: bash
         run: |
           cd web
           npm ci
@@ -100,31 +130,37 @@ jobs:
       - name: Build gateway binary
         run: cargo build --release -p websrt-gateway
 
-      - name: Strip binary
-        run: strip target/release/websrt-gateway
+      - name: Strip binary (Unix only)
+        if: runner.os != 'Windows'
+        run: strip target/release/${{ matrix.binary }}
 
       - name: Upload gateway binary
         uses: actions/upload-artifact@v4
         with:
-          name: websrt-gateway-linux-x64
-          path: target/release/websrt-gateway
+          name: ${{ matrix.artifact }}
+          path: target/release/${{ matrix.binary }}
           if-no-files-found: error
 
+      # web/dist is platform-agnostic — upload once from Linux only
       - name: Upload web/dist
+        if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
           name: websrt-web-dist
           path: web/dist/
           if-no-files-found: error
 
-      # Step 4: .deb package (binary already built, --no-build skips rebuild)
+      # .deb package — Linux only (binary already built, --no-build skips rebuild)
       - name: Install cargo-deb
+        if: runner.os == 'Linux'
         run: cargo install cargo-deb --locked
 
       - name: Build .deb package
+        if: runner.os == 'Linux'
         run: cargo deb -p websrt-gateway --no-build
 
       - name: Upload .deb
+        if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
           name: websrt-gateway-deb
@@ -151,6 +187,8 @@ jobs:
         run: |
           mkdir -p release
           cp artifacts/websrt-gateway-linux-x64/websrt-gateway release/
+          cp artifacts/websrt-gateway-windows-x64/websrt-gateway.exe release/
+          cp artifacts/websrt-gateway-macos-arm64/websrt-gateway release/
           cp artifacts/websrt-gateway-deb/*.deb release/
           (cd artifacts/websrt-web-dist && zip -r "$GITHUB_WORKSPACE/release/websrt-web-dist.zip" .)
 
