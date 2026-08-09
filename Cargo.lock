@@ -5029,6 +5029,8 @@ dependencies = [
  "mime_guess",
  "rust-embed",
  "rustls",
+ "serde",
+ "serde_json",
  "srt-protocol",
  "srt-tokio",
  "tokio",

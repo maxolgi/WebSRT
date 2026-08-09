@@ -26,6 +26,9 @@ gateway-key.pem
 # runtime-generated cert hash (written by gateway on boot)
 web/public/cert-hash.js
 
+# GUI config (persisted by the gateway on Start)
+gateway-config.json
+
 fixtures/*.ts
 
 # logs and tmp

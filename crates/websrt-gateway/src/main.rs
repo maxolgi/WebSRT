@@ -28,7 +28,7 @@ use websrt::{Gateway, GatewayStatsHandle};
 
 use log_buffer::{BufferMaker, LogBuffer};
 
-#[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CertMode {
     /// Self-signed ECDSA P-256, regenerated each boot.
     Self_,

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use websrt::{GatewayStats, GatewayStatsHandle};
@@ -35,6 +36,7 @@ enum RunState {
 }
 
 /// Form state with `String` fields (egui edits `&mut String`, not `PathBuf`).
+#[derive(Serialize, Deserialize)]
 struct GuiConfig {
     srt_port: u16,
     srt_streamid: String,
@@ -52,8 +54,10 @@ struct GuiConfig {
     web_port: u16,
     web_bind: String,
     #[cfg(feature = "sim-loss")]
+    #[serde(default)]
     sim_loss: u8,
     #[cfg(feature = "sim-loss")]
+    #[serde(default)]
     sim_seed: u64,
 }
 
@@ -67,6 +71,33 @@ fn opt_path(s: &str) -> Option<PathBuf> {
 }
 
 impl GuiConfig {
+    const CONFIG_PATH: &'static str = "gateway-config.json";
+
+    fn save_to_file(&self) {
+        match serde_json::to_string_pretty(self) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(Self::CONFIG_PATH, &json) {
+                    tracing::warn!(?e, "failed to save config");
+                }
+            }
+            Err(e) => tracing::warn!(?e, "failed to serialize config"),
+        }
+    }
+
+    fn load_from_file() -> Option<Self> {
+        let json = std::fs::read_to_string(Self::CONFIG_PATH).ok()?;
+        match serde_json::from_str::<Self>(&json) {
+            Ok(config) => {
+                tracing::info!("loaded config from {}", Self::CONFIG_PATH);
+                Some(config)
+            }
+            Err(e) => {
+                tracing::warn!(?e, "failed to parse saved config, using defaults");
+                None
+            }
+        }
+    }
+
     fn from_cli(cli: &Cli) -> Self {
         Self {
             srt_port: cli.srt_port,
@@ -149,7 +180,7 @@ impl GuiApp {
         _cc: &eframe::CreationContext<'_>,
     ) -> Self {
         let handle = runtime.handle().clone();
-        let config = GuiConfig::from_cli(&cli);
+        let config = GuiConfig::load_from_file().unwrap_or_else(|| GuiConfig::from_cli(&cli));
         Self {
             config,
             runtime: Some(runtime),
@@ -166,6 +197,7 @@ impl GuiApp {
     }
 
     fn start(&mut self) {
+        self.config.save_to_file();
         let cli = self.config.to_cli();
         let (tx, rx) = std::sync::mpsc::channel();
         self.msg_rx = Some(rx);
