@@ -353,10 +353,13 @@ pub(crate) async fn run_gateway(
 
     let mut cert = Cert::build(cert_src).await?;
 
-    // When the cert was loaded from persisted PEM (mkcert path), the hash
-    // isn't set by the builder — recompute it from the leaf DER so the
-    // browser's cert-hash pinning works.
-    if cert.der_sha256.is_none() {
+    // A persisted self-signed cert is loaded via the Mkcert code path
+    // (CertSource::Mkcert), so the builder doesn't set der_sha256. Recompute
+    // it so the browser can pin via serverCertificateHashes. Real mkcert /
+    // letsencrypt certs (CertMode::Mkcert) must NOT get a hash — the browser
+    // must use normal PKI validation, and serverCertificateHashes imposes a
+    // 2-week validity cap that public-CA certs exceed.
+    if cli.cert_mode == CertMode::Self_ && cert.der_sha256.is_none() {
         if let Some(leaf) = cert.identity.certificate_chain().as_slice().first() {
             cert.der_sha256 = Some(*leaf.hash().as_ref());
         }
