@@ -186,12 +186,18 @@ impl GuiApp {
             let shutdown = Arc::new(Notify::new());
             match crate::run_gateway(cli, shutdown.clone()).await {
                 Ok((stats_handle, gateway_task)) => {
-                    let _ = tx.send(GatewayMessage::Started(stats_handle, shutdown));
+                    let _ = tx.send(GatewayMessage::Started(stats_handle, shutdown.clone()));
                     // Await the gateway run loop — reports bind errors, crashes, etc.
                     match gateway_task.await {
                         Ok(Ok(())) => { let _ = tx.send(GatewayMessage::Stopped); }
-                        Ok(Err(e)) => { let _ = tx.send(GatewayMessage::Error(format!("{e}"))); }
-                        Err(e) => { let _ = tx.send(GatewayMessage::Error(format!("gateway task: {e}"))); }
+                        Ok(Err(e)) => {
+                            shutdown.notify_one();
+                            let _ = tx.send(GatewayMessage::Error(format!("{e}")));
+                        }
+                        Err(e) => {
+                            shutdown.notify_one();
+                            let _ = tx.send(GatewayMessage::Error(format!("gateway task: {e}")));
+                        }
                     }
                 }
                 Err(e) => {

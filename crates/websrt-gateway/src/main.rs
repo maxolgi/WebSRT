@@ -315,8 +315,9 @@ pub(crate) async fn run_gateway(
         let key_pem = cert.identity.private_key().to_secret_pem().into_bytes();
         let web_bind = cli.web_bind.clone();
         let web_port = cli.web_port;
+        let shutdown = shutdown.clone();
         tokio::spawn(async move {
-            if let Err(e) = web_server::run_web_server(web_bind, web_port, cert_hash_js, cert_pem, key_pem).await {
+            if let Err(e) = web_server::run_web_server(web_bind, web_port, cert_hash_js, cert_pem, key_pem, shutdown).await {
                 tracing::error!(?e, "web server failed");
             }
         });

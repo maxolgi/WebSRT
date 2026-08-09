@@ -5,6 +5,7 @@
 //! `cert-hash.js` is served dynamically (changes every boot).
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::body::Body;
@@ -18,14 +19,15 @@ use rust_embed::Embed;
 #[folder = "$CARGO_MANIFEST_DIR/../../web/dist/"]
 struct WebAsset;
 
-/// Run the HTTPS web server. Blocks until the server stops.
-/// The caller should spawn this as a background task.
+/// Run the HTTPS web server. Blocks until the server stops, or until `shutdown`
+/// fires (graceful shutdown). The caller should spawn this as a background task.
 pub async fn run_web_server(
     bind: String,
     port: u16,
     cert_hash_js: String,
     cert_pem: Vec<u8>,
     key_pem: Vec<u8>,
+    shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     let addr: SocketAddr = format!("{bind}:{port}")
         .parse()
@@ -36,9 +38,21 @@ pub async fn run_web_server(
         .context("failed to build TLS config for web server")?;
 
     let app = build_router(cert_hash_js);
+    let handle = axum_server::Handle::new();
 
     tracing::info!(%addr, "HTTPS web server starting");
+
+    // Spawn a watcher that shuts down the server when `shutdown` fires.
+    let handle_clone = handle.clone();
+    let shutdown_clone = shutdown.clone();
+    tokio::spawn(async move {
+        shutdown_clone.notified().await;
+        tracing::info!("web server shutting down");
+        handle_clone.shutdown();
+    });
+
     axum_server::bind_rustls(addr, tls_config)
+        .handle(handle)
         .serve(app.into_make_service())
         .await
         .context("HTTPS web server stopped with error")?;
