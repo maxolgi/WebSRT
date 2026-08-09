@@ -66,6 +66,10 @@ A browser can even do both simultaneously.
 - Node.js >=18 (for the Vite dev server)
 - ffmpeg (only for the live publisher script, `fixtures/stream.sh`)
 - System C/C++ build tools: `build-essential` / `cmake` / `pkg-config`
+  (Linux/macOS), or **Visual Studio with the "Desktop development with C++"
+  workload** (Windows; supplies the MSVC compiler + Windows SDK that `ring` /
+  `aws-lc-sys` compile via `cmake`). The `x86_64-pc-windows-msvc` Rust toolchain
+  (the default on Windows) auto-discovers it — no manual env setup.
 
 #### One-command install (Debian/Ubuntu, Fedora, Arch, macOS)
 
@@ -111,6 +115,48 @@ cp crates/ts-muxer-wasm/pkg/* web/wasm/ts-muxer-wasm/
 
 Run `./build.sh --help` for the full menu (per-crate WASM builds, gateway,
 library, web, check, test, clean, etc.).
+
+#### Building on Windows
+
+The project builds natively on Windows (verified on Rust 1.96 MSVC + VS 2026).
+`build.sh` is bash, so either run it through **Git Bash** unchanged, or run the
+raw commands below in PowerShell/cmd. Two Windows-specific notes:
+
+- **Visual Studio C++ tools are required** — install Visual Studio (2022+) with
+  the *"Desktop development with C++"* workload. The MSVC toolchain
+  (`x86_64-pc-windows-msvc`, Rust's Windows default) needs it for `ring` /
+  `aws-lc-sys`. Rust auto-discovers the linker; no `vcvarsall` setup needed.
+- **PowerShell blocks `npm.ps1`** by default execution policy — use `npm.cmd`
+  (and `npx.cmd`) instead of `npm` / `npx`.
+
+```powershell
+# Prerequisites (one-time)
+rustup target add wasm32-unknown-unknown
+# Install wasm-pack: https://rustwasm.github.io/wasm-pack/installer/
+# Install Visual Studio with the C++ workload, then:
+
+# Build all 3 WASM crates + copy to web/wasm/
+foreach ($c in 'srt-wasm','mpeg2ts-wasm','ts-muxer-wasm') {
+    wasm-pack build --target web --release "crates/$c"
+    New-Item -ItemType Directory -Force "web/wasm/$c" | Out-Null
+    Copy-Item "crates/$c/pkg/*" "web/wasm/$c/" -Force
+}
+
+# Web deps + dev server
+npm.cmd install --prefix web
+npm.cmd run dev --prefix web    # https://localhost:5173
+
+# Gateway binary (release) → target\release\websrt-gateway.exe
+cargo build --release -p websrt-gateway
+.\target\release\websrt-gateway.exe             # GUI: only the egui window, no console window
+.\target\release\websrt-gateway.exe --no-gui    # headless: reattaches to the terminal for log output
+```
+
+Everything else in this README (`cargo run`, CLI flags, cert modes, browser
+flow) works identically on Windows. The only Linux-only steps are the
+supervisord deployment (`./build.sh restart`, `websrt.conf`) and the
+`fixtures/stream.sh` publisher (a bash+ffmpeg script — adapt it or run OBS
+instead).
 
 The test fixture (`fixtures/test.ts`, ~45 KB, H.264+Opus, 10 s loop) is committed
 to the repo — no generation step needed. The replacement for the old
