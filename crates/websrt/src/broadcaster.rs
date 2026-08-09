@@ -89,10 +89,12 @@ impl Broadcaster {
                                 sent += 1;
                                 bc_clone.messages_sent.fetch_add(1, Ordering::Relaxed);
                                 if tx2.send(msg).is_err() {
-                                    bc_clone.send_failures.fetch_add(1, Ordering::Relaxed);
-                                    tracing::debug!(
+                                    if tx2.receiver_count() > 0 {
+                                        bc_clone.send_failures.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    tracing::trace!(
                                         rx_count = tx2.receiver_count(),
-                                        "broadcast send failed (no active receivers)"
+                                        "broadcast send skipped (no active receivers)"
                                     );
                                 }
                             }
