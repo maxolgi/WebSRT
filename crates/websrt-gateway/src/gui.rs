@@ -35,6 +35,12 @@ enum RunState {
     Stopping,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Gateway,
+    Logs,
+}
+
 /// Form state with `String` fields (egui edits `&mut String`, not `PathBuf`).
 #[derive(Serialize, Deserialize)]
 struct GuiConfig {
@@ -53,6 +59,7 @@ struct GuiConfig {
     no_web: bool,
     web_port: u16,
     web_bind: String,
+    max_viewers: usize,
     #[cfg(feature = "sim-loss")]
     #[serde(default)]
     sim_loss: u8,
@@ -128,6 +135,7 @@ impl GuiConfig {
             no_web: cli.no_web,
             web_port: cli.web_port,
             web_bind: "0.0.0.0".to_string(),
+            max_viewers: cli.max_viewers,
             #[cfg(feature = "sim-loss")]
             sim_loss: cli.sim_loss,
             #[cfg(feature = "sim-loss")]
@@ -159,6 +167,7 @@ impl GuiConfig {
             web_port: self.web_port,
             web_bind: self.web_bind.clone(),
             web_root: None,
+            max_viewers: self.max_viewers,
             #[cfg(feature = "sim-loss")]
             sim_loss: self.sim_loss,
             #[cfg(feature = "sim-loss")]
@@ -187,6 +196,8 @@ pub struct GuiApp {
     /// Current text selection in the log panel, if any.
     /// Updated each frame from the TextEdit's persisted cursor state.
     log_selection: Option<String>,
+
+    tab: Tab,
 }
 
 impl GuiApp {
@@ -198,7 +209,7 @@ impl GuiApp {
     ) -> Self {
         let handle = runtime.handle().clone();
         let config = GuiConfig::load_from_file().unwrap_or_else(|| GuiConfig::from_cli(&cli));
-        Self {
+        let mut app = Self {
             config,
             runtime: Some(runtime),
             handle,
@@ -211,7 +222,10 @@ impl GuiApp {
             last_stats_poll: Instant::now(),
             error: None,
             log_selection: None,
-        }
+            tab: Tab::Gateway,
+        };
+        app.start();
+        app
     }
 
     fn start(&mut self) {
@@ -331,145 +345,159 @@ impl eframe::App for GuiApp {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
 
-        eframe::egui::CentralPanel::default().show(ctx, |ui| {
+        // Tab bar + Start/Stop buttons (always visible)
+        egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
             ui.add_space(4.0);
-            ui.heading("WebSRT Gateway");
-            ui.add_space(6.0);
-
-            let editable = self.state == RunState::Stopped && self.msg_rx.is_none();
-
-            draw_config_form(ui, &mut self.config, editable);
-
-            ui.add_space(6.0);
-            ui.separator();
-            ui.add_space(6.0);
-
-            // Start/Stop buttons
-            let running = self.state == RunState::Running;
-            let starting = self.state == RunState::Starting;
-            let stopping = self.state == RunState::Stopping;
-            let stopped = self.state == RunState::Stopped && self.msg_rx.is_none();
-
             ui.horizontal(|ui| {
-                ui.add_space(40.0);
-                let start_btn = egui::Button::new(
-                    egui::RichText::new(" \u{25B6} Start ").strong(),
-                );
-                if ui.add_enabled(stopped, start_btn).clicked() {
-                    self.start();
-                }
-                ui.add_space(20.0);
-                let stop_btn = egui::Button::new(
-                    egui::RichText::new(" \u{25A0} Stop ").strong(),
-                );
-                if ui.add_enabled(running || starting, stop_btn).clicked() {
-                    self.stop();
-                }
-            });
+                ui.selectable_value(&mut self.tab, Tab::Gateway, "Gateway");
+                ui.selectable_value(&mut self.tab, Tab::Logs, "Logs");
 
-            // Status line
-            ui.add_space(4.0);
-            let (dot, label) = match self.state {
-                RunState::Stopped => ("\u{25CF}", "Stopped"),
-                RunState::Starting => ("\u{25CF}", "Starting\u{2026}"),
-                RunState::Running => ("\u{25CF}", "Running"),
-                RunState::Stopping => ("\u{25CF}", "Stopping\u{2026}"),
-            };
-            let color = match self.state {
-                RunState::Running => egui::Color32::from_rgb(80, 200, 80),
-                RunState::Starting | RunState::Stopping => egui::Color32::from_rgb(220, 180, 60),
-                RunState::Stopped => egui::Color32::from_rgb(140, 140, 140),
-            };
-            ui.horizontal(|ui| {
-                ui.colored_label(color, dot);
-                ui.label(label);
-                if let Some(ref e) = self.error {
-                    ui.colored_label(egui::Color32::from_rgb(230, 80, 80), format!("Error: {e}"));
-                }
-            });
+                // Start/Stop buttons pushed to the right edge
+                let running = self.state == RunState::Running;
+                let starting = self.state == RunState::Starting;
+                let stopped = self.state == RunState::Stopped && self.msg_rx.is_none();
 
-            // Live stats
-            if let Some(ref stats) = self.stats {
-                ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(format!(
-                        "Streams: {}/{}  Viewers: {}  Sessions: {}  Max viewers: {}",
-                        stats.alive_streams, stats.streams, stats.total_viewers, stats.active_sessions, stats.max_viewers,
-                    ));
-                });
-                if !stats.per_stream.is_empty() {
-                    ui.add_space(2.0);
-                    egui::Grid::new("stream_stats")
-                        .num_columns(4)
-                        .spacing([16.0, 2.0])
-                        .striped(true)
-                        .show(ui, |ui| {
-                            ui.small("stream");
-                            ui.small("viewers");
-                            ui.small("msgs");
-                            ui.small("drops");
-                            ui.end_row();
-                            for s in &stats.per_stream {
-                                ui.small(&s.name);
-                                ui.small(format!("{}{}", s.viewers, if s.alive { "" } else { " (dead)" }));
-                                ui.small(format!("{}", s.messages_sent));
-                                ui.small(format!("{}", s.send_failures));
-                                ui.end_row();
-                            }
-                        });
-                }
-            }
-
-            // Suppress unused warning when not stopping
-            let _ = stopping;
-
-            ui.add_space(6.0);
-            ui.separator();
-            ui.add_space(4.0);
-
-            // Log panel
-            let lines = self.log_buffer.recent(200);
-            let log_text = lines.join("\n");
-            let has_logs = !log_text.is_empty();
-
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Logs").strong());
-                if ui.add_enabled(has_logs, egui::Button::new("Copy")).clicked() {
-                    let text = self
-                        .log_selection
-                        .clone()
-                        .unwrap_or_else(|| log_text.clone());
-                    ctx.copy_text(text);
-                }
-                if ui.add_enabled(has_logs, egui::Button::new("Clear")).clicked() {
-                    self.log_buffer.clear();
-                    self.log_selection = None;
-                }
-            });
-            egui::ScrollArea::vertical()
-                .max_height(ui.available_height() - 4.0)
-                .stick_to_bottom(true)
-                .auto_shrink([false; 2])
-                .show(ui, |ui| {
-                    if has_logs {
-                        let mut text_ref = log_text.as_str();
-                        let output = egui::TextEdit::multiline(&mut text_ref)
-                            .frame(false)
-                            .desired_width(f32::MAX)
-                            .font(egui::FontId::monospace(12.0))
-                            .show(ui);
-                        if let Some(cr) = output.state.cursor.range(&output.galley) {
-                            if cr.is_empty() {
-                                self.log_selection = None;
-                            } else {
-                                self.log_selection =
-                                    Some(cr.slice_str(&log_text).to_owned());
-                            }
-                        }
-                    } else {
-                        ui.small("(no logs yet)");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let stop_btn =
+                        egui::Button::new(egui::RichText::new(" \u{25A0} Stop ").strong());
+                    if ui.add_enabled(running || starting, stop_btn).clicked() {
+                        self.stop();
+                    }
+                    let start_btn =
+                        egui::Button::new(egui::RichText::new(" \u{25B6} Start ").strong());
+                    if ui.add_enabled(stopped, start_btn).clicked() {
+                        self.start();
                     }
                 });
+            });
+            ui.add_space(2.0);
+        });
+
+        egui::CentralPanel::default().show(ctx, |ui| match self.tab {
+            Tab::Gateway => {
+                ui.add_space(4.0);
+                ui.heading("WebSRT Gateway");
+                ui.add_space(6.0);
+
+                let editable = self.state == RunState::Stopped && self.msg_rx.is_none();
+
+                draw_config_form(ui, &mut self.config, editable);
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                // Error
+                if let Some(ref e) = self.error {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(230, 80, 80),
+                        format!("Error: {e}"),
+                    );
+                    ui.add_space(4.0);
+                }
+
+                // Live stats
+                if let Some(ref stats) = self.stats {
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(format!(
+                            "Streams: {}/{}  Viewers: {}  Sessions: {}  Max viewers: {}",
+                            stats.alive_streams,
+                            stats.streams,
+                            stats.total_viewers,
+                            stats.active_sessions,
+                            stats.max_viewers,
+                        ));
+                    });
+                    if !stats.per_stream.is_empty() {
+                        ui.add_space(2.0);
+                        let host = web_host(&self.config.web_bind);
+                        let web_port = self.config.web_port;
+                        let web_enabled = !self.config.no_web;
+                        egui::Grid::new("stream_stats")
+                            .num_columns(4)
+                            .spacing([16.0, 2.0])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.small("stream");
+                                ui.small("viewers");
+                                ui.small("msgs");
+                                ui.small("drops");
+                                ui.end_row();
+                                for s in &stats.per_stream {
+                                    let link = egui::Label::new(
+                                        egui::RichText::new(&s.name)
+                                            .small()
+                                            .color(egui::Color32::from_rgb(100, 149, 237)),
+                                    )
+                                    .sense(egui::Sense::click());
+                                    let resp = ui.add_enabled(web_enabled, link);
+                                    if resp.clicked() {
+                                        let url = format!(
+                                            "https://{host}:{web_port}/?stream={}",
+                                            s.name
+                                        );
+                                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                                    }
+                                    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .on_hover_text("Open viewer in browser");
+                                    ui.small(format!(
+                                        "{}{}",
+                                        s.viewers,
+                                        if s.alive { "" } else { " (dead)" }
+                                    ));
+                                    ui.small(format!("{}", s.messages_sent));
+                                    ui.small(format!("{}", s.send_failures));
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                }
+            }
+            Tab::Logs => {
+                let lines = self.log_buffer.recent(200);
+                let log_text = lines.join("\n");
+                let has_logs = !log_text.is_empty();
+
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Logs").strong());
+                    if ui.add_enabled(has_logs, egui::Button::new("Copy")).clicked() {
+                        let text = self
+                            .log_selection
+                            .clone()
+                            .unwrap_or_else(|| log_text.clone());
+                        ctx.copy_text(text);
+                    }
+                    if ui.add_enabled(has_logs, egui::Button::new("Clear")).clicked() {
+                        self.log_buffer.clear();
+                        self.log_selection = None;
+                    }
+                });
+                egui::ScrollArea::vertical()
+                    .max_height(ui.available_height() - 4.0)
+                    .stick_to_bottom(true)
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        if has_logs {
+                            let mut text_ref = log_text.as_str();
+                            let output = egui::TextEdit::multiline(&mut text_ref)
+                                .frame(false)
+                                .desired_width(f32::MAX)
+                                .font(egui::FontId::monospace(12.0))
+                                .show(ui);
+                            if let Some(cr) = output.state.cursor.range(&output.galley) {
+                                if cr.is_empty() {
+                                    self.log_selection = None;
+                                } else {
+                                    self.log_selection =
+                                        Some(cr.slice_str(&log_text).to_owned());
+                                }
+                            }
+                        } else {
+                            ui.small("(no logs yet)");
+                        }
+                    });
+            }
         });
     }
 }
@@ -524,6 +552,13 @@ fn draw_config_form(ui: &mut egui::Ui, config: &mut GuiConfig, enabled: bool) {
             ui.add_enabled(
                 enabled,
                 egui::TextEdit::singleline(&mut config.bind).desired_width(160.0),
+            );
+            ui.end_row();
+
+            ui.label("Max viewers/stream:");
+            ui.add_enabled(
+                enabled,
+                egui::DragValue::new(&mut config.max_viewers).range(1..=10_000),
             );
             ui.end_row();
 
@@ -636,5 +671,16 @@ fn cert_mode_label(m: CertMode) -> &'static str {
     match m {
         CertMode::Self_ => "Self-signed",
         CertMode::Mkcert => "mkcert (PEM)",
+    }
+}
+
+fn web_host(web_bind: &str) -> String {
+    match web_bind {
+        "0.0.0.0" | "::" | "" => {
+            local_ip_address::local_ip()
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|_| "127.0.0.1".to_string())
+        }
+        other => other.to_string(),
     }
 }

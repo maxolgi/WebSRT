@@ -161,6 +161,10 @@ pub struct Cli {
     /// If not set, authentication is disabled.
     #[arg(long)]
     pub auth_token: Option<String>,
+
+    /// Maximum concurrent viewers per stream.
+    #[arg(long, default_value_t = 16)]
+    pub max_viewers: usize,
 }
 
 fn main() -> Result<()> {
@@ -421,7 +425,8 @@ pub(crate) async fn run_gateway(
     #[cfg_attr(not(feature = "sim-loss"), allow(unused_mut))]
     let mut builder = Gateway::builder()
         .bind_addr(format!("{}:{}", cli.bind, cli.wt_port).parse::<std::net::SocketAddr>()?)
-        .identity(cert.identity.clone_identity());
+        .identity(cert.identity.clone_identity())
+        .max_viewers(cli.max_viewers);
 
     #[cfg(feature = "sim-loss")]
     {
