@@ -18,7 +18,7 @@ jobs:
   #    No WASM, no web build — just workspace-wide cargo + tsc.
   # ---------------------------------------------------------------------------
   check:
-    name: Lint + test + typecheck
+    name: Lint + test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,14 +48,10 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: web/package-lock.json
-
-      - name: tsc --noEmit
-        run: cd web && npm ci && npx tsc --noEmit
+  # Note: tsc --noEmit is NOT in this job — the web TS imports WASM glue .js
+  # files that are gitignored and only exist after ./build.sh wasm. Type-checking
+  # happens in the build job (npm run build = tsc && vite build), which builds
+  # WASM first.
 
   # ---------------------------------------------------------------------------
   # 2. Full Linux build.
@@ -78,7 +74,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: web/package-lock.json
 
