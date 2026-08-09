@@ -56,9 +56,10 @@ Usage: ./install-prereqs.sh [--check] [--no-color] [-y]
 What gets installed:
   - build-essential / cmake / pkg-config / curl / git  (system)
   - ffmpeg                                             (system)
+  - X11/Wayland dev libraries (eframe/egui GUI deps)   (Linux only)
   - rustup + stable Rust toolchain >= 1.75              (user-local, ~/.cargo)
   - wasm32-unknown-unknown rustc target
-  - wasm-pack                                          (user-local, ~/.cargo)
+  - wasm-pack                                          (user-local)
   - Node.js >= 18                                      (system)
 
 Supported platforms: Debian/Ubuntu, Fedora/RHEL, Arch, macOS (Homebrew).
@@ -168,20 +169,26 @@ check_system_pkgs() {
 }
 
 install_system_pkgs() {
-    info "installing system build tools + ffmpeg"
+    info "installing system build tools + ffmpeg + GUI deps"
     case "$PLATFORM_OS-$DISTRO" in
         linux-debian)
             sudo_maybe apt-get update
             sudo_maybe apt-get install -y \
-                build-essential cmake pkg-config curl git ffmpeg
+                build-essential cmake pkg-config curl git ffmpeg \
+                libxcb1-dev libxrandr-dev libxinerama-dev libxcursor-dev \
+                libxi-dev libxext-dev libxkbcommon-dev libwayland-dev
             ;;
         linux-fedora)
             sudo_maybe dnf install -y \
-                gcc gcc-c++ make cmake pkgconf-pkg-config curl git ffmpeg
+                gcc gcc-c++ make cmake pkgconf-pkg-config curl git ffmpeg \
+                libxcb-devel libXrandr-devel libXinerama-devel libXcursor-devel \
+                libXi-devel libXext-devel libxkbcommon-devel wayland-devel
             ;;
         linux-arch)
             sudo_maybe pacman -Sy --noconfirm \
-                base-devel cmake pkgconf curl git ffmpeg
+                base-devel cmake pkgconf curl git ffmpeg \
+                libxcb libxrandr libxinerama libxcursor libxi libxext \
+                libxkbcommon wayland
             ;;
         macos-)
             if ! have brew; then

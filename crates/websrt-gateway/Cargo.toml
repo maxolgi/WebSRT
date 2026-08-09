@@ -21,6 +21,7 @@ srt-protocol.workspace = true
 srt-tokio.workspace = true
 wtransport.workspace = true
 futures.workspace = true
+eframe.workspace = true
 
 [[bin]]
 name = "websrt-gateway"

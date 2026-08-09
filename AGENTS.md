@@ -69,6 +69,7 @@ cd web && npx tsc --noEmit
 3. Changing `crates/srt-wasm/src/lib.rs` → `./build.sh wasm srt` + browser reload
 4. Changing `crates/mpeg2ts-wasm/` or `crates/ts-muxer-wasm/` → `./build.sh wasm <crate>` + browser reload
 5. Changing `crates/websrt/` (library) → `./build.sh gateway` + `./build.sh restart` (production only)
+6. Changing `crates/websrt-gateway/src/gui.rs` or `log_buffer.rs` → `./build.sh gateway` (no WASM or web rebuild needed)
 
 ## Workspace structure
 
@@ -84,6 +85,7 @@ cd web && npx tsc --noEmit
   sessions, SRT state machine, broadcast fanout, security hooks.
 - **`crates/websrt-gateway/` (reference implementation)** — the canonical binary.
   CLI parse, cert setup, ingester wiring, health endpoint. Runs under supervisord.
+  Launches an eframe (egui) GUI by default; `--no-gui` for headless CLI mode.
 - **`web/` (demo UI)** — player page and stream page. Browser-side demos that
   exercise the gateway end-to-end, plus the debug overlay.
 
@@ -156,7 +158,9 @@ Browser runs the **same** `srt-protocol` + `mpeg2ts` Rust crates compiled to WAS
 - `crates/websrt/src/gateway.rs` — high-level `Gateway` builder: WT accept loop, session spawn, viewer cap, graceful drain.
 - `crates/websrt/src/session.rs` — per-browser session: dual-task split (recv_pump + sender_pump) sharing `SrtInitiator` via `Arc<Mutex<_>>`. LossInjector (sim-loss feature) lives here.
 - `crates/websrt/src/srt_sender.rs` — wraps `srt_protocol::Connect` → `DuplexConnection`. `drain()` captures `Action::UpdateStatistics` into `last_stats`.
-- `crates/websrt-gateway/src/main.rs` — reference binary: CLI parse, cert-hash.js writing, ingester setup, `Gateway::run()`.
+- `crates/websrt-gateway/src/main.rs` — reference binary: CLI parse, `--no-gui` branching, `run_gateway()` (cert, cert-hash.js, ingester, health server, gateway run task).
+- `crates/websrt-gateway/src/gui.rs` — eframe (egui) GUI app: config form mirroring all CLI options, Start/Stop buttons, live stats from `GatewayStatsHandle`, scrolling log panel. Falls back to CLI if no display.
+- `crates/websrt-gateway/src/log_buffer.rs` — `LogBuffer` ring buffer + `MakeWriter` impl for capturing tracing output into the GUI log panel (second `fmt` layer alongside stdout).
 - `crates/srt-wasm/src/lib.rs` — `SrtReceiver` wraps `Listen` → `DuplexConnection`. State in `RefCell`. `handle_datagram(bytes, now_us)` + `poll(now_us)` return `Vec<SrtAction>`.
 - `web/src/decode.ts` — H.264 SPS parser (exp-Golomb, High profile), avcC builder, `VideoPipeline`, `OpusAudioPipeline`, `AacAudioPipeline`. AudioWorklet fallback when `MediaStreamTrackGenerator` unavailable.
 - `web/src/worker.ts` — Web Worker: runs SrtReceiver + Demuxer off main thread. Datagrams batched (up to 16) before processing. Polls SRT state machine every 10ms.
@@ -169,7 +173,7 @@ Browser runs the **same** `srt-protocol` + `mpeg2ts` Rust crates compiled to WAS
 
 ## Runtime
 
-Gateway runs under supervisord:
+Gateway runs under supervisord (must use `--no-gui` in the supervisord config):
 - Config: `websrt.conf` → deployed to `/etc/supervisor/conf.d/websrt.conf`
 - Logs: `logs/gateway.out.log` + `logs/gateway.err.log`
 - Restart: `sudo supervisorctl reread && sudo supervisorctl update && sudo supervisorctl restart websrt`
@@ -194,6 +198,7 @@ Gateway runs under supervisord:
 - **Packet inspector hex dump** is deferred — `debug_snapshot()` doesn't include raw packet bytes (memory cost). The inspector shows decoded fields + NAL summary but not a hex dump. Adding it requires a WASM change (`ringHex` field) + rebuild.
 - `DebugSnapshot` is a wasm-bindgen struct — **cannot be structured-cloned** across the worker `postMessage` boundary. `worker.ts:getDemuxStats()` reads every field into a POJO and calls `snap.free()` in a `finally` block. Any new snapshot fields must follow this pattern.
 - **QUIC stats** require the `quinn` feature on `wtransport` (enabled in root `Cargo.toml`). The gateway logs per-session QUIC stats (cwnd, rtt, lost_packets, congestion_events) at session start and close.
+- **GUI** (eframe/egui) launches by default. `--no-gui` skips to CLI mode. On headless servers (no DISPLAY), eframe fails and falls back to CLI automatically. Linux requires X11/Wayland dev packages (installed by `install-prereqs.sh`). The gateway startup logic is shared between both modes via `run_gateway()`.
 
 ## Testing
 

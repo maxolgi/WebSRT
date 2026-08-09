@@ -1,19 +1,31 @@
 //! Demo gateway binary: CLI parse → cert setup → Gateway::run().
 //!
+//! By default launches a GUI (eframe/egui) with a config form and Start/Stop
+//! buttons. Use `--no-gui` for the original headless CLI behavior.
+//!
 //! This is the reference application built on the `websrt` library.
 //! For embedding, use the library crate directly.
+
+mod gui;
+mod log_buffer;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 use websrt::cert::{Cert, CertSource};
 use websrt::ingest::file::FileIngester;
 use websrt::ingest::srt::SrtIngester;
 use websrt::ingest::{SrtListenerService, TsContinuityChecker, TsStatsHandle};
-use websrt::Gateway;
+use websrt::{Gateway, GatewayStatsHandle};
+
+use log_buffer::{BufferMaker, LogBuffer};
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
 pub enum CertMode {
@@ -39,9 +51,13 @@ pub enum SrtMode {
     Caller,
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "websrt-gateway", version, about = "SRT → WebTransport gateway")]
 pub struct Cli {
+    /// Skip the GUI and run in headless CLI mode (original behavior).
+    #[arg(long)]
+    pub no_gui: bool,
+
     /// Input source.
     #[arg(long, value_enum, default_value_t = InputMode::File)]
     pub input: InputMode,
@@ -124,14 +140,85 @@ pub struct Cli {
     pub auth_token: Option<String>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse()?))
+fn main() -> Result<()> {
+    let log_buffer = LogBuffer::new(500);
+
+    let filter = EnvFilter::from_default_env().add_directive("info".parse()?);
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(BufferMaker {
+                    buffer: log_buffer.clone(),
+                })
+                .with_ansi(false),
+        )
         .init();
 
     let cli = Cli::parse();
 
+    if cli.no_gui {
+        run_headless(cli)
+    } else {
+        run_gui(cli, log_buffer)
+    }
+}
+
+/// Headless CLI mode — the original behavior. Runs until Ctrl-C.
+fn run_headless(cli: Cli) -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async move {
+        let shutdown = Arc::new(Notify::new());
+        let s = shutdown.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("ctrl-c received, shutting down");
+            s.notify_one();
+        });
+        let (_stats, task) = run_gateway(cli, shutdown).await?;
+        let _ = task.await;
+        Ok(())
+    })
+}
+
+/// GUI mode — launches an eframe window. Falls back to CLI if no display.
+fn run_gui(cli: Cli, log_buffer: Arc<LogBuffer>) -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let cli_fallback = cli.clone();
+
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_inner_size([520.0, 780.0])
+            .with_min_inner_size([400.0, 500.0]),
+        ..Default::default()
+    };
+
+    let result = eframe::run_native(
+        "WebSRT Gateway",
+        options,
+        Box::new(move |cc| Ok(Box::new(gui::GuiApp::new(cli, runtime, log_buffer, cc)))),
+    );
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            eprintln!("GUI unavailable ({e}); falling back to CLI mode.");
+            eprintln!("Tip: pass --no-gui to start in CLI mode directly.");
+            run_headless(cli_fallback)
+        }
+    }
+}
+
+/// Build cert, write cert-hash.js, build gateway, spawn health server, wire
+/// ingester, then spawn `gateway.run()` as a background task.
+///
+/// Returns the stats handle (for polling) and the gateway task join handle.
+/// The caller triggers shutdown via `shutdown.notify_one()`.
+pub(crate) async fn run_gateway(
+    cli: Cli,
+    shutdown: Arc<Notify>,
+) -> Result<(GatewayStatsHandle, JoinHandle<Result<()>>)> {
     let cert_src = match cli.cert_mode {
         CertMode::Self_ => CertSource::SelfSigned {
             sans: vec![
@@ -323,6 +410,7 @@ async fn main() -> Result<()> {
             let call_addr = cli.srt_call.clone();
             let streamid = cli.srt_streamid.clone();
             let latency_ms = cli.latency;
+            let srt_passphrase = cli.srt_passphrase.clone();
             let ts_stats = ts_stats.clone();
             tokio::spawn(async move {
                 match srt_mode {
@@ -331,7 +419,7 @@ async fn main() -> Result<()> {
                         let listener = match SrtListenerService::bind(
                             format!("0.0.0.0:{srt_port}"),
                             std::time::Duration::from_millis(latency_ms),
-                            cli.srt_passphrase.clone(),
+                            srt_passphrase,
                         )
                         .await
                         {
@@ -367,7 +455,7 @@ async fn main() -> Result<()> {
                                     &addr,
                                     streamid,
                                     std::time::Duration::from_millis(latency_ms),
-                                    cli.srt_passphrase.clone(),
+                                    srt_passphrase,
                                 )
                                 .await
                             }
@@ -405,12 +493,14 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Run until ctrl-c
-    gateway
-        .run(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
+    // Spawn the gateway run loop as a background task. The caller controls
+    // shutdown via the Notify.
+    let stats_handle = gateway.stats_handle();
+    let task = tokio::spawn(async move {
+        gateway.run(shutdown.notified()).await
+    });
+
+    Ok((stats_handle, task))
 }
 
 fn json_escape(s: &str) -> String {

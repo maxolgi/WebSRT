@@ -35,6 +35,7 @@ time = "0.3"
 async-trait = "0.1"
 percent-encoding = "2"
 parking_lot = "0.12"
+eframe = "0.29"
 
 [profile.release]
 lto = true
