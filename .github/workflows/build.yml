@@ -34,16 +34,15 @@ jobs:
             libxcb1-dev libxrandr-dev libxinerama-dev libxcursor-dev \
             libxi-dev libxext-dev libxkbcommon-dev libwayland-dev
 
-      # fmt + clippy are advisory for now: the codebase has pre-existing fmt
-      # diffs (103 spots) and unknown clippy state. They report without blocking.
-      # Flip to blocking after a one-time `cargo fmt --all` + clippy cleanup.
+      # fmt is advisory (pre-existing diffs). clippy shows lints without
+      # -D warnings so it doesn't error on intentional patterns like
+      # wasm-bindgen camelCase getters.
       - name: cargo fmt --check
         continue-on-error: true
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        continue-on-error: true
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets
 
       - name: cargo test
         run: cargo test --workspace
