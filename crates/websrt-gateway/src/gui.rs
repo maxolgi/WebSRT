@@ -71,12 +71,24 @@ fn opt_path(s: &str) -> Option<PathBuf> {
 }
 
 impl GuiConfig {
-    const CONFIG_PATH: &'static str = "gateway-config.json";
+    fn config_dir() -> std::path::PathBuf {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        std::path::PathBuf::from(format!("{home}/.config/websrt"))
+    }
+
+    fn config_path() -> std::path::PathBuf {
+        Self::config_dir().join("gateway-config.json")
+    }
 
     fn save_to_file(&self) {
+        let path = Self::config_path();
+        if let Err(e) = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new("."))) {
+            tracing::warn!(?e, "failed to create config dir");
+            return;
+        }
         match serde_json::to_string_pretty(self) {
             Ok(json) => {
-                if let Err(e) = std::fs::write(Self::CONFIG_PATH, &json) {
+                if let Err(e) = std::fs::write(&path, &json) {
                     tracing::warn!(?e, "failed to save config");
                 }
             }
@@ -85,10 +97,11 @@ impl GuiConfig {
     }
 
     fn load_from_file() -> Option<Self> {
-        let json = std::fs::read_to_string(Self::CONFIG_PATH).ok()?;
+        let path = Self::config_path();
+        let json = std::fs::read_to_string(&path).ok()?;
         match serde_json::from_str::<Self>(&json) {
             Ok(config) => {
-                tracing::info!("loaded config from {}", Self::CONFIG_PATH);
+                tracing::info!("loaded config from {}", path.display());
                 Some(config)
             }
             Err(e) => {

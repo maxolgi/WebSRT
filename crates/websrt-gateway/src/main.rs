@@ -232,6 +232,11 @@ fn run_gui(cli: Cli, log_buffer: Arc<LogBuffer>) -> Result<()> {
     }
 }
 
+fn config_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(format!("{home}/.config/websrt"))
+}
+
 /// Build cert, write cert-hash.js, build gateway, spawn health server, wire
 /// ingester, then spawn `gateway.run()` as a background task.
 ///
@@ -241,17 +246,20 @@ pub(crate) async fn run_gateway(
     cli: Cli,
     shutdown: Arc<Notify>,
 ) -> Result<(GatewayStatsHandle, JoinHandle<Result<()>>)> {
+    let cert_dir = config_dir();
+    let _ = std::fs::create_dir_all(&cert_dir);
+    let cert_path = cert_dir.join("gateway-cert.pem");
+    let key_path = cert_dir.join("gateway-key.pem");
+
     let cert_src = match cli.cert_mode {
         CertMode::Self_ => {
             // Try to reuse a previously-generated self-signed cert so the
             // browser's cert exception / cert-hash pinning stays stable.
-            let cert_path = std::path::PathBuf::from("gateway-cert.pem");
-            let key_path = std::path::PathBuf::from("gateway-key.pem");
             if cert_path.exists() && key_path.exists() {
                 tracing::info!("reusing persisted self-signed cert");
                 CertSource::Mkcert {
-                    cert: cert_path,
-                    key: key_path,
+                    cert: cert_path.clone(),
+                    key: key_path.clone(),
                 }
             } else {
                 CertSource::SelfSigned {
@@ -292,17 +300,17 @@ pub(crate) async fn run_gateway(
 
     // Persist newly-generated self-signed cert for reuse across restarts.
     if cli.cert_mode == CertMode::Self_
-        && !std::path::Path::new("gateway-cert.pem").exists()
+        && !cert_path.exists()
     {
         if let Some(leaf) = cert.identity.certificate_chain().as_slice().first() {
             let cert_pem = leaf.to_pem();
             let key_pem = cert.identity.private_key().to_secret_pem();
-            if let Err(e) = std::fs::write("gateway-cert.pem", &cert_pem)
-                .and_then(|()| std::fs::write("gateway-key.pem", &key_pem))
+            if let Err(e) = std::fs::write(&cert_path, &cert_pem)
+                .and_then(|()| std::fs::write(&key_path, &key_pem))
             {
                 tracing::warn!(?e, "failed to persist self-signed cert; will regenerate next start");
             } else {
-                tracing::info!("persisted self-signed cert to gateway-cert.pem + gateway-key.pem");
+                tracing::info!("persisted self-signed cert to {} + {}", cert_path.display(), key_path.display());
             }
         }
     }
