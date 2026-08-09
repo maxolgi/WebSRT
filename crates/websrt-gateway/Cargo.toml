@@ -56,3 +56,20 @@ async-trait.workspace = true
 [[bin]]
 name = "wt_hs_probe"
 path = "src/bin/wt_hs_probe.rs"
+
+# cargo-deb metadata. Paths are relative to this manifest.
+# `$auto` lets cargo-deb auto-detect shared-library deps via ldd;
+# `supervisor` is added because we ship a supervisord config but the
+# binary doesn't link against it (so $auto can't see it).
+[package.metadata.deb]
+maintainer = "WebSRT maintainers <https://github.com/maxolgi/WebSRT>"
+copyright = "2026"
+license-file = ["../../LICENSE", "0"]
+section = "net"
+priority = "optional"
+depends = "$auto, supervisor"
+assets = [
+    ["target/release/websrt-gateway", "usr/bin/", "755"],
+    ["../../packaging/websrt.supervisor.conf", "etc/supervisor/conf.d/websrt.conf", "644"],
+]
+maintainer-scripts = "../../packaging/debian/"

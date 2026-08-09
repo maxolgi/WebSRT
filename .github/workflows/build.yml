@@ -1,0 +1,159 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Fast checks on every push / PR.
+  #    No WASM, no web build — just workspace-wide cargo + tsc.
+  # ---------------------------------------------------------------------------
+  check:
+    name: Lint + test + typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build deps (eframe/egui needs X11/Wayland headers)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config \
+            libxcb1-dev libxrandr-dev libxinerama-dev libxcursor-dev \
+            libxi-dev libxext-dev libxkbcommon-dev libwayland-dev
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: tsc --noEmit
+        run: cd web && npx tsc --noEmit
+
+  # ---------------------------------------------------------------------------
+  # 2. Full Linux build.
+  #    Order matters: rust-embed embeds web/dist/ into the gateway binary at
+  #    compile time (crates/websrt-gateway/src/web_server.rs:19), so we MUST
+  #    build WASM → web/dist BEFORE cargo build for the gateway. Skipping this
+  #    (as naive workflows do) either fails the build or ships an empty UI.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build gateway + web + .deb
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: rustwasm/wasm-pack-action@v1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Linux build deps (eframe/egui needs X11/Wayland headers)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config \
+            libxcb1-dev libxrandr-dev libxinerama-dev libxcursor-dev \
+            libxi-dev libxext-dev libxkbcommon-dev libwayland-dev
+
+      # Step 1: WASM crates → web/wasm/  (gitignored, must be built in CI)
+      - name: Build WASM crates (srt-wasm, mpeg2ts-wasm, ts-muxer-wasm)
+        run: ./build.sh wasm
+
+      # Step 2: web/dist/  (consumed by rust-embed at gateway compile time)
+      - name: Build web UI (npm ci + vite build)
+        run: |
+          cd web
+          npm ci
+          npm run build
+
+      # Step 3: gateway binary — embeds web/dist/ via rust-embed
+      - name: Build gateway binary
+        run: cargo build --release -p websrt-gateway
+
+      - name: Strip binary
+        run: strip target/release/websrt-gateway
+
+      - name: Upload gateway binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: websrt-gateway-linux-x64
+          path: target/release/websrt-gateway
+          if-no-files-found: error
+
+      - name: Upload web/dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: websrt-web-dist
+          path: web/dist/
+          if-no-files-found: error
+
+      # Step 4: .deb package (binary already built, --no-build skips rebuild)
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build .deb package
+        run: cargo deb -p websrt-gateway --no-build
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: websrt-gateway-deb
+          path: target/debian/*.deb
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 3. Attach artifacts to a GitHub Release, only on v* tag push.
+  #    Create a tag locally and push it to trigger:  git tag v0.1.0 && git push origin v0.1.0
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Stage release assets
+        run: |
+          mkdir -p release
+          cp artifacts/websrt-gateway-linux-x64/websrt-gateway release/
+          cp artifacts/websrt-gateway-deb/*.deb release/
+          (cd artifacts/websrt-web-dist && zip -r "$GITHUB_WORKSPACE/release/websrt-web-dist.zip" .)
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
