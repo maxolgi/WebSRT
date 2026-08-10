@@ -44,10 +44,23 @@ A browser can even do both simultaneously.
 - **Browser runs the same Rust state machines** the gateway does, compiled to
   WASM.
 - **SRT crypto disabled** between gateway and browser. WebTransport TLS
-  replaces it.
+  replaces it. The OBS-to-gateway link supports optional AES encryption via
+  `--srt-passphrase`.
+- **Multi-codec support.** H.264 (avcC + SPS parsing), HEVC/H.265 (hvcC +
+  VPS/SPS/PPS), and AV1 (OBU Sequence Header parsing) video; Opus and AAC/ADTS
+  audio. The browser publisher supports H.264 and AV1 encode via WebCodecs
+  `VideoEncoder`.
 - **Web Worker architecture.** The SRT receiver and TS demuxer run in a Web
   Worker off the main thread. Only WebCodecs decode and canvas rendering happen
   on the main thread.
+- **Desktop GUI.** The gateway launches an eframe/egui config window by
+  default with Start/Stop, live stats, and a scrolling log panel. Pass
+  `--no-gui` for headless CLI mode (required under supervisord). On headless
+  servers with no display, the GUI auto-falls-back to CLI.
+- **Single-binary deployment.** The built-in HTTPS web server embeds
+  `web/dist/` at compile time via `rust-embed`, so the gateway binary serves
+  the viewer UI with no external file server. Pass `--no-web` to use the Vite
+  dev server instead.
 - **PTS-paced video presentation.** Decoded frames are queued in a small
   bounded ring and drawn on `requestAnimationFrame` when their PTS is due,
   measured against a wall-clock ↔ PTS mapping that resets on large gaps
@@ -171,11 +184,16 @@ Terminal A:
 cargo run -p websrt-gateway
 ```
 
-The gateway writes `web/public/cert-hash.js` on startup (the self-signed cert
-DER hash for the browser). Open the dev server before loading the page so the
-file is served.
+The gateway launches a GUI window by default (config form + live stats + logs).
+Add `--no-gui` for headless mode. The gateway writes `web/public/cert-hash.js`
+on startup (the self-signed cert DER hash for the browser).
 
-Terminal B:
+If `web/dist/` exists (from `./build.sh web build`), the gateway also serves
+the UI on `https://127.0.0.1:5173` via its built-in HTTPS server — no separate
+Vite server needed. For development with hot-reload, pass `--no-web` and use
+the Vite dev server in Terminal B.
+
+Terminal B (development only — skip if using the built-in server):
 
 ```bash
 cd web && npm run dev
@@ -196,7 +214,8 @@ In OBS, add a Media Source (or your camera), then add an SRT output:
 - Mode: `Call`
 - IP: `127.0.0.1`
 - Port: `9000`
-- No passphrase (crypto is auto-disabled on the OBS link)
+- No passphrase needed by default. Add `--srt-passphrase <key>` to enable AES
+  encryption on the OBS leg (10–79 chars).
 
 If OBS disconnects (crash, restart, network drop), the gateway automatically
 waits for a reconnection — no restart required. Existing browser viewers will
@@ -254,6 +273,10 @@ defaults to 16 (enforced in `Broadcaster::subscribe`).
 The `websrt` crate is the reusable core. The reference binary (`websrt-gateway`) is
 a thin CLI wrapper around it. To embed in your own application:
 
+For embedding the **browser-side player** (canvas + WebCodecs SDK), see
+[`docs/embedding.md`](docs/embedding.md) — a 294-line guide covering the
+`mountPlayer()` SDK, config options, and event surface.
+
 ```rust
 use websrt::Gateway;
 use websrt::cert::{Cert, CertSource};
@@ -274,7 +297,12 @@ let gateway = Gateway::builder()
 // Deferred ingester: connect OBS in background
 let source = gateway.source_handle();
 tokio::spawn(async move {
-    let ingester = SrtIngester::bind(9000).await.unwrap();
+    let ingester = SrtIngester::bind(
+        "0.0.0.0:9000",
+        None,
+        std::time::Duration::from_millis(120),
+        None,
+    ).await.unwrap();
     source.publish_stream("default", ingester);
 });
 
@@ -301,6 +329,11 @@ websrt = { path = "...", features = ["sim-loss"] }
 websrt-gateway [OPTIONS]
 
 Options:
+      --no-gui                   Skip the GUI, run in headless CLI mode
+      --no-web                   Disable the built-in HTTPS web server
+      --web-port <WEB_PORT>      HTTPS port for built-in web server [default: 5173]
+      --web-bind <WEB_BIND>      Bind address for HTTPS web server [default: 127.0.0.1]
+      --web-root <WEB_ROOT>      Root directory for web files (auto-detected if unset)
       --input <INPUT>            Input source [default: file] [possible values: file, srt]
       --fixture <FIXTURE>        Path to .ts fixture file [default: fixtures/test.ts]
       --fixture-duration <DUR>   Fixture duration in seconds (for real-time pacing) [default: 10.0]
@@ -308,6 +341,7 @@ Options:
       --srt-port <SRT_PORT>      SRT listen port (listener mode) [default: 9000]
       --srt-call <SRT_CALL>      Address to dial (caller mode, e.g. 192.168.1.50:9000)
       --srt-streamid <STREAMID> SRT stream id (listener: filter, caller: sent to OBS)
+      --srt-passphrase <PASS>    SRT encryption passphrase for OBS leg (10-79 chars)
       --wt-port <WT_PORT>        WebTransport listen port [default: 4433]
       --bind <BIND>              WT bind address [default: 127.0.0.1]
       --cert-mode <CERT_MODE>    Certificate mode [default: self] [possible values: self, mkcert]
@@ -319,20 +353,23 @@ Options:
       --health-port <HEALTH_PORT> HTTP health/metrics port (0 = disabled) [default: 0]
       --health-bind <HEALTH_BIND> Bind address for the HTTP health/metrics server [default: 127.0.0.1]
       --auth-token <AUTH_TOKEN>  Viewer auth token; browsers must pass ?token=<value>
+      --max-viewers <N>          Max concurrent viewers per stream [default: 16]
 ```
 
 ## Certificate modes
 
 ### Self-signed (default, `--cert-mode self`)
 
-Self-signed ECDSA certificate with SANs `localhost`, `127.0.0.1`, `::1`.
-Regenerated on every boot. The DER SHA-256 hash is written to
-`web/public/cert-hash.js` at startup. The browser passes it to
-`serverCertificateHashes` in the WebTransport options, bypassing the normal
-PKI validation. Chrome/Edge only (Firefox does not support
+Self-signed ECDSA P-256 certificate with SANs `localhost`, `127.0.0.1`, `::1`.
+Generated once, then persisted to `~/.config/websrt/gateway-cert.pem` +
+`gateway-key.pem` and reused across restarts so the browser's cert exception /
+hash pinning stays stable. Delete those files to force regeneration. The DER
+SHA-256 hash is written to `web/public/cert-hash.js` at startup. The browser
+passes it to `serverCertificateHashes` in the WebTransport options, bypassing
+the normal PKI validation. Chrome/Edge only (Firefox does not support
 `serverCertificateHashes`).
 
-The hash changes on every restart — reload the page to pick up the new one.
+Delete the persisted cert files and restart to rotate the hash.
 
 ### mkcert (`--cert-mode mkcert`)
 
@@ -436,18 +473,35 @@ root `Cargo.toml`. Cargo fetches them automatically at build time — they are
 **not** submodules or vendored copies.
 
 - **[`maxolgi/srt-rs`](https://github.com/maxolgi/srt-rs)** (main) — fork of
-  `srt-protocol` 0.4.4. Eleven patches:
+  `srt-protocol` 0.4.4. Twelve patches (see `AGENTS.md` for implementation
+  details and coupling notes):
   1. Uses `web_time::Instant` instead of `std::time::Instant` (WASM compat).
-  2. `TimeBase::adjust()` sign flip — upstream applies `-drift` which doubles
-     TSBPD clock error every sync cycle; changed to `+drift`.
-  3. TLPKTL fix at `protocol/receiver/buffer.rs` — `checked_sub` instead of
-     panicking `Sub<Duration>` to prevent underflow panic early in page life.
-  4. Stats tracking methods (`rtt()`, `bandwidth_bps()`, `buffered_packets()`,
-     `buffer_available_packets()`).
-  5. Sender buffer edge-case fixes (`send_next_packet`, `send_packet`, and
-     `number_of_unacked_packets`).
-  6. `packet/time.rs` `Sub<TimeSpan>`: `unwrap_or(self)` → `unwrap()` to
-     surface errors.
+     Also adds `getrandom` with the `js` feature for `cfg(target_arch = "wasm32")`.
+  2. **`TimeBase::adjust()` sign flip** (coupled with patch 6): upstream
+     applies `-drift` via the broken `Sub<TimeSpan>` (patch 6 — `Sub` is a
+     copy-paste of `Add`, so it actually computes `+drift`). Upstream is
+     correct *by accident*. The fork fixes `Sub` to actually subtract, so
+     `adjust` must change `-drift` → `+drift` to preserve the same runtime
+     behavior. These two patches must be applied or reverted together.
+  3. TLPKTL `checked_sub` in `protocol/receiver/buffer.rs`: `now - (tsbpd_latency
+     + tsbpd_tolerance)` panics via underflow early in page life (before latency
+     has elapsed). Changed to `checked_sub` → `Option<Instant>`, returning "no
+     too-late packets" when the subtraction underflows.
+  4. **Stats population + accessors**: upstream declares `rx_loss_data`,
+     `rx_loss_bytes`, and `rx_bandwidth` in `SocketStatistics` but never assigns
+     them — they are always 0. Fork populates `rx_loss_data`/`rx_loss_bytes` in
+     the `ReceivedWithLoss` path, computes `rx_bandwidth` via byte-delta, and
+     adds accessor methods (`rtt()`, `bandwidth_bps()`, `buffered_packets()`,
+     `buffer_available_packets()`) on ARQ/Receiver/Sender.
+  5. Sender buffer `SeqNumber` wrapping-subtraction underflows (3 fixes):
+     `send_next_packet` clamps `next_send` to `front_packet`,
+     `send_packet` bounds-checks and returns `None` instead of panicking,
+     `number_of_unacked_packets` returns 0 instead of wrapping.
+  6. **`packet/time.rs` `Sub<TimeSpan>` for `Instant`** (coupled with patch 2):
+     upstream `Sub<TimeSpan>` is byte-for-byte identical to `Add<TimeSpan>` — a
+     copy-paste bug where both branches add. Fork swaps the branches so `Sub`
+     actually subtracts, and changes `unwrap()` → `unwrap_or(self)` to avoid
+     panics on `Instant` underflow.
   7. `protocol/pending_connection/listen.rs`: `Listen::allow_skip_induction`
      flag + branch in `wait_for_induction` that accepts a Conclusion-first
      handshake (skips Induction phase for 1-RTT over WebTransport).
@@ -456,14 +510,26 @@ root `Cargo.toml`. Cargo fetches them automatically at build time — they are
      Conclusion packet (cookie=0, HSREQ extensions).
   9. `ConnInitSettings.initial_rtt: Option<Duration>` field that seeds
      `SendBuffer.rtt` and `ARQ.rtt` via `Rtt::from_mean_duration`
-     (variance = mean/4). Repurposes the dead `ConnectionSettings.rtt` field.
+     (variance = mean/4). Upstream populates `ConnectionSettings.rtt` during
+     the handshake but never feeds it to `SendBuffer` or `ARQ` (both use
+     `Rtt::default()`). The fork makes both consumers read the setting, and
+     adds a way to override it from QUIC's smoothed RTT (needed because
+     skip-induction has no Induction round-trip to measure RTT).
   10. `protocol/sender/buffer.rs`: CC-aware retransmit skip in
-      `send_next_lost_packet` — if `now + rtt.mean()` exceeds the packet's
-      TSBPD deadline, the retransmit is skipped (receiver will drop it as
-      too-late anyway).
-  11. Populate `SocketStatistics.tx_average_rtt` from `SendBuffer.rtt` in
-      `update_statistics`. The field was declared but never assigned, so
-      publisher-side stats showed RTT=0.
+       `send_next_lost_packet` — if `now + rtt.mean()` exceeds the packet's
+       TSBPD deadline, the retransmit is skipped (receiver will drop it as
+       too-late anyway). The packet is popped from the lost list before the
+       check, so the skip doesn't block subsequent retransmits.
+  11. `protocol/sender/buffer.rs` + `protocol/sender/mod.rs` +
+       `connection/mod.rs`: Populate `SocketStatistics.tx_average_rtt` from
+       `SendBuffer.rtt` in `update_statistics`. The field was declared but
+       never assigned by upstream — only `rx_average_rtt` was populated.
+       Without this, publisher-side stats show RTT=0.
+  12. `connection/mod.rs` + `packet/control/srt.rs`: Handle `CongestionWarning`,
+       `PeerError`, and unknown SRT control packets without panicking (was
+       `todo!()`/`unimplemented!()`). Advertise `TLPKTDROP` + `NAKREPORT` in
+       `SrtShakeFlags::SUPPORTED` (both are enabled by default but were not
+       advertised to the peer).
 
 - **[`maxolgi/mpeg2ts`](https://github.com/maxolgi/mpeg2ts)** (master) — fork
   of `mpeg2ts` 0.6.0. One patch:
@@ -550,7 +616,7 @@ Config file `websrt.conf` is deployed to `/etc/supervisor/conf.d/`:
 
 ```ini
 [program:websrt]
-command=/opt/WebSRT/target/release/websrt-gateway --input srt --srt-mode listener --srt-port 9000 --bind 0.0.0.0 --latency 1000 --health-port 9090
+command=/opt/WebSRT/target/release/websrt-gateway --no-gui --input srt --srt-mode listener --srt-port 9000 --bind 0.0.0.0 --latency 1000 --health-port 9090
 directory=/opt/WebSRT
 autostart=true
 autorestart=true
@@ -746,10 +812,14 @@ compatible, PKI-validated).
 
 - **Chrome/Edge only for self-signed mode** — Firefox lacks
   `serverCertificateHashes` support. Use mkcert mode for Firefox.
+- **Codec support**: H.264, HEVC/H.265, and AV1 video; Opus and AAC/ADTS audio.
+  Browser publishing supports H.264 and AV1 encode via WebCodecs.
 - **Opus-in-MPEG-TS** — supported via 2-byte control header strip. Each PES
   payload is treated as one Opus packet (ffmpeg's default). AAC/ADTS is the
   default for OBS and is fully supported.
-- **2-week cert expiry** (self-signed mode) — server regenerates on boot; dev
-  workflow is "restart, reload page".
+- **2-week cert validity** (self-signed mode) — `serverCertificateHashes`
+  imposes a 14-day cap. The cert is persisted and reused across restarts;
+  delete `~/.config/websrt/gateway-cert.pem` + `gateway-key.pem` to regenerate.
 - **No SRT encryption** between gateway and browser (WebTransport TLS replaces
-  it). The OBS-to-gateway link also has crypto disabled.
+  it). The OBS-to-gateway link supports optional AES encryption via
+  `--srt-passphrase` (10–79 chars); disabled by default.
