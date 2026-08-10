@@ -421,7 +421,10 @@ pub(crate) async fn run_gateway(
         }
         None => {
             tracing::info!("mkcert identity loaded; browser uses normal PKI");
-            format!("window.CERT_HASH = null;\nwindow.WT_PORT = {};", cli.wt_port)
+            format!(
+                "window.CERT_HASH = null;\nwindow.WT_PORT = {};",
+                cli.wt_port
+            )
         }
     };
     std::fs::write(&hash_file, &cert_hash_js)
