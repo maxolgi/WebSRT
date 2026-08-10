@@ -334,7 +334,7 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
       const pageHost = location.hostname || '127.0.0.1';
       const urlParams = new URLSearchParams(location.search);
       const wtHost = host ?? urlParams.get('host') ?? (pageHost === 'localhost' ? '127.0.0.1' : pageHost);
-      const wtPort = (port ?? urlParams.get('port') ?? '4433').toString();
+      const wtPort = (port ?? urlParams.get('port') ?? (window as any).WT_PORT ?? '4433').toString();
       const qp = new URLSearchParams({ stream: streamName });
       if (authToken) qp.set('token', authToken);
       wtUrl = `https://${wtHost}:${wtPort}/wt?${qp}`;

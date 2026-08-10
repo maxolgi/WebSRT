@@ -406,31 +406,30 @@ pub(crate) async fn run_gateway(
     };
     let _ = std::fs::create_dir_all(hash_file.parent().unwrap());
 
-    if let Some(hash) = cert.der_sha256 {
-        let hex = hex::encode(hash);
-        tracing::info!("WebTransport cert DER SHA-256: {}", hex);
-        let js = format!("window.CERT_HASH = \"{}\";", hex);
-        std::fs::write(&hash_file, &js)
-            .with_context(|| format!("failed to write cert hash to {}", hash_file.display()))?;
-        tracing::info!("Wrote cert hash to {}", hash_file.display());
-    } else {
-        tracing::info!("mkcert identity loaded; browser uses normal PKI");
-        let js = "window.CERT_HASH = null;";
-        std::fs::write(&hash_file, js)
-            .with_context(|| format!("failed to write cert hash to {}", hash_file.display()))?;
-        tracing::info!(
-            "Wrote cert-hash.js (null for mkcert mode) to {}",
-            hash_file.display()
-        );
-    }
+    // cert-hash.js body, built once and reused for both the on-disk file
+    // (Vite dev server / static serving) and the embedded web server's
+    // /cert-hash.js route. Advertises the cert hash AND the WT port so a
+    // consumer that knows only the web origin can discover both in one fetch.
+    let cert_hash_js = match cert.der_sha256.as_ref() {
+        Some(hash) => {
+            let hex = hex::encode(hash);
+            tracing::info!("WebTransport cert DER SHA-256: {}", hex);
+            format!(
+                "window.CERT_HASH = \"{}\";\nwindow.WT_PORT = {};",
+                hex, cli.wt_port
+            )
+        }
+        None => {
+            tracing::info!("mkcert identity loaded; browser uses normal PKI");
+            format!("window.CERT_HASH = null;\nwindow.WT_PORT = {};", cli.wt_port)
+        }
+    };
+    std::fs::write(&hash_file, &cert_hash_js)
+        .with_context(|| format!("failed to write cert-hash.js to {}", hash_file.display()))?;
+    tracing::info!("Wrote cert-hash.js to {}", hash_file.display());
 
     // Spawn the HTTPS web server (unless --no-web or --web-port 0)
     if !cli.no_web && cli.web_port > 0 {
-        let cert_hash_js = if let Some(ref hash) = cert.der_sha256 {
-            format!("window.CERT_HASH = \"{}\";", hex::encode(hash))
-        } else {
-            "window.CERT_HASH = null;".to_string()
-        };
         let cert_pem = cert
             .identity
             .certificate_chain()

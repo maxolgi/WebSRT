@@ -256,16 +256,21 @@ const resp = await fetch('https://encoder.lan:5173/cert-hash.js'); // or read a 
 // render the hex string into the mountPlayer({ certHash }) call.
 ```
 
-### Where the backend gets the hash (no new endpoint needed)
+### Where the backend gets the hash and WT port (no new endpoint needed)
 
-The hash is exposed server-side today, with no gateway change:
+The hash and the WebTransport port are both exposed server-side today:
 
 - **The gateway boot log** prints `WebTransport cert DER SHA-256: <hex>`
   (`crates/websrt-gateway/src/main.rs`).
 - **The `cert-hash.js` file** the gateway writes at boot
   (`web/public/cert-hash.js`), readable on a shared filesystem or fetchable
   from the encoder's existing web server with TLS verification disabled
-  server-side (e.g. `curl -k https://encoder.lan:5173/cert-hash.js`).
+  server-side (e.g. `curl -k https://encoder.lan:5173/cert-hash.js`). It sets
+  **two** globals: `window.CERT_HASH` (the DER SHA-256 hex, or `null` in
+  mkcert mode) and `window.WT_PORT` (the gateway's actual `--wt-port`). A
+  proxy that knows only the web origin can therefore discover the WT port
+  from the same fetch instead of defaulting to 4433 — no separate port field
+  and no guessing.
 
 ## What does NOT work
 

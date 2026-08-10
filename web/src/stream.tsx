@@ -583,7 +583,7 @@ publishBtn.addEventListener('click', async () => {
   const pageHost = location.hostname || '127.0.0.1';
   const urlParams = new URLSearchParams(location.search);
   const wtHost = urlParams.get('host') || (pageHost === 'localhost' ? '127.0.0.1' : pageHost);
-  const wtPort = urlParams.get('port') || '4433';
+  const wtPort = urlParams.get('port') || (window as any).WT_PORT || '4433';
   const authToken = urlParams.get('token');
   const streamName = streamNameInput.value || 'default';
   const qp = new URLSearchParams({ publish: streamName });
