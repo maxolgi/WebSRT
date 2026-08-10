@@ -924,7 +924,16 @@ export class VideoPipeline {
     }
     this.decoder = new VideoDecoder({
       output: (frame) => { this.markDecoded(); this.cb.onFrame(frame); },
-      error: cfg.onError ?? ((e: unknown) => this.cb.onError(e)),
+      // On an async decode error (e.g. a NAL corrupted by packet loss) Chrome
+      // transitions the decoder to 'closed'. Reset configured + seenKeyframe so
+      // the next keyframe reconfigures a fresh decoder instead of feeding
+      // chunks into a dead one forever (which permanently freezes the picture
+      // until a manual resetDecoder()).
+      error: cfg.onError ?? ((e: unknown) => {
+        this.configured = false;
+        this.seenKeyframe = false;
+        this.cb.onError(e);
+      }),
     });
     try {
       this.decoder.configure({
@@ -1022,9 +1031,9 @@ export class VideoPipeline {
         return;
       }
 
-      // On an async decode error Chrome closes the decoder. Drop configured
-      // so the next keyframe (which carries a fresh SH) reconfigures a new
-      // decoder instead of feeding chunks into a dead one forever.
+      // onError reset is handled by applyDecoderConfig's default (shared with
+      // H.264/HEVC): configured + seenKeyframe are cleared so the next
+      // keyframe (which carries a fresh SH) reconfigures a new decoder.
       this.applyDecoderConfig({
         codecStr: chosen,
         description,
@@ -1034,11 +1043,6 @@ export class VideoPipeline {
         level: infoValid ? info!.levelIdx : 0,
         width: infoValid ? info!.width : 0,
         height: infoValid ? info!.height : 0,
-        onError: (e) => {
-          this.configured = false;
-          this.seenKeyframe = false;
-          this.cb.onError(e);
-        },
       });
     } finally {
       this.configuring = false;
