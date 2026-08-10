@@ -308,7 +308,8 @@ mod tests {
     async fn auth_token_accepts_with_other_params() {
         let p = auth_token_policy("s3cret".into());
         assert_eq!(
-            p.decide(&req("/wt", "stream=foo&token=s3cret&other=bar", None)).await,
+            p.decide(&req("/wt", "stream=foo&token=s3cret&other=bar", None))
+                .await,
             Decision::Accept
         );
     }
@@ -386,7 +387,8 @@ mod tests {
         );
         // Wrong path → reject without checking origin/token.
         assert_eq!(
-            p.decide(&req("/other", "token=t", Some("https://x.test"))).await,
+            p.decide(&req("/other", "token=t", Some("https://x.test")))
+                .await,
             Decision::Reject
         );
     }
@@ -399,7 +401,8 @@ mod tests {
         );
         // Wrong origin → Forbidden from first policy, second never checked.
         assert_eq!(
-            p.decide(&req("/wt", "token=t", Some("https://evil.test"))).await,
+            p.decide(&req("/wt", "token=t", Some("https://evil.test")))
+                .await,
             Decision::Forbidden
         );
     }

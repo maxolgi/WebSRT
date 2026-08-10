@@ -54,7 +54,7 @@ fn adjust_eliminates_drift_not_doubles() {
 
     let drift = TimeSpan::from_micros(5_000); // 5ms
     let ts = TimeStamp::MIN + Duration::from_micros(1_000_000); // 1s into the stream
-    // Our local `now` is `drift` ahead of the calibrated expectation for `ts`.
+                                                                // Our local `now` is `drift` ahead of the calibrated expectation for `ts`.
     let now = start + Duration::from_micros(1_000_000) + Duration::from_micros(5_000);
 
     let measured = tb.timestamp_from(now) - ts;

@@ -91,7 +91,10 @@ async fn multi_publisher_accepts_distinct_streamids() {
 
     let snap2 = registry.snapshot_streams();
     let alive_count = snap2.iter().filter(|s| s.alive).count();
-    assert_eq!(alive_count, 2, "still exactly 2 alive streams after duplicate");
+    assert_eq!(
+        alive_count, 2,
+        "still exactly 2 alive streams after duplicate"
+    );
 
     shutdown.notify_one();
 }

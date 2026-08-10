@@ -17,7 +17,7 @@
 use srt_protocol::connection::{Action, DuplexConnection, Input};
 use srt_protocol::packet::Packet;
 use srt_protocol::protocol::pending_connection::listen::Listen;
-use srt_protocol::protocol::pending_connection::{ConnectionResult};
+use srt_protocol::protocol::pending_connection::ConnectionResult;
 use srt_protocol::settings::ConnInitSettings;
 use srt_protocol::statistics::SocketStatistics;
 use std::cell::{Cell, RefCell};
@@ -47,10 +47,14 @@ impl SrtAction {
     /// 0 = SendDatagram, 1 = DeliverMessage, 2 = HandshakeComplete,
     /// 3 = WaitForData, 4 = Close, 5 = Log.
     #[wasm_bindgen(getter)]
-    pub fn kind(&self) -> u8 { self.kind }
+    pub fn kind(&self) -> u8 {
+        self.kind
+    }
 
     #[wasm_bindgen(getter)]
-    pub fn data(&self) -> Vec<u8> { self.data.clone() }
+    pub fn data(&self) -> Vec<u8> {
+        self.data.clone()
+    }
 
     #[wasm_bindgen(js_name = takeData)]
     pub fn take_data(&mut self) -> Vec<u8> {
@@ -58,28 +62,62 @@ impl SrtAction {
     }
 
     #[wasm_bindgen(getter)]
-    pub fn text(&self) -> String { self.text.clone() }
+    pub fn text(&self) -> String {
+        self.text.clone()
+    }
 
     #[wasm_bindgen(getter)]
-    pub fn wait_ms(&self) -> f64 { self.wait_ms }
+    pub fn wait_ms(&self) -> f64 {
+        self.wait_ms
+    }
 
     fn send(bytes: Vec<u8>) -> Self {
-        Self { kind: 0, data: bytes, text: String::new(), wait_ms: 0.0 }
+        Self {
+            kind: 0,
+            data: bytes,
+            text: String::new(),
+            wait_ms: 0.0,
+        }
     }
     fn deliver(bytes: Vec<u8>) -> Self {
-        Self { kind: 1, data: bytes, text: String::new(), wait_ms: 0.0 }
+        Self {
+            kind: 1,
+            data: bytes,
+            text: String::new(),
+            wait_ms: 0.0,
+        }
     }
     fn hs_done() -> Self {
-        Self { kind: 2, data: Vec::new(), text: String::new(), wait_ms: 0.0 }
+        Self {
+            kind: 2,
+            data: Vec::new(),
+            text: String::new(),
+            wait_ms: 0.0,
+        }
     }
     fn wait(d: Duration) -> Self {
-        Self { kind: 3, data: Vec::new(), text: String::new(), wait_ms: d.as_secs_f64() * 1000.0 }
+        Self {
+            kind: 3,
+            data: Vec::new(),
+            text: String::new(),
+            wait_ms: d.as_secs_f64() * 1000.0,
+        }
     }
     fn close() -> Self {
-        Self { kind: 4, data: Vec::new(), text: String::new(), wait_ms: 0.0 }
+        Self {
+            kind: 4,
+            data: Vec::new(),
+            text: String::new(),
+            wait_ms: 0.0,
+        }
     }
     fn log(s: impl Into<String>) -> Self {
-        Self { kind: 5, data: Vec::new(), text: s.into(), wait_ms: 0.0 }
+        Self {
+            kind: 5,
+            data: Vec::new(),
+            text: s.into(),
+            wait_ms: 0.0,
+        }
     }
 }
 
@@ -109,23 +147,74 @@ impl SrtStats {
     // All numeric getters return f64 so JS sees plain Numbers, never BigInt.
     // (u64 getters surface as BigInt in wasm-bindgen, which throws on
     // `bigint / number` — the latent bandwidthBps bug.)
-    #[wasm_bindgen(getter)] pub fn elapsedMs(&self) -> f64 { self.elapsed_ms }
-    #[wasm_bindgen(getter)] pub fn rxData(&self) -> f64 { self.rx_data as f64 }
-    #[wasm_bindgen(getter)] pub fn rxBytes(&self) -> f64 { self.rx_bytes as f64 }
-    #[wasm_bindgen(getter)] pub fn rxLoss(&self) -> f64 { self.rx_loss as f64 }
-    #[wasm_bindgen(getter)] pub fn rxRetransmit(&self) -> f64 { self.rx_retransmit as f64 }
-    #[wasm_bindgen(getter)] pub fn rxDropped(&self) -> f64 { self.rx_dropped as f64 }
-    #[wasm_bindgen(getter)] pub fn rxAck(&self) -> f64 { self.rx_ack as f64 }
-    #[wasm_bindgen(getter)] pub fn rxNak(&self) -> f64 { self.rx_nak as f64 }
-    #[wasm_bindgen(getter)] pub fn rttMs(&self) -> f64 { self.rtt_ms }
-    #[wasm_bindgen(getter)] pub fn bandwidthBps(&self) -> f64 { self.bandwidth_bps as f64 }
-    #[wasm_bindgen(getter)] pub fn rxBuffered(&self) -> f64 { self.rx_buffered as f64 }
-    #[wasm_bindgen(getter)] pub fn rxBelated(&self) -> f64 { self.rx_belated as f64 }
-    #[wasm_bindgen(getter)] pub fn txData(&self) -> f64 { self.tx_data as f64 }
-    #[wasm_bindgen(getter)] pub fn txBytes(&self) -> f64 { self.tx_bytes as f64 }
-    #[wasm_bindgen(getter)] pub fn txRetransmit(&self) -> f64 { self.tx_retransmit as f64 }
-    #[wasm_bindgen(getter)] pub fn txLoss(&self) -> f64 { self.tx_loss as f64 }
-    #[wasm_bindgen(getter)] pub fn txBuffered(&self) -> f64 { self.tx_buffered as f64 }
+    #[wasm_bindgen(getter)]
+    pub fn elapsedMs(&self) -> f64 {
+        self.elapsed_ms
+    }
+    #[wasm_bindgen(getter)]
+    pub fn rxData(&self) -> f64 {
+        self.rx_data as f64
+    }
+    #[wasm_bindgen(getter)]
+    pub fn rxBytes(&self) -> f64 {
+        self.rx_bytes as f64
+    }
+    #[wasm_bindgen(getter)]
+    pub fn rxLoss(&self) -> f64 {
+        self.rx_loss as f64
+    }
+    #[wasm_bindgen(getter)]
+    pub fn rxRetransmit(&self) -> f64 {
+        self.rx_retransmit as f64
+    }
+    #[wasm_bindgen(getter)]
+    pub fn rxDropped(&self) -> f64 {
+        self.rx_dropped as f64
+    }
+    #[wasm_bindgen(getter)]
+    pub fn rxAck(&self) -> f64 {
+        self.rx_ack as f64
+    }
+    #[wasm_bindgen(getter)]
+    pub fn rxNak(&self) -> f64 {
+        self.rx_nak as f64
+    }
+    #[wasm_bindgen(getter)]
+    pub fn rttMs(&self) -> f64 {
+        self.rtt_ms
+    }
+    #[wasm_bindgen(getter)]
+    pub fn bandwidthBps(&self) -> f64 {
+        self.bandwidth_bps as f64
+    }
+    #[wasm_bindgen(getter)]
+    pub fn rxBuffered(&self) -> f64 {
+        self.rx_buffered as f64
+    }
+    #[wasm_bindgen(getter)]
+    pub fn rxBelated(&self) -> f64 {
+        self.rx_belated as f64
+    }
+    #[wasm_bindgen(getter)]
+    pub fn txData(&self) -> f64 {
+        self.tx_data as f64
+    }
+    #[wasm_bindgen(getter)]
+    pub fn txBytes(&self) -> f64 {
+        self.tx_bytes as f64
+    }
+    #[wasm_bindgen(getter)]
+    pub fn txRetransmit(&self) -> f64 {
+        self.tx_retransmit as f64
+    }
+    #[wasm_bindgen(getter)]
+    pub fn txLoss(&self) -> f64 {
+        self.tx_loss as f64
+    }
+    #[wasm_bindgen(getter)]
+    pub fn txBuffered(&self) -> f64 {
+        self.tx_buffered as f64
+    }
 }
 
 enum State {
@@ -389,7 +478,10 @@ fn drain(
                 out.push(SrtAction::send(serialize_packet(&pkt)));
             }
             Action::ReleaseData((_ts, bytes)) => out.push(SrtAction::deliver(bytes.to_vec())),
-            Action::UpdateStatistics(s) => { *stats.borrow_mut() = s.clone(); continue; }
+            Action::UpdateStatistics(s) => {
+                *stats.borrow_mut() = s.clone();
+                continue;
+            }
             Action::WaitForData(d) => {
                 if !d.is_zero() {
                     out.push(SrtAction::wait(d));

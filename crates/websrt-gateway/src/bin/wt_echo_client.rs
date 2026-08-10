@@ -30,9 +30,7 @@ async fn main() -> anyhow::Result<()> {
         .with_server_certificate_hashes([digest.clone()])
         .build();
 
-    let conn = Endpoint::client(config)?
-        .connect(&cli.url)
-        .await?;
+    let conn = Endpoint::client(config)?.connect(&cli.url).await?;
 
     println!("connected: session_id={:?}", conn.session_id());
 
@@ -42,7 +40,11 @@ async fn main() -> anyhow::Result<()> {
 
     let dgram = conn.receive_datagram().await?;
     let echoed = dgram.payload();
-    println!("recv {}B: {:?}", echoed.len(), std::str::from_utf8(&echoed)?);
+    println!(
+        "recv {}B: {:?}",
+        echoed.len(),
+        std::str::from_utf8(&echoed)?
+    );
 
     // Round-trip a few more to be sure.
     for i in 0u32..5 {

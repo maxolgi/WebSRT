@@ -92,16 +92,18 @@ async fn serve_embedded(uri: Uri) -> Response {
             )
                 .into_response()
         }
-        None => {
-            match WebAsset::get("index.html") {
-                Some(content) => (
-                    StatusCode::OK,
-                    [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                    Body::from(content.data.into_owned()),
-                )
-                    .into_response(),
-                None => (StatusCode::NOT_FOUND, "web UI not built — run ./build.sh web build").into_response(),
-            }
-        }
+        None => match WebAsset::get("index.html") {
+            Some(content) => (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                Body::from(content.data.into_owned()),
+            )
+                .into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                "web UI not built — run ./build.sh web build",
+            )
+                .into_response(),
+        },
     }
 }

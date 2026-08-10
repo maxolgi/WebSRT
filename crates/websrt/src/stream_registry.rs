@@ -9,9 +9,9 @@
 
 use crate::broadcaster::{Broadcaster, ViewerRx};
 use crate::ingest::{ChannelIngester, Ingester, TsMessage};
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
@@ -61,9 +61,7 @@ impl StreamRegistry {
             self.broadcast_capacity,
             shutdown,
         );
-        self.streams
-            .lock()
-            .insert(name.to_string(), broadcaster);
+        self.streams.lock().insert(name.to_string(), broadcaster);
         tx
     }
 
@@ -82,9 +80,7 @@ impl StreamRegistry {
             self.broadcast_capacity,
             shutdown,
         );
-        self.streams
-            .lock()
-            .insert(name.to_string(), broadcaster);
+        self.streams.lock().insert(name.to_string(), broadcaster);
     }
 
     pub fn try_publish_ingester<I>(&self, name: &str, ingester: I) -> bool

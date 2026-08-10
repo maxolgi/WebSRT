@@ -87,7 +87,9 @@ async fn basic_fanout_delivers_all_messages() {
 
     // Subscribe synchronously before awaiting so the broadcaster task hasn't
     // dropped early messages for lack of a receiver (current-thread runtime).
-    let mut viewer = bc.subscribe().expect("subscribe should succeed while alive");
+    let mut viewer = bc
+        .subscribe()
+        .expect("subscribe should succeed while alive");
 
     assert!(
         wait_until_dead(&bc, Duration::from_secs(2)).await,
@@ -156,7 +158,12 @@ async fn slow_viewer_reports_lagged() {
     let capacity = 2;
     let pushed = 5;
     let msgs: Vec<_> = (0..pushed).map(|_| ts_packet()).collect();
-    let bc = Broadcaster::spawn(MockIngester::new(msgs), 1, capacity, Arc::new(Notify::new()));
+    let bc = Broadcaster::spawn(
+        MockIngester::new(msgs),
+        1,
+        capacity,
+        Arc::new(Notify::new()),
+    );
 
     // Subscribe before the broadcaster task runs so the receiver's read
     // pointer starts at position 0 and every subsequent send overwrites it.

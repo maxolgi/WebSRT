@@ -4,11 +4,11 @@
 //! timeout values. [`ConnectionTracker`] enforces those limits at runtime using
 //! RAII guards that decrement counters on drop.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use parking_lot::Mutex;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -242,9 +242,11 @@ impl ConnectionTracker {
                 per_ip.remove(ip);
             }
         }
-        let _ = self.total.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-            Some(v.saturating_sub(1))
-        });
+        let _ = self
+            .total
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
     }
 }
 
@@ -316,7 +318,10 @@ mod tests {
 
     #[test]
     fn per_ip_cap_enforced() {
-        let limits = GatewayLimits::builder().max_sessions_per_ip(2).build().unwrap();
+        let limits = GatewayLimits::builder()
+            .max_sessions_per_ip(2)
+            .build()
+            .unwrap();
         let tracker = Arc::new(ConnectionTracker::new(limits));
 
         let g1 = tracker.try_acquire(ip(1));
@@ -325,12 +330,18 @@ mod tests {
 
         assert!(g1.is_some());
         assert!(g2.is_some());
-        assert!(g3.is_none(), "third session from same IP should be rejected");
+        assert!(
+            g3.is_none(),
+            "third session from same IP should be rejected"
+        );
     }
 
     #[test]
     fn per_ip_cap_does_not_affect_other_ips() {
-        let limits = GatewayLimits::builder().max_sessions_per_ip(1).build().unwrap();
+        let limits = GatewayLimits::builder()
+            .max_sessions_per_ip(1)
+            .build()
+            .unwrap();
         let tracker = Arc::new(ConnectionTracker::new(limits));
 
         let g1 = tracker.try_acquire(ip(1)).unwrap();
@@ -406,10 +417,7 @@ mod tests {
         let g1 = tracker.try_acquire(v6(1));
         let g2 = tracker.try_acquire(v6(2));
         assert!(g1.is_some());
-        assert!(
-            g2.is_none(),
-            "second IPv6 in same /64 should be rejected"
-        );
+        assert!(g2.is_none(), "second IPv6 in same /64 should be rejected");
     }
 
     #[test]

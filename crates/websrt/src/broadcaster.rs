@@ -6,9 +6,9 @@
 
 use crate::ingest::{Ingester, TsMessage};
 use anyhow::Result;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::Mutex;
 use tokio::sync::broadcast;
 use tokio::sync::Notify;
 

@@ -10,7 +10,10 @@
 // window appears alongside the egui window. `--no-gui` mode reattaches to the
 // parent terminal's console (see `reattach_parent_console`) so CLI output still
 // works. Debug builds keep the console for `println!`-based development.
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 
 mod gui;
 mod log_buffer;
@@ -23,9 +26,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
+use tracing_subscriber::EnvFilter;
 use websrt::cert::{Cert, CertSource};
 use websrt::ingest::file::FileIngester;
 use websrt::ingest::srt::SrtIngester;
@@ -366,18 +369,23 @@ pub(crate) async fn run_gateway(
     }
 
     // Persist newly-generated self-signed cert for reuse across restarts.
-    if cli.cert_mode == CertMode::Self_
-        && !cert_path.exists()
-    {
+    if cli.cert_mode == CertMode::Self_ && !cert_path.exists() {
         if let Some(leaf) = cert.identity.certificate_chain().as_slice().first() {
             let cert_pem = leaf.to_pem();
             let key_pem = cert.identity.private_key().to_secret_pem();
             if let Err(e) = std::fs::write(&cert_path, &cert_pem)
                 .and_then(|()| std::fs::write(&key_path, &key_pem))
             {
-                tracing::warn!(?e, "failed to persist self-signed cert; will regenerate next start");
+                tracing::warn!(
+                    ?e,
+                    "failed to persist self-signed cert; will regenerate next start"
+                );
             } else {
-                tracing::info!("persisted self-signed cert to {} + {}", cert_path.display(), key_path.display());
+                tracing::info!(
+                    "persisted self-signed cert to {} + {}",
+                    cert_path.display(),
+                    key_path.display()
+                );
             }
         }
     }
@@ -410,7 +418,10 @@ pub(crate) async fn run_gateway(
         let js = "window.CERT_HASH = null;";
         std::fs::write(&hash_file, js)
             .with_context(|| format!("failed to write cert hash to {}", hash_file.display()))?;
-        tracing::info!("Wrote cert-hash.js (null for mkcert mode) to {}", hash_file.display());
+        tracing::info!(
+            "Wrote cert-hash.js (null for mkcert mode) to {}",
+            hash_file.display()
+        );
     }
 
     // Spawn the HTTPS web server (unless --no-web or --web-port 0)
@@ -432,7 +443,16 @@ pub(crate) async fn run_gateway(
         let web_port = cli.web_port;
         let shutdown = shutdown.clone();
         tokio::spawn(async move {
-            if let Err(e) = web_server::run_web_server(web_bind, web_port, cert_hash_js, cert_pem, key_pem, shutdown).await {
+            if let Err(e) = web_server::run_web_server(
+                web_bind,
+                web_port,
+                cert_hash_js,
+                cert_pem,
+                key_pem,
+                shutdown,
+            )
+            .await
+            {
                 tracing::error!(?e, "web server failed");
             }
         });
@@ -573,7 +593,10 @@ pub(crate) async fn run_gateway(
             })?;
             tracing::info!(fixture = ?cli.fixture, "file ingester ready");
             let checker = TsContinuityChecker::new(ingester);
-            ts_stats.lock().unwrap().insert("default".to_string(), checker.stats_handle());
+            ts_stats
+                .lock()
+                .unwrap()
+                .insert("default".to_string(), checker.stats_handle());
             gateway.source_handle().publish_stream("default", checker);
         }
         InputMode::Srt => {
@@ -604,20 +627,18 @@ pub(crate) async fn run_gateway(
                             }
                         };
                         let registry = source.registry();
-                        tracing::info!("SRT multi-publisher listener ready, awaiting OBS connections");
+                        tracing::info!(
+                            "SRT multi-publisher listener ready, awaiting OBS connections"
+                        );
                         listener
-                            .serve(
-                                registry,
-                                srt_shutdown,
-                                move |name, conn| {
-                                    let checker = TsContinuityChecker::new(conn);
-                                    ts_stats
-                                        .lock()
-                                        .unwrap()
-                                        .insert(name.to_string(), checker.stats_handle());
-                                    checker
-                                },
-                            )
+                            .serve(registry, srt_shutdown, move |name, conn| {
+                                let checker = TsContinuityChecker::new(conn);
+                                ts_stats
+                                    .lock()
+                                    .unwrap()
+                                    .insert(name.to_string(), checker.stats_handle());
+                                checker
+                            })
                             .await;
                     }
                     SrtMode::Caller => {
@@ -669,9 +690,7 @@ pub(crate) async fn run_gateway(
     // Spawn the gateway run loop as a background task. The caller controls
     // shutdown via the Notify.
     let stats_handle = gateway.stats_handle();
-    let task = tokio::spawn(async move {
-        gateway.run(shutdown.notified()).await
-    });
+    let task = tokio::spawn(async move { gateway.run(shutdown.notified()).await });
 
     Ok((stats_handle, task))
 }

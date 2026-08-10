@@ -39,7 +39,7 @@ pub struct TsMuxer {
     output: Vec<u8>,
     pat_pmt_emitted: bool,
     last_was_keyframe: bool,
-    video_stream_type: u8,   // default STREAM_TYPE_H264
+    video_stream_type: u8,     // default STREAM_TYPE_H264
     video_descriptor: Vec<u8>, // default empty
 }
 
@@ -140,13 +140,13 @@ impl TsMuxer {
 impl TsMuxer {
     fn write_pat(&mut self) {
         let mut section: Vec<u8> = vec![
-            0x00,                       // table_id
-            0xB0, 0x0D,                 // SSI + section_length = 13
-            0x00, 0x01,                 // transport_stream_id = 1
-            0xC1,                       // reserved(11) + version(0) + current_next(1)
-            0x00, 0x00,                 // section_number, last_section_number
-            0x00, 0x01,                 // program_number = 1
-            0xF0, 0x00,                 // reserved(111) + PMT_PID = 0x1000
+            0x00, // table_id
+            0xB0, 0x0D, // SSI + section_length = 13
+            0x00, 0x01, // transport_stream_id = 1
+            0xC1, // reserved(11) + version(0) + current_next(1)
+            0x00, 0x00, // section_number, last_section_number
+            0x00, 0x01, // program_number = 1
+            0xF0, 0x00, // reserved(111) + PMT_PID = 0x1000
         ];
         let crc = crc32(&section);
         section.extend_from_slice(&crc.to_be_bytes());
@@ -182,7 +182,7 @@ impl TsMuxer {
         s.extend_from_slice(&[0x00, 0x00]); // section/last
         s.extend_from_slice(&[0xE1, 0x00]); // PCR_PID = 0x100
         s.extend_from_slice(&[0xF0, 0x00]); // program_info_length = 0
-        // video entry
+                                            // video entry
         s.push(self.video_stream_type);
         s.extend_from_slice(&[0xE1, 0x00]); // video PID 0x100
         s.push(0xF0 | ((video_esil >> 8) as u8 & 0x0F));
@@ -402,13 +402,10 @@ mod tests {
         let s = full_section(&mut m);
         assert_eq!(s[12], 0x1B); // video stream_type H.264
         assert_eq!(&s[15..17], &[0xF0, 0x00]); // video ES_info_length 0
-        // audio entry immediately follows (no video descriptor)
+                                               // audio entry immediately follows (no video descriptor)
         assert_eq!(s[17], 0x06); // audio stream_type Opus
         assert_eq!(&s[20..22], &[0xF0, 0x0A]); // audio ES_info_length 10
-        assert_eq!(
-            &s[22..28],
-            &[0x05, 0x04, 0x4F, 0x70, 0x75, 0x73]
-        ); // "Opus"
+        assert_eq!(&s[22..28], &[0x05, 0x04, 0x4F, 0x70, 0x75, 0x73]); // "Opus"
         assert_eq!(&s[28..32], &[0x7F, 0x02, 0x80, 0x02]); // DVB ext
         let sl = ((s[1] as u16 & 0x0F) << 8) | s[2] as u16;
         assert_eq!(sl, 33); // 23 + 0 + 10
@@ -421,16 +418,10 @@ mod tests {
         let s = full_section(&mut m);
         assert_eq!(s[12], 0x06); // video stream_type AV1
         assert_eq!(&s[15..17], &[0xF0, 0x06]); // video ES_info_length 6
-        assert_eq!(
-            &s[17..23],
-            &[0x05, 0x04, 0x41, 0x56, 0x30, 0x31]
-        ); // "AV01"
+        assert_eq!(&s[17..23], &[0x05, 0x04, 0x41, 0x56, 0x30, 0x31]); // "AV01"
         assert_eq!(s[23], 0x06); // audio stream_type Opus
         assert_eq!(&s[26..28], &[0xF0, 0x0A]); // audio ES_info_length 10
-        assert_eq!(
-            &s[28..34],
-            &[0x05, 0x04, 0x4F, 0x70, 0x75, 0x73]
-        ); // "Opus"
+        assert_eq!(&s[28..34], &[0x05, 0x04, 0x4F, 0x70, 0x75, 0x73]); // "Opus"
         assert_eq!(&s[34..38], &[0x7F, 0x02, 0x80, 0x02]); // DVB ext
         let sl = ((s[1] as u16 & 0x0F) << 8) | s[2] as u16;
         assert_eq!(sl, 39); // 23 + 6 + 10

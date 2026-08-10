@@ -70,7 +70,11 @@ struct GuiConfig {
 
 fn opt_string(s: &str) -> Option<String> {
     let trimmed = s.trim();
-    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn opt_path(s: &str) -> Option<PathBuf> {
@@ -89,7 +93,8 @@ impl GuiConfig {
 
     fn save_to_file(&self) {
         let path = Self::config_path();
-        if let Err(e) = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new("."))) {
+        if let Err(e) = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")))
+        {
             tracing::warn!(?e, "failed to create config dir");
             return;
         }
@@ -125,8 +130,16 @@ impl GuiConfig {
             wt_port: cli.wt_port,
             bind: "0.0.0.0".to_string(),
             cert_mode: cli.cert_mode,
-            cert_pem: cli.cert_pem.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
-            key_pem: cli.key_pem.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+            cert_pem: cli
+                .cert_pem
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            key_pem: cli
+                .key_pem
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
             latency: cli.latency,
             srt_passphrase: cli.srt_passphrase.clone().unwrap_or_default(),
             health_port: cli.health_port,
@@ -277,10 +290,7 @@ impl GuiApp {
     fn poll(&mut self) {
         // 1. Drain all pending messages from the gateway task.
         loop {
-            let msg = self
-                .msg_rx
-                .as_ref()
-                .and_then(|rx| rx.try_recv().ok());
+            let msg = self.msg_rx.as_ref().and_then(|rx| rx.try_recv().ok());
             match msg {
                 Some(GatewayMessage::Started(stats_handle, shutdown)) => {
                     self.stats_handle = Some(stats_handle);
@@ -389,10 +399,7 @@ impl eframe::App for GuiApp {
 
                 // Error
                 if let Some(ref e) = self.error {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(230, 80, 80),
-                        format!("Error: {e}"),
-                    );
+                    ui.colored_label(egui::Color32::from_rgb(230, 80, 80), format!("Error: {e}"));
                     ui.add_space(4.0);
                 }
 
@@ -433,10 +440,8 @@ impl eframe::App for GuiApp {
                                     .sense(egui::Sense::click());
                                     let resp = ui.add_enabled(web_enabled, link);
                                     if resp.clicked() {
-                                        let url = format!(
-                                            "https://{host}:{web_port}/?stream={}",
-                                            s.name
-                                        );
+                                        let url =
+                                            format!("https://{host}:{web_port}/?stream={}", s.name);
                                         ui.ctx().open_url(egui::OpenUrl::new_tab(url));
                                     }
                                     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -461,14 +466,20 @@ impl eframe::App for GuiApp {
 
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Logs").strong());
-                    if ui.add_enabled(has_logs, egui::Button::new("Copy")).clicked() {
+                    if ui
+                        .add_enabled(has_logs, egui::Button::new("Copy"))
+                        .clicked()
+                    {
                         let text = self
                             .log_selection
                             .clone()
                             .unwrap_or_else(|| log_text.clone());
                         ctx.copy_text(text);
                     }
-                    if ui.add_enabled(has_logs, egui::Button::new("Clear")).clicked() {
+                    if ui
+                        .add_enabled(has_logs, egui::Button::new("Clear"))
+                        .clicked()
+                    {
                         self.log_buffer.clear();
                         self.log_selection = None;
                     }
@@ -489,8 +500,7 @@ impl eframe::App for GuiApp {
                                 if cr.is_empty() {
                                     self.log_selection = None;
                                 } else {
-                                    self.log_selection =
-                                        Some(cr.slice_str(&log_text).to_owned());
+                                    self.log_selection = Some(cr.slice_str(&log_text).to_owned());
                                 }
                             }
                         } else {
@@ -568,11 +578,17 @@ fn draw_config_form(ui: &mut egui::Ui, config: &mut GuiConfig, enabled: bool) {
             ui.end_row();
 
             ui.label("Web HTTPS port:");
-            ui.add_enabled(enabled, egui::DragValue::new(&mut config.web_port).range(0..=65535));
+            ui.add_enabled(
+                enabled,
+                egui::DragValue::new(&mut config.web_port).range(0..=65535),
+            );
             ui.end_row();
 
             ui.label("Web bind addr:");
-            ui.add_enabled(enabled, egui::TextEdit::singleline(&mut config.web_bind).desired_width(160.0));
+            ui.add_enabled(
+                enabled,
+                egui::TextEdit::singleline(&mut config.web_bind).desired_width(160.0),
+            );
             ui.end_row();
 
             // Cert mode
@@ -582,7 +598,11 @@ fn draw_config_form(ui: &mut egui::Ui, config: &mut GuiConfig, enabled: bool) {
                     .selected_text(cert_mode_label(config.cert_mode))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut config.cert_mode, CertMode::Self_, "Self-signed");
-                        ui.selectable_value(&mut config.cert_mode, CertMode::Mkcert, "mkcert (PEM)");
+                        ui.selectable_value(
+                            &mut config.cert_mode,
+                            CertMode::Mkcert,
+                            "mkcert (PEM)",
+                        );
                     });
             });
             ui.end_row();
@@ -657,10 +677,7 @@ fn draw_config_form(ui: &mut egui::Ui, config: &mut GuiConfig, enabled: bool) {
                         ui.end_row();
 
                         ui.label("Seed:");
-                        ui.add_enabled(
-                            enabled,
-                            egui::DragValue::new(&mut config.sim_seed),
-                        );
+                        ui.add_enabled(enabled, egui::DragValue::new(&mut config.sim_seed));
                         ui.end_row();
                     });
             }
@@ -676,11 +693,9 @@ fn cert_mode_label(m: CertMode) -> &'static str {
 
 fn web_host(web_bind: &str) -> String {
     match web_bind {
-        "0.0.0.0" | "::" | "" => {
-            local_ip_address::local_ip()
-                .map(|ip| ip.to_string())
-                .unwrap_or_else(|_| "127.0.0.1".to_string())
-        }
+        "0.0.0.0" | "::" | "" => local_ip_address::local_ip()
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|_| "127.0.0.1".to_string()),
         other => other.to_string(),
     }
 }

@@ -9,7 +9,7 @@
 //! (i.e. when we receive ts=T, our now = start + (T - MIN) + drift). The
 //! measured drift is `timestamp_from(now) - T == drift`. A correct adjust
 //! should drive the residual drift to 0. A sign-flipped adjust doubles it.
-use srt_protocol::packet::{TimeStamp, TimeSpan};
+use srt_protocol::packet::{TimeSpan, TimeStamp};
 use srt_protocol::protocol::time::TimeBase;
 use std::time::{Duration, Instant};
 
@@ -22,9 +22,9 @@ fn adjust_eliminates_drift_instead_of_doubling() {
     assert_eq!(tb.instant_from(TimeStamp::MIN), start);
 
     let drift = TimeSpan::from_micros(5_000); // 5ms
-    // Peer timestamp we just "received".
+                                              // Peer timestamp we just "received".
     let ts = TimeStamp::MIN + Duration::from_micros(1_000_000); // 1s into the stream
-    // Our local now is drift ahead of the calibrated expectation.
+                                                                // Our local now is drift ahead of the calibrated expectation.
     let now = start + Duration::from_micros(1_000_000) + Duration::from_micros(5_000);
 
     let measured = tb.timestamp_from(now) - ts;

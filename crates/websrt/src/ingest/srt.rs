@@ -120,12 +120,10 @@ impl SrtIngester {
         let socket_addr: srt_protocol::options::SocketAddress = addr
             .try_into()
             .map_err(|e| anyhow!("invalid SRT address {addr}: {e:?}"))?;
-        let mut builder = SrtSocket::builder()
-            .latency(latency)
-            .set(|o| {
-                o.connect.udp_recv_buffer_size = UDP_BUF_SIZE;
-                o.connect.udp_send_buffer_size = UDP_BUF_SIZE;
-            });
+        let mut builder = SrtSocket::builder().latency(latency).set(|o| {
+            o.connect.udp_recv_buffer_size = UDP_BUF_SIZE;
+            o.connect.udp_send_buffer_size = UDP_BUF_SIZE;
+        });
         if let Some(ref p) = passphrase {
             builder = builder.encryption(0, p);
         }

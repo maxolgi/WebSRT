@@ -46,12 +46,7 @@ impl SrtListenerService {
         })
     }
 
-    pub async fn serve<I, F>(
-        self,
-        registry: Arc<StreamRegistry>,
-        shutdown: Arc<Notify>,
-        wrap: F,
-    )
+    pub async fn serve<I, F>(self, registry: Arc<StreamRegistry>, shutdown: Arc<Notify>, wrap: F)
     where
         F: Fn(&str, SrtConnectionIngester) -> I + Send + 'static,
         I: Ingester + Send + 'static,

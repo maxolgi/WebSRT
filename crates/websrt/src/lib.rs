@@ -47,7 +47,10 @@ pub mod stream_registry;
 
 pub use broadcaster::{Broadcaster, ViewerRx};
 pub use cert::{Cert, CertSource};
-pub use gateway::{Gateway, GatewayBuilder, GatewaySourceHandle, GatewayStats, GatewayStatsHandle, SessionStats, SrtStatsSnapshot};
+pub use gateway::{
+    Gateway, GatewayBuilder, GatewaySourceHandle, GatewayStats, GatewayStatsHandle, SessionStats,
+    SrtStatsSnapshot,
+};
 pub use hooks::{Decision, SessionPolicy, SessionRequest};
 pub use ingest::{ChannelIngester, Ingester, TsMessage};
 pub use limits::{ConnectionTracker, GatewayLimits, GatewayLimitsBuilder, SessionGuard};

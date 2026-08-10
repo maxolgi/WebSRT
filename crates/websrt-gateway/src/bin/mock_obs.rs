@@ -48,7 +48,9 @@ async fn main() -> anyhow::Result<()> {
     let mut emitted = 0u64;
     let mut loop_count = 0u64;
     loop {
-        if Instant::now() > deadline { break; }
+        if Instant::now() > deadline {
+            break;
+        }
         if cursor + chunk > data.len() {
             cursor = 0;
             loop_count += 1;
@@ -61,7 +63,10 @@ async fn main() -> anyhow::Result<()> {
             sleep(Duration::from_secs_f64(target_elapsed - actual)).await;
         }
 
-        let msg = (Instant::now(), Bytes::copy_from_slice(&data[cursor..cursor + chunk]));
+        let msg = (
+            Instant::now(),
+            Bytes::copy_from_slice(&data[cursor..cursor + chunk]),
+        );
         use futures::SinkExt;
         socket.send(msg).await?;
         cursor += chunk;

@@ -12,10 +12,10 @@ use srt_protocol::packet::Packet;
 use srt_protocol::protocol::pending_connection::listen::Listen;
 use srt_protocol::protocol::pending_connection::ConnectionResult;
 use srt_protocol::settings::ConnInitSettings;
-use wtransport::tls::Sha256Digest;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
+use wtransport::tls::Sha256Digest;
 use wtransport::ClientConfig;
 use wtransport::Endpoint;
 
@@ -62,7 +62,9 @@ async fn main() -> anyhow::Result<()> {
 
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() { break; }
+        if remaining.is_zero() {
+            break;
+        }
 
         let dgram = tokio::time::timeout(Duration::from_millis(500), conn.receive_datagram()).await;
         let payload = match dgram {
@@ -75,7 +77,16 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(d) = &mut duplex {
                     let now = Instant::now();
                     d.handle_input(now, Input::Timer);
-                    drain(d, &conn, &mut msgs, &mut bytes, &mut ts_msgs, &mut last_cc, &mut cc_gaps, &mut cc_advances)?;
+                    drain(
+                        d,
+                        &conn,
+                        &mut msgs,
+                        &mut bytes,
+                        &mut ts_msgs,
+                        &mut last_cc,
+                        &mut cc_gaps,
+                        &mut cc_advances,
+                    )?;
                 }
                 continue;
             }
@@ -84,24 +95,44 @@ async fn main() -> anyhow::Result<()> {
         let mut buf: &[u8] = &payload[..];
         let packet = match Packet::parse(&mut buf, false) {
             Ok(p) => p,
-            Err(e) => { println!("parse err: {e:?}"); continue; }
+            Err(e) => {
+                println!("parse err: {e:?}");
+                continue;
+            }
         };
 
         if let Some(d) = &mut duplex {
             d.handle_packet_input(now, Ok((packet, GATEWAY)));
-            drain(d, &conn, &mut msgs, &mut bytes, &mut ts_msgs, &mut last_cc, &mut cc_gaps, &mut cc_advances)?;
+            drain(
+                d,
+                &conn,
+                &mut msgs,
+                &mut bytes,
+                &mut ts_msgs,
+                &mut last_cc,
+                &mut cc_gaps,
+                &mut cc_advances,
+            )?;
         } else {
             match listen.handle_packet(now, Ok((packet, GATEWAY))) {
                 ConnectionResult::SendPacket((pkt, _)) => conn.send_datagram(serialize(&pkt))?,
                 ConnectionResult::Connected(maybe, conn_settings) => {
-                    if let Some((pkt, _)) = maybe { conn.send_datagram(serialize(&pkt))?; }
+                    if let Some((pkt, _)) = maybe {
+                        conn.send_datagram(serialize(&pkt))?;
+                    }
                     duplex = Some(DuplexConnection::new(conn_settings));
                     println!("✓ handshake complete");
                 }
                 ConnectionResult::NoAction => {}
                 ConnectionResult::NotHandled(e) => println!("not-handled: {e}"),
-                ConnectionResult::Reject(_, r) => { println!("rejected: {r:?}"); break; }
-                ConnectionResult::Failure(e) => { println!("io: {e}"); break; }
+                ConnectionResult::Reject(_, r) => {
+                    println!("rejected: {r:?}");
+                    break;
+                }
+                ConnectionResult::Failure(e) => {
+                    println!("io: {e}");
+                    break;
+                }
                 ConnectionResult::RequestAccess(_) => println!("access-control"),
             }
         }
@@ -113,7 +144,9 @@ async fn main() -> anyhow::Result<()> {
     println!("TS packet advances: {cc_advances}, gaps detected: {cc_gaps}");
     let gap_pct = if cc_advances > 0 {
         (cc_gaps as f64) / (cc_advances + cc_gaps) as f64 * 100.0
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     println!("gap rate: {gap_pct:.2}%");
     Ok(())
 }
@@ -142,7 +175,9 @@ fn drain(
                     *ts_msgs += 1;
                     // Walk 188-byte TS packets, check continuity counters.
                     for chunk in b.chunks(188) {
-                        if chunk.len() < 4 { continue; }
+                        if chunk.len() < 4 {
+                            continue;
+                        }
                         let pid = (((chunk[1] as u16) & 0x1F) << 8) | (chunk[2] as u16);
                         let cc = chunk[3] & 0x0F;
                         // adaptation_field_control determines if CC advances.

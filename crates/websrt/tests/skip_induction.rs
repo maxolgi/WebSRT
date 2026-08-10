@@ -100,8 +100,12 @@ fn drive_handshake(listen: &mut Listen, initiator: &mut SrtInitiator, now: Insta
 #[test]
 fn handshake_completes_in_one_rtt() {
     let now = Instant::now();
-    let mut initiator =
-        SrtInitiator::new(LOCAL, REMOTE, &SrtConfig::default(), Duration::from_millis(50));
+    let mut initiator = SrtInitiator::new(
+        LOCAL,
+        REMOTE,
+        &SrtConfig::default(),
+        Duration::from_millis(50),
+    );
 
     let mut listen = Listen::new(listen_settings(), false);
     listen.allow_skip_induction(true);
@@ -117,8 +121,12 @@ fn handshake_completes_in_one_rtt() {
 #[test]
 fn listen_rejects_conclusion_first_without_flag() {
     let now = Instant::now();
-    let mut initiator =
-        SrtInitiator::new(LOCAL, REMOTE, &SrtConfig::default(), Duration::from_millis(50));
+    let mut initiator = SrtInitiator::new(
+        LOCAL,
+        REMOTE,
+        &SrtConfig::default(),
+        Duration::from_millis(50),
+    );
 
     // Standard listener — no allow_skip_induction.
     let mut listen = Listen::new(listen_settings(), false);
@@ -139,12 +147,14 @@ fn rtt_seeding_flows_into_initiator() {
     // the gateway-side constructor accepts and stores it.
     let now = Instant::now();
     let initial_rtt = Duration::from_millis(137);
-    let mut initiator =
-        SrtInitiator::new(LOCAL, REMOTE, &SrtConfig::default(), initial_rtt);
+    let mut initiator = SrtInitiator::new(LOCAL, REMOTE, &SrtConfig::default(), initial_rtt);
 
     let mut listen = Listen::new(listen_settings(), false);
     listen.allow_skip_induction(true);
 
     let packets = drive_handshake(&mut listen, &mut initiator, now);
-    assert_eq!(packets, 2, "RTT seeding must not affect handshake packet count");
+    assert_eq!(
+        packets, 2,
+        "RTT seeding must not affect handshake packet count"
+    );
 }

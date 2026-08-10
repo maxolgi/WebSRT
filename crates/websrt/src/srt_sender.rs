@@ -92,16 +92,10 @@ impl SrtConfig {
             );
         }
         if self.send_latency < std::time::Duration::from_millis(1) {
-            anyhow::bail!(
-                "send_latency must be >= 1ms, got {:?}",
-                self.send_latency
-            );
+            anyhow::bail!("send_latency must be >= 1ms, got {:?}", self.send_latency);
         }
         if self.recv_latency < std::time::Duration::from_millis(1) {
-            anyhow::bail!(
-                "recv_latency must be >= 1ms, got {:?}",
-                self.recv_latency
-            );
+            anyhow::bail!("recv_latency must be >= 1ms, got {:?}", self.recv_latency);
         }
         Ok(())
     }
@@ -189,7 +183,9 @@ impl SrtInitiator {
                     Action::Close => {
                         out.push(SenderAction::Close);
                     }
-                    Action::UpdateStatistics(s) => { new_stats = Some(s.clone()); }
+                    Action::UpdateStatistics(s) => {
+                        new_stats = Some(s.clone());
+                    }
                     Action::WaitForData(_) => {}
                     Action::ReleaseData((ts, bytes)) => {
                         data.push((ts, bytes));
@@ -199,7 +195,9 @@ impl SrtInitiator {
             }
             InitiatorState::Closed => {}
         }
-        if new_stats.is_some() { self.last_stats = new_stats; }
+        if new_stats.is_some() {
+            self.last_stats = new_stats;
+        }
         (out, data)
     }
 
@@ -233,7 +231,9 @@ impl SrtInitiator {
             }
             InitiatorState::Closed => {}
         }
-        if new_stats.is_some() { self.last_stats = new_stats; }
+        if new_stats.is_some() {
+            self.last_stats = new_stats;
+        }
         (out, data)
     }
 
@@ -260,7 +260,9 @@ impl SrtInitiator {
             duplex.handle_data_input(now, Some((now, bytes)));
             drain(duplex, now, &mut out, &mut data, &mut new_stats);
         }
-        if new_stats.is_some() { self.last_stats = new_stats; }
+        if new_stats.is_some() {
+            self.last_stats = new_stats;
+        }
         (out, data)
     }
 

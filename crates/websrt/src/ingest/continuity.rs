@@ -115,12 +115,18 @@ impl<I> TsContinuityChecker<I> {
                     if self.warned_pids.insert(pid) {
                         tracing::warn!(
                             "ingester TS CC gap: PID 0x{:x} expected {} got {} (total gaps: {})",
-                            pid, expected, cc, total
+                            pid,
+                            expected,
+                            cc,
+                            total
                         );
                     } else {
                         tracing::debug!(
                             "ingester TS CC gap: PID 0x{:x} expected {} got {} (total gaps: {})",
-                            pid, expected, cc, total
+                            pid,
+                            expected,
+                            cc,
+                            total
                         );
                     }
                 }

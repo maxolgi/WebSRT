@@ -136,7 +136,10 @@ mod tests {
 
         // Leaf DER must round-trip byte-for-byte.
         let parsed_leaf = &cert.identity.certificate_chain().as_slice()[0];
-        assert_eq!(parsed_leaf.der(), src.certificate_chain().as_slice()[0].der());
+        assert_eq!(
+            parsed_leaf.der(),
+            src.certificate_chain().as_slice()[0].der()
+        );
     }
 
     #[tokio::test]

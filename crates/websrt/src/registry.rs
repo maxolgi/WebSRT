@@ -20,12 +20,12 @@ use crate::broadcaster::ViewerRx;
 use crate::ingest::TsMessage;
 use crate::session::{route_release_data, send_action, LossInjector};
 use crate::srt_sender::SrtInitiator;
+use parking_lot::{Mutex as StdMutex, RwLock};
 use srt_protocol::statistics::SocketStatistics;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use parking_lot::{Mutex as StdMutex, RwLock};
 use tokio::sync::{Mutex, Notify};
 use wtransport::Connection;
 
@@ -122,23 +122,27 @@ impl SessionRegistry {
                 messages_pushed: e.messages_pushed.load(Ordering::Relaxed),
                 viewer_lag_count: e.viewer_lag_count.load(Ordering::Relaxed),
                 publish_dropped: e.publish_dropped.load(Ordering::Relaxed),
-                srt: e.last_srt_stats.lock().as_ref().map(|s| {
-                    crate::gateway::SrtStatsSnapshot {
+                srt: e
+                    .last_srt_stats
+                    .lock()
+                    .as_ref()
+                    .map(|s| crate::gateway::SrtStatsSnapshot {
                         tx_data: s.tx_data,
                         tx_retransmit: s.tx_retransmit_data,
                         tx_loss: s.tx_loss_data,
                         tx_buffered: s.tx_buffered_data,
                         rx_rtt: Some(s.rx_average_rtt),
                         tx_rtt: Some(s.tx_average_rtt),
-                    }
-                }),
+                    }),
             })
             .collect()
     }
 
     /// Number of active (non-finished) sessions.
     pub(crate) fn active_session_count(&self) -> usize {
-        self.entries.read().values()
+        self.entries
+            .read()
+            .values()
             .filter(|e| !e.finished.load(Ordering::Relaxed))
             .count()
     }
@@ -152,8 +156,12 @@ impl SessionRegistry {
 
         let should_log_stats = {
             let mut last = self.last_stats_log.lock();
-            let should = last.map(|t| now.duration_since(t) >= Duration::from_secs(5)).unwrap_or(true);
-            if should { *last = Some(now); }
+            let should = last
+                .map(|t| now.duration_since(t) >= Duration::from_secs(5))
+                .unwrap_or(true);
+            if should {
+                *last = Some(now);
+            }
             should
         };
 
@@ -225,7 +233,9 @@ impl SessionRegistry {
 
         if should_log_stats {
             for entry in &entries {
-                if entry.finished.load(Ordering::Relaxed) { continue; }
+                if entry.finished.load(Ordering::Relaxed) {
+                    continue;
+                }
                 let guard = entry.last_srt_stats.lock();
                 if let Some(s) = guard.as_ref() {
                     tracing::info!(
@@ -294,11 +304,7 @@ mod tests {
     /// Accept a single client connection on `server`. Returns the server-side
     /// `Connection`. The client side is established and then dropped — registry
     /// tests don't depend on the client staying alive.
-    async fn accept_one_conn(
-        server: &ServerEndpoint,
-        hash: [u8; 32],
-        port: u16,
-    ) -> Connection {
+    async fn accept_one_conn(server: &ServerEndpoint, hash: [u8; 32], port: u16) -> Connection {
         let client_config = ClientConfig::builder()
             .with_bind_default()
             .with_server_certificate_hashes([Sha256Digest::new(hash)])

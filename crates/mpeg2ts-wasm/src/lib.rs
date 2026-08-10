@@ -200,27 +200,49 @@ pub struct TsEvent {
 impl TsEvent {
     /// 0 = pat, 1 = pmt, 2 = pes, 3 = random_access, 4 = error
     #[wasm_bindgen(getter)]
-    pub fn kind(&self) -> u8 { self.kind }
+    pub fn kind(&self) -> u8 {
+        self.kind
+    }
     #[wasm_bindgen(getter)]
-    pub fn pid(&self) -> u16 { self.pid }
+    pub fn pid(&self) -> u16 {
+        self.pid
+    }
     #[wasm_bindgen(getter)]
     pub fn pts(&self) -> f64 {
-        if self.pts < 0 { -1.0 } else { self.pts as f64 }
+        if self.pts < 0 {
+            -1.0
+        } else {
+            self.pts as f64
+        }
     }
     #[wasm_bindgen(getter)]
     pub fn dts(&self) -> f64 {
-        if self.dts < 0 { -1.0 } else { self.dts as f64 }
+        if self.dts < 0 {
+            -1.0
+        } else {
+            self.dts as f64
+        }
     }
     #[wasm_bindgen(getter)]
-    pub fn stream_type(&self) -> u8 { self.stream_type }
+    pub fn stream_type(&self) -> u8 {
+        self.stream_type
+    }
     #[wasm_bindgen(getter)]
-    pub fn data(&self) -> Vec<u8> { self.data.clone() }
+    pub fn data(&self) -> Vec<u8> {
+        self.data.clone()
+    }
     #[wasm_bindgen(getter)]
-    pub fn text(&self) -> String { self.text.clone() }
+    pub fn text(&self) -> String {
+        self.text.clone()
+    }
     #[wasm_bindgen(getter)]
-    pub fn program_num(&self) -> u16 { self.program_num }
+    pub fn program_num(&self) -> u16 {
+        self.program_num
+    }
     #[wasm_bindgen(getter, js_name = randomAccess)]
-    pub fn random_access_get(&self) -> bool { self.random_access }
+    pub fn random_access_get(&self) -> bool {
+        self.random_access
+    }
 
     /// For PMT events: flat array of [pid0, stream_type0, pid1, stream_type1, ...].
     #[wasm_bindgen(js_name = pmtEntries)]
@@ -259,10 +281,18 @@ impl TsEvent {
 impl TsEvent {
     fn pat(program_num: u16, pmt_pid: u16) -> Self {
         Self {
-            kind: 0, pid: pmt_pid, pts: -1, dts: -1, stream_type: 0,
-            data: Vec::new(), text: String::new(),
-            program_num, random_access: false, pmt_format_ids: Vec::new(),
-            nal_offsets: Vec::new(), nal_types: Vec::new(),
+            kind: 0,
+            pid: pmt_pid,
+            pts: -1,
+            dts: -1,
+            stream_type: 0,
+            data: Vec::new(),
+            text: String::new(),
+            program_num,
+            random_access: false,
+            pmt_format_ids: Vec::new(),
+            nal_offsets: Vec::new(),
+            nal_types: Vec::new(),
         }
     }
     fn pmt(entries: &[(Pid, StreamType)], format_ids: &[String]) -> Self {
@@ -272,11 +302,18 @@ impl TsEvent {
             data.extend_from_slice(&(st.clone() as u16).to_le_bytes());
         }
         Self {
-            kind: 1, pid: 0, pts: -1, dts: -1, stream_type: 0,
-            data, text: String::new(),
-            program_num: 0, random_access: false,
+            kind: 1,
+            pid: 0,
+            pts: -1,
+            dts: -1,
+            stream_type: 0,
+            data,
+            text: String::new(),
+            program_num: 0,
+            random_access: false,
             pmt_format_ids: format_ids.to_vec(),
-            nal_offsets: Vec::new(), nal_types: Vec::new(),
+            nal_offsets: Vec::new(),
+            nal_types: Vec::new(),
         }
     }
     fn pes(
@@ -290,26 +327,50 @@ impl TsEvent {
         let pts = header.pts.map(|t| t.as_u64() as i64).unwrap_or(-1);
         let dts = header.dts.map(|t| t.as_u64() as i64).unwrap_or(-1);
         Self {
-            kind: 2, pid: pid.as_u16(), pts, dts, stream_type: 0,
-            data: payload, text: String::new(),
-            program_num: 0, random_access, pmt_format_ids: Vec::new(),
-            nal_offsets, nal_types,
+            kind: 2,
+            pid: pid.as_u16(),
+            pts,
+            dts,
+            stream_type: 0,
+            data: payload,
+            text: String::new(),
+            program_num: 0,
+            random_access,
+            pmt_format_ids: Vec::new(),
+            nal_offsets,
+            nal_types,
         }
     }
     fn random_access(pid: Pid) -> Self {
         Self {
-            kind: 3, pid: pid.as_u16(), pts: -1, dts: -1, stream_type: 0,
-            data: Vec::new(), text: String::new(),
-            program_num: 0, random_access: true, pmt_format_ids: Vec::new(),
-            nal_offsets: Vec::new(), nal_types: Vec::new(),
+            kind: 3,
+            pid: pid.as_u16(),
+            pts: -1,
+            dts: -1,
+            stream_type: 0,
+            data: Vec::new(),
+            text: String::new(),
+            program_num: 0,
+            random_access: true,
+            pmt_format_ids: Vec::new(),
+            nal_offsets: Vec::new(),
+            nal_types: Vec::new(),
         }
     }
     fn error(s: impl Into<String>) -> Self {
         Self {
-            kind: 4, pid: 0, pts: -1, dts: -1, stream_type: 0,
-            data: Vec::new(), text: s.into(),
-            program_num: 0, random_access: false, pmt_format_ids: Vec::new(),
-            nal_offsets: Vec::new(), nal_types: Vec::new(),
+            kind: 4,
+            pid: 0,
+            pts: -1,
+            dts: -1,
+            stream_type: 0,
+            data: Vec::new(),
+            text: s.into(),
+            program_num: 0,
+            random_access: false,
+            pmt_format_ids: Vec::new(),
+            nal_offsets: Vec::new(),
+            nal_types: Vec::new(),
         }
     }
 }
@@ -541,9 +602,7 @@ impl TsDemuxer {
                 entry.pps = entry.pps.saturating_add(nstats.pps);
                 entry.sei = entry.sei.saturating_add(nstats.sei);
                 entry.idr = entry.idr.saturating_add(nstats.idr);
-                entry.non_idr_slice = entry
-                    .non_idr_slice
-                    .saturating_add(nstats.non_idr_slice);
+                entry.non_idr_slice = entry.non_idr_slice.saturating_add(nstats.non_idr_slice);
                 entry.i_slices = entry.i_slices.saturating_add(nstats.i_slices);
                 entry.p_slices = entry.p_slices.saturating_add(nstats.p_slices);
                 entry.b_slices = entry.b_slices.saturating_add(nstats.b_slices);
@@ -1087,16 +1146,21 @@ impl TsDemuxer {
         let mut af_control_counts = Vec::with_capacity(pids.len() * 4);
 
         for &pid in &pids {
-            let s = self
-                .pid_stats
-                .get(&pid)
-                .expect("pid present from keys()");
+            let s = self.pid_stats.get(&pid).expect("pid present from keys()");
             pes_counts.push(s.pes_count as f64);
             byte_totals.push(s.bytes_total as f64);
             bitrates_mbps.push(Self::bitrate_mbps(s));
             ra_counts.push(s.ra_count as f64);
-            last_pts.push(if s.last_pts < 0 { -1.0 } else { s.last_pts as f64 });
-            last_dts.push(if s.last_dts < 0 { -1.0 } else { s.last_dts as f64 });
+            last_pts.push(if s.last_pts < 0 {
+                -1.0
+            } else {
+                s.last_pts as f64
+            });
+            last_dts.push(if s.last_dts < 0 {
+                -1.0
+            } else {
+                s.last_dts as f64
+            });
             pts_jumps.push(s.pts_jumps as f64);
             cc_errors.push(s.cc_errors as f64);
             tei_counts.push(s.tei_count as f64);
