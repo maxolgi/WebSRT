@@ -134,7 +134,7 @@ jobs:
         run: strip target/release/${{ matrix.binary }}
 
       - name: Upload gateway binary
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: target/release/${{ matrix.binary }}
@@ -143,7 +143,7 @@ jobs:
       # web/dist is platform-agnostic — upload once from Linux only
       - name: Upload web/dist
         if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: websrt-web-dist
           path: web/dist/
@@ -160,7 +160,7 @@ jobs:
 
       - name: Upload .deb
         if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: websrt-gateway-deb
           path: target/debian/*.deb
