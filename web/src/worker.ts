@@ -42,6 +42,7 @@ export type WorkerMsg =
   | { type: 'pmt'; videoPid: number; audioPid: number; audioStreamType: number; videoCodec: 'av1' | 'h264' | 'hevc' | null }
   | { type: 'videoPes'; data: Uint8Array; pts: number | null; dts: number | null; isKeyframe: boolean; nalOffsets: Uint32Array; nalTypes: Uint8Array }
   | { type: 'audioPes'; data: Uint8Array; pts: number | null }
+  | { type: 'pcm'; pid: number; channelCount: number; samples: Float32Array; pts: number | null }
   | { type: 'videoFrame'; frame: VideoFrame }
   | { type: 'audioData'; data: AudioData }
   | { type: 'wtReady' }
@@ -138,6 +139,9 @@ function flushOutgoing() {
       m.data?.buffer instanceof ArrayBuffer
     ) {
       transfer.push(m.data.buffer);
+    }
+    if (m.type === 'pcm' && m.samples?.buffer instanceof ArrayBuffer) {
+      transfer.push(m.samples.buffer);
     }
     if (m.type === 'videoPes') {
       if (m.nalOffsets?.buffer instanceof ArrayBuffer) transfer.push(m.nalOffsets.buffer);
@@ -239,6 +243,9 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
             queue({ type: 'audioPes', data: bytes, pts });
           }
         }
+      },
+      onPcm: (pid, pts, channelCount, samples) => {
+        queue({ type: 'pcm', pid, channelCount, samples, pts });
       },
       onError: (msg_) => queue({ type: 'log', msg: `demux err: ${msg_}`, cls: 'err' }),
     });

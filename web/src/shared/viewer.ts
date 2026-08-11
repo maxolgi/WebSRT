@@ -5,6 +5,7 @@
 // internal hook surface.
 
 import { VideoPipeline, OpusAudioPipeline, AacAudioPipeline } from '../decode';
+import { PcmPlayer } from '../pcm-player';
 import { CanvasRenderer } from '../render';
 import type { WorkerMsg, StatsMsg, DemuxStatsMsg } from '../worker';
 
@@ -140,6 +141,7 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
   let worker: Worker | null = null;
   let video: VideoPipeline | null = null;
   let audio: OpusAudioPipeline | AacAudioPipeline | null = null;
+  let pcmPlayer: PcmPlayer | null = null;
   let renderer: CanvasRenderer | null = null;
   let audioEl: HTMLAudioElement | null = null;
   let audioReady = false;
@@ -206,6 +208,8 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
     }
     video = null;
     audio = null;
+    pcmPlayer?.dispose();
+    pcmPlayer = null;
     renderer?.destroy();
     renderer = null;
     if (audioEl) { try { audioEl.pause(); } catch {} audioEl.srcObject = null; audioEl.remove(); }
@@ -416,6 +420,21 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
       case 'audioPes':
         audio?.feed(msg.data, msg.pts);
         break;
+      case 'pcm': {
+        if (!pcmPlayer) {
+          pcmPlayer = new PcmPlayer();
+          log(`PCM PID ${msg.pid}: ${msg.channelCount}ch SMPTE 302M (worklet init)`, 'info');
+        }
+        if (!pcmPlayer.ready) {
+          void pcmPlayer.init(msg.channelCount).then(() => {
+            void pcmPlayer?.resume();
+            pcmPlayer?.feed(msg.samples, msg.channelCount);
+          });
+        } else {
+          pcmPlayer.feed(msg.samples, msg.channelCount);
+        }
+        break;
+      }
       case 'wtReady':
         log('WT ready ✓', 'ok');
         setStatus('WT ready; awaiting SRT handshake');

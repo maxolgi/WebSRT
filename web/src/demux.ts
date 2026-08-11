@@ -13,6 +13,7 @@ export interface DemuxCallbacks {
   onPat?: (programNum: number, pmtPid: number) => void;
   onPmt?: (entries: { pid: number; streamType: number; formatId: string | null }[]) => void;
   onPes?: (pid: number, pts: number | null, dts: number | null, bytes: Uint8Array, randomAccess: boolean, nalOffsets: Uint32Array, nalTypes: Uint8Array) => void;
+  onPcm?: (pid: number, pts: number | null, channelCount: number, samples: Float32Array) => void;
   onRandomAccess?: (pid: number) => void;
   onError?: (msg: string) => void;
 }
@@ -87,6 +88,14 @@ export class Demuxer {
         break;
       case 4: // error
         this.cb.onError?.(e.text);
+        break;
+      case 5: // pcm (SMPTE 302M decoded samples)
+        this.cb.onPcm?.(
+          e.pid,
+          e.pts < 0 ? null : e.pts,
+          e.program_num,
+          e.samples,
+        );
         break;
     }
   }
