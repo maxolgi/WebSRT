@@ -24,6 +24,9 @@ certs/*.key
 # runtime-generated cert hash (written by gateway on boot)
 web/public/cert-hash.js
 
+# runtime-generated gateway certs/keys (self-signed mode)
+.config/
+
 fixtures/*.ts
 
 # logs and tmp
