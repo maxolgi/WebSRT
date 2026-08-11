@@ -22,6 +22,7 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
 pub mod aes3;
+pub mod meter;
 mod nal;
 
 const TS_PACKET_SIZE: usize = 188;
@@ -445,6 +446,9 @@ pub struct TsDemuxer {
     recent_errors: VecDeque<(f64, String)>,
     packet_ring: VecDeque<PacketEntry>,
 
+    // Audio metering (SMPTE 302M per-PID peak/RMS/LUFS/phase/FFT).
+    meter_state: meter::MeterState,
+
     // Clock anchor for t_ms in rings (ms since TsDemux construction).
     start_time: web_time::Instant,
 }
@@ -469,6 +473,7 @@ impl TsDemuxer {
             last_cc: HashMap::new(),
             recent_errors: VecDeque::new(),
             packet_ring: VecDeque::new(),
+            meter_state: meter::MeterState::default(),
             start_time: web_time::Instant::now(),
         }
     }
@@ -666,6 +671,8 @@ impl TsDemuxer {
                 let channel_count = aes3::s302m_info_from_header(payload)
                     .map(|i| i.channel_count)
                     .unwrap_or(2);
+                self.meter_state
+                    .update(pid_u16, &samples, channel_count, pts);
                 events.push(TsEvent::pcm(pid, pts, channel_count, samples));
             }
         }
@@ -1174,6 +1181,74 @@ impl TsDemuxer {
 }
 
 #[wasm_bindgen]
+pub struct MeterSnapshotView {
+    pids: Vec<u16>,
+    channel_counts: Vec<u8>,
+    peaks: Vec<f32>,
+    rms: Vec<f32>,
+    clips: Vec<u32>,
+    lufs: Vec<f32>,
+    phase: Vec<f32>,
+    scope_l: Vec<f32>,
+    scope_r: Vec<f32>,
+    spectrum: Vec<f32>,
+    selected_pid: u16,
+    selected_channel: u8,
+}
+
+#[wasm_bindgen]
+impl MeterSnapshotView {
+    #[wasm_bindgen(getter, js_name = pids)]
+    pub fn pids(&self) -> Vec<u16> {
+        self.pids.clone()
+    }
+    #[wasm_bindgen(getter, js_name = channelCounts)]
+    pub fn channel_counts(&self) -> Vec<u8> {
+        self.channel_counts.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn peaks(&self) -> Vec<f32> {
+        self.peaks.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn rms(&self) -> Vec<f32> {
+        self.rms.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn clips(&self) -> Vec<u32> {
+        self.clips.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn lufs(&self) -> Vec<f32> {
+        self.lufs.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn phase(&self) -> Vec<f32> {
+        self.phase.clone()
+    }
+    #[wasm_bindgen(getter, js_name = scopeL)]
+    pub fn scope_l(&self) -> Vec<f32> {
+        self.scope_l.clone()
+    }
+    #[wasm_bindgen(getter, js_name = scopeR)]
+    pub fn scope_r(&self) -> Vec<f32> {
+        self.scope_r.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn spectrum(&self) -> Vec<f32> {
+        self.spectrum.clone()
+    }
+    #[wasm_bindgen(getter, js_name = selectedPid)]
+    pub fn selected_pid(&self) -> u16 {
+        self.selected_pid
+    }
+    #[wasm_bindgen(getter, js_name = selectedChannel)]
+    pub fn selected_channel(&self) -> u8 {
+        self.selected_channel
+    }
+}
+
+#[wasm_bindgen]
 impl TsDemuxer {
     /// Snapshot the full analysis state for the debug panel. Owned by JS —
     /// cheap to call every ~250ms. Iteration order is by ascending PID so the
@@ -1330,5 +1405,29 @@ impl TsDemuxer {
             ring_nal,
             ring_nal_offsets,
         }
+    }
+
+    pub fn meter_snapshot(&mut self) -> MeterSnapshotView {
+        let s = self.meter_state.snapshot();
+        MeterSnapshotView {
+            pids: s.pids,
+            channel_counts: s.channel_counts,
+            peaks: s.peaks,
+            rms: s.rms,
+            clips: s.clips,
+            lufs: s.lufs,
+            phase: s.phase,
+            scope_l: s.scope_l,
+            scope_r: s.scope_r,
+            spectrum: s.spectrum,
+            selected_pid: s.selected_pid,
+            selected_channel: s.selected_channel,
+        }
+    }
+
+    #[wasm_bindgen(js_name = setMeterSelection)]
+    pub fn set_meter_selection(&mut self, pid: u16, channel: u8) {
+        self.meter_state.selected_pid = pid;
+        self.meter_state.selected_channel = channel;
     }
 }

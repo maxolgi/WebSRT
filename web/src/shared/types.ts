@@ -32,18 +32,17 @@ export interface AudioStats {
 }
 
 export interface AudioMeterData {
-  peaks: Float32Array;
-  rms: Float32Array;
-  clips: Uint32Array;
-  bufferFill: number;
-  underruns: number;
-  channelCount: number;
-  sampleRate: number;
-  lufs: Float32Array;
-  phase: Float32Array;
-  scopeL: Float32Array;
-  scopeR: Float32Array;
-  spectrum: Float32Array;
+  pids: number[];
+  channelCounts: number[];
+  peaks: number[];
+  rms: number[];
+  clips: number[];
+  lufs: number[];
+  phase: number[];
+  scopeL: number[];
+  scopeR: number[];
+  spectrum: number[];
+  selectedPid: number;
   selectedChannel: number;
 }
 

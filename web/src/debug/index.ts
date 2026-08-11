@@ -98,6 +98,16 @@ export function mountDebug(
     handle.addEventListener('stats', onceWorkerReady);
   }
 
+  const onAudioChannel = (e: Event): void => {
+    const ch = (e as CustomEvent).detail as number;
+    const w = handle.getWorker();
+    const meter = store.audioMeter.value;
+    if (w && meter) {
+      w.postMessage({ cmd: 'meter-select', pid: meter.selectedPid, channel: ch });
+    }
+  };
+  window.addEventListener('websrt:audio-select-channel', onAudioChannel);
+
   let destroyed = false;
   return {
     destroy(): void {
@@ -110,6 +120,7 @@ export function mountDebug(
       handle.removeEventListener('drift', onDrift);
       handle.removeEventListener('error', onError);
       handle.removeEventListener('stats', onceWorkerReady);
+      window.removeEventListener('websrt:audio-select-channel', onAudioChannel);
       handle.getWorker()?.postMessage({ cmd: 'debug-rate', ms: 1000 });
       render(null, container);
     },

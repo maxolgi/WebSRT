@@ -51,6 +51,30 @@ export class Demuxer {
     return this.demux.debugSnapshot();
   }
 
+  meterSnapshot(): any {
+    const s = this.demux.meter_snapshot();
+    const view = {
+      pids: Array.from(s.pids),
+      channelCounts: Array.from(s.channelCounts),
+      peaks: Array.from(s.peaks),
+      rms: Array.from(s.rms),
+      clips: Array.from(s.clips),
+      lufs: Array.from(s.lufs),
+      phase: Array.from(s.phase),
+      scopeL: Array.from(s.scopeL),
+      scopeR: Array.from(s.scopeR),
+      spectrum: Array.from(s.spectrum),
+      selectedPid: s.selectedPid,
+      selectedChannel: s.selectedChannel,
+    };
+    s.free();
+    return view;
+  }
+
+  setMeterSelection(pid: number, channel: number): void {
+    this.demux.setMeterSelection(pid, channel);
+  }
+
   private dispatch(e: TsEvent) {
     switch (e.kind) {
       case 0: // pat

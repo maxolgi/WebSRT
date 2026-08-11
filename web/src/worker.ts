@@ -1,7 +1,7 @@
 import init, { SrtReceiver, type SrtAction, type SrtStats } from '../wasm/srt-wasm/srt_wasm.js';
 import { Demuxer } from './demux';
 import { looksLikeAv1 } from './shared/av1';
-import type { DemuxStats, VideoStats, AudioStats } from './shared/types';
+import type { DemuxStats, VideoStats, AudioStats, AudioMeterData } from './shared/types';
 import { summarizePmt, ST_PRIVATE, type PmtEntry } from './shared/pmt';
 import { VideoPipeline, OpusAudioPipeline, AacAudioPipeline } from './decode';
 
@@ -34,7 +34,8 @@ export type WorkerCmd =
   | { cmd: 'init'; url: string; certHash: Uint8Array | null; latencyMs: number; decodeInWorker?: boolean }
   | { cmd: 'visibility'; visible: boolean }
   | { cmd: 'stop' }
-  | { cmd: 'debug-rate'; ms: number };
+  | { cmd: 'debug-rate'; ms: number }
+  | { cmd: 'meter-select'; pid: number; channel: number };
 
 export type WorkerMsg =
   | { type: 'log'; msg: string; cls?: string }
@@ -43,6 +44,7 @@ export type WorkerMsg =
   | { type: 'videoPes'; data: Uint8Array; pts: number | null; dts: number | null; isKeyframe: boolean; nalOffsets: Uint32Array; nalTypes: Uint8Array }
   | { type: 'audioPes'; data: Uint8Array; pts: number | null }
   | { type: 'pcm'; pid: number; channelCount: number; samples: Float32Array; pts: number | null }
+  | { type: 'meter'; meter: AudioMeterData }
   | { type: 'videoFrame'; frame: VideoFrame }
   | { type: 'audioData'; data: AudioData }
   | { type: 'wtReady' }
@@ -64,6 +66,7 @@ let pollMaxMs = 0;
 let prevRxLoss = 0;
 let prevRxDropped = 0;
 let statsTimer: ReturnType<typeof setInterval> | null = null;
+let meterTimer: ReturnType<typeof setInterval> | null = null;
 let videoPid: number | null = null;
 let videoCodecResolved: 'av1' | 'h264' | 'hevc' | null = null;
 let audioPid: number | null = null;
@@ -105,6 +108,7 @@ self.onmessage = async (e: MessageEvent) => {
       break;
     case 'debug-rate': {
       if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+      if (meterTimer) { clearInterval(meterTimer); meterTimer = null; }
       const rate = Math.max(100, cmd.ms);
       if (rx && inited) {
         statsTimer = setInterval(() => {
@@ -119,7 +123,19 @@ self.onmessage = async (e: MessageEvent) => {
           queue({ type: 'stats', stats: statsMsg, demux: getDemuxStats() });
           flushOutgoing();
         }, rate);
+        meterTimer = setInterval(() => {
+          if (!demux || !inited) return;
+          const meter = demux.meterSnapshot();
+          if (meter) {
+            queue({ type: 'meter', meter });
+            flushOutgoing();
+          }
+        }, 50);
       }
+      break;
+    }
+    case 'meter-select': {
+      demux?.setMeterSelection(cmd.pid, cmd.channel);
       break;
     }
   }
