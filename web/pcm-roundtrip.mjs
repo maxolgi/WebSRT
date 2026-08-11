@@ -90,6 +90,33 @@ function sineSamples(n) {
   return out;
 }
 
+// Feed raw TS bytes through a fresh TsDemuxer and return every emitted event.
+// Used by the sparse-mode tests, which drive the muxer directly.
+function demuxTs(tsBytes) {
+  const demux = new mpeg2ts.TsDemuxer();
+  const events = [];
+  for (let i = 0; i < tsBytes.length; i += TS_PACKET_SIZE) {
+    const slice = tsBytes.subarray(i, Math.min(i + TS_PACKET_SIZE, tsBytes.length));
+    const batch = demux.feed(slice);
+    for (const e of batch) events.push(e);
+  }
+  return events;
+}
+
+// Extract just the PID values from a PMT event (every other entry is a
+// stream_type). pmtEntries() → flat [pid0, stream_type0, pid1, stream_type1, ...].
+function pmtPids(pmtEvent) {
+  const entries = pmtEvent.pmtEntries();
+  const pids = [];
+  for (let i = 0; i + 1 < entries.length; i += 2) pids.push(entries[i]);
+  return pids;
+}
+
+// Format a PID list for log/diagnostic output.
+function fmtPids(pids) {
+  return pids.length ? pids.map((p) => '0x' + p.toString(16)).join(', ') : 'none';
+}
+
 // Test 1: Stereo s302m round-trip.
 {
   const samples = sineSamples(480);
@@ -246,4 +273,180 @@ function sineSamples(n) {
   console.log('Test 4 bit-depth fidelity: PASS');
 }
 
-console.log('\nAll PCM round-trip tests passed.');
+// ---------------------------------------------------------------------------
+// Sparse-channel transport tests.
+//
+// The muxer exposes optional sparse-mode knobs (setSparseEnabled /
+// setSparseThreshold) implemented by ts-muxer-wasm. When sparse is on, an
+// audio PID that stays silent past the threshold is dropped from both the PES
+// stream and the PMT; the first non-zero push revives it immediately.
+//
+// The WASM is rebuilt separately from this script, so we detect the API at
+// runtime. If sparse isn't present in the build, these tests SKIP (not fail)
+// to keep the suite green on stale builds; once the API lands they run for
+// real and hard-fail on regression like the tests above.
+const SPARSE_AVAILABLE =
+  typeof muxerMod.TsMuxer.prototype.setSparseEnabled === 'function' &&
+  typeof muxerMod.TsMuxer.prototype.setSparseThreshold === 'function';
+
+// 10ms of audio per frame at 48kHz: the unit the muxer timestamps against.
+const SILENT_FRAME = new Float32Array(480);
+const SPARSE_THRESHOLD_MS = 10;
+const SILENT_FRAMES = 20; // 200ms of silence — well past the 10ms threshold.
+
+// Tests 5 & 6 share one muxer: Test 5 suppresses PID 0x101 with sustained
+// silence, Test 6 revives it with non-zero audio on the same muxer.
+{
+  if (!SPARSE_AVAILABLE) {
+    console.log('Test 5 sparse drops silent PID: SKIP (sparse API not in WASM build)');
+    console.log('Test 6 sparse re-adds on signal: SKIP (sparse API not in WASM build)');
+  } else {
+    const m = new muxerMod.TsMuxer();
+    m.setVideoEnabled(false);
+    m.setAudioCodec('s302m', 2);
+    m.setSparseEnabled(true);
+    m.setSparseThreshold(SPARSE_THRESHOLD_MS);
+
+    // --- Test 5: ~200ms of all-zero frames should drop 0x101 from the PMT. ---
+    for (let i = 0; i < SILENT_FRAMES; i++) {
+      m.push_pcm(SILENT_FRAME, i * (SPARSE_THRESHOLD_MS * 1000.0));
+    }
+    let events = demuxTs(m.poll());
+    let pmtEvents = events.filter((e) => e.kind === KIND_PMT);
+    if (pmtEvents.length === 0) {
+      console.error('FAIL: Test 5 sparse drops silent PID: no PMT events emitted');
+      process.exit(1);
+    }
+    let lastPids = pmtPids(pmtEvents[pmtEvents.length - 1]);
+    if (lastPids.includes(0x101)) {
+      console.error(
+        `FAIL: Test 5 sparse drops silent PID: 0x101 still in last PMT (pids: ${fmtPids(lastPids)})`
+      );
+      process.exit(1);
+    }
+    console.log(
+      `Test 5 sparse drops silent PID: 0x101 absent after ${SILENT_FRAMES} silent frames (last PMT pids: ${fmtPids(lastPids)})`
+    );
+    console.log('Test 5 sparse drops silent PID: PASS');
+
+    // --- Test 6: non-zero audio must re-add 0x101 to the PMT and emit PCM. ---
+    const signal = sineSamples(480);
+    const revivePtsUs = SILENT_FRAMES * (SPARSE_THRESHOLD_MS * 1000.0);
+    m.push_pcm(signal, revivePtsUs); // revives the PID
+    // Trailing non-zero frame: its PesStart flushes the revived PES so the
+    // demuxer emits a kind=5 PCM event (the demuxer only flushes on the next
+    // PesStart for the same PID).
+    m.push_pcm(signal, revivePtsUs + SPARSE_THRESHOLD_MS * 1000.0);
+    events = demuxTs(m.poll());
+    pmtEvents = events.filter((e) => e.kind === KIND_PMT);
+    if (pmtEvents.length === 0) {
+      console.error('FAIL: Test 6 sparse re-adds on signal: no PMT events after revive');
+      process.exit(1);
+    }
+    lastPids = pmtPids(pmtEvents[pmtEvents.length - 1]);
+    if (!lastPids.includes(0x101)) {
+      console.error(
+        `FAIL: Test 6 sparse re-adds on signal: 0x101 missing from PMT after non-zero audio (pids: ${fmtPids(lastPids)})`
+      );
+      process.exit(1);
+    }
+    const pcmEvents = events.filter((e) => e.kind === KIND_PCM && e.pid === 0x101);
+    if (pcmEvents.length === 0) {
+      console.error('FAIL: Test 6 sparse re-adds on signal: no PCM event for 0x101 after revive');
+      process.exit(1);
+    }
+    console.log(
+      `Test 6 sparse re-adds on signal: 0x101 back in PMT, ${pcmEvents.length} PCM event(s)`
+    );
+    console.log('Test 6 sparse re-adds on signal: PASS');
+  }
+}
+
+// Test 7: with sparse disabled, sustained silence must NOT drop the PID.
+{
+  if (!SPARSE_AVAILABLE) {
+    console.log('Test 7 sparse disabled keeps PID: SKIP (sparse API not in WASM build)');
+  } else {
+    const m = new muxerMod.TsMuxer();
+    m.setVideoEnabled(false);
+    m.setAudioCodec('s302m', 2);
+    m.setSparseEnabled(false); // explicitly off
+    for (let i = 0; i < SILENT_FRAMES; i++) {
+      m.push_pcm(SILENT_FRAME, i * (SPARSE_THRESHOLD_MS * 1000.0));
+    }
+    const events = demuxTs(m.poll());
+    const pmtEvents = events.filter((e) => e.kind === KIND_PMT);
+    if (pmtEvents.length === 0) {
+      console.error('FAIL: Test 7 sparse disabled keeps PID: no PMT events emitted');
+      process.exit(1);
+    }
+    const pids = pmtPids(pmtEvents[pmtEvents.length - 1]);
+    if (!pids.includes(0x101)) {
+      console.error(
+        `FAIL: Test 7 sparse disabled keeps PID: 0x101 dropped despite sparse disabled (pids: ${fmtPids(pids)})`
+      );
+      process.exit(1);
+    }
+    console.log(
+      `Test 7 sparse disabled keeps PID: 0x101 retained while silent (pids: ${fmtPids(pids)})`
+    );
+    console.log('Test 7 sparse disabled keeps PID: PASS');
+  }
+}
+
+// Test 8: sparse PMT reflects only active PIDs (multi-PID muxer).
+//
+// push_pcm only feeds the first SMPTE 302M stream (PID 0x101), so PID 0x102
+// never receives data. We only assert on 0x101's behavior (dropped after
+// silence); 0x102's presence is logged but not asserted either way.
+{
+  if (!SPARSE_AVAILABLE) {
+    console.log('Test 8 sparse PMT active PIDs: SKIP (sparse API not in WASM build)');
+  } else {
+    const m = new muxerMod.TsMuxer();
+    m.setVideoEnabled(false);
+    m.setAudioCodec('s302m', 2);
+    m.addAudioPid(0x102, 's302m', 2);
+    m.setSparseEnabled(true);
+    m.setSparseThreshold(SPARSE_THRESHOLD_MS);
+
+    // Prime 0x101 with non-zero audio (only PID 0x101 is reachable).
+    const signal = sineSamples(480);
+    const primeFrames = 3;
+    for (let i = 0; i < primeFrames; i++) {
+      m.push_pcm(signal, i * (SPARSE_THRESHOLD_MS * 1000.0));
+    }
+    // Then drive 0x101 silent long enough to trigger the sparse drop.
+    for (let i = 0; i < SILENT_FRAMES; i++) {
+      m.push_pcm(SILENT_FRAME, (primeFrames + i) * (SPARSE_THRESHOLD_MS * 1000.0));
+    }
+
+    const events = demuxTs(m.poll());
+    const pmtEvents = events.filter((e) => e.kind === KIND_PMT);
+    if (pmtEvents.length === 0) {
+      console.error('FAIL: Test 8 sparse PMT active PIDs: no PMT events emitted');
+      process.exit(1);
+    }
+    const finalPids = pmtPids(pmtEvents[pmtEvents.length - 1]);
+    const pid102Present = finalPids.includes(0x102);
+
+    // Core assertion: 0x101 must be gone after sustained silence.
+    if (finalPids.includes(0x101)) {
+      console.error(
+        `FAIL: Test 8 sparse PMT active PIDs: 0x101 still in PMT after silence (pids: ${fmtPids(finalPids)})`
+      );
+      process.exit(1);
+    }
+    console.log(
+      `Test 8 sparse PMT active PIDs: 0x101 dropped; 0x102 ${pid102Present ? 'present' : 'absent'} (never pushed to — informational); final PMT pids: ${fmtPids(finalPids)}`
+    );
+    console.log('Test 8 sparse PMT active PIDs: PASS');
+  }
+}
+
+if (SPARSE_AVAILABLE) {
+  console.log('\nAll PCM round-trip + sparse-channel transport tests passed.');
+} else {
+  console.log('\nAll PCM round-trip tests passed.');
+  console.log('Sparse-channel transport tests skipped (rebuild ts-muxer-wasm to enable).');
+}

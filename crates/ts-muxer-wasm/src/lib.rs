@@ -24,6 +24,9 @@ const S302M_DESCRIPTOR: &[u8] = &[0x05, 0x04, 0x42, 0x53, 0x53, 0x44];
 
 const SYNC_BYTE: u8 = 0x47;
 
+const SILENCE_THRESHOLD: f32 = 1e-6;
+const PMT_RESEND_COUNT: u32 = 10;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AudioKind {
     Opus,
@@ -36,6 +39,8 @@ struct AudioStream {
     cc: u8,
     kind: AudioKind,
     channel_count: u8,
+    silence_ms: f64,
+    suppressed: bool,
 }
 
 impl AudioStream {
@@ -67,6 +72,10 @@ pub struct TsMuxer {
     pcr: u64,
     output: Vec<u8>,
     pat_pmt_emitted: bool,
+    sparse_enabled: bool,
+    sparse_threshold_ms: f64,
+    pmt_dirty: bool,
+    pmt_resend_count: u32,
 }
 
 #[wasm_bindgen]
@@ -84,6 +93,8 @@ impl TsMuxer {
                 cc: 0,
                 kind: AudioKind::Opus,
                 channel_count: 2,
+                silence_ms: 0.0,
+                suppressed: false,
             }],
             pmt_pid: PMT_PID,
             pat_cc: 0,
@@ -91,6 +102,10 @@ impl TsMuxer {
             pcr: 0,
             output: Vec::new(),
             pat_pmt_emitted: false,
+            sparse_enabled: true,
+            sparse_threshold_ms: 300.0,
+            pmt_dirty: false,
+            pmt_resend_count: 0,
         }
     }
 
@@ -141,16 +156,30 @@ impl TsMuxer {
                 cc: 0,
                 kind,
                 channel_count,
+                silence_ms: 0.0,
+                suppressed: false,
             });
         }
+    }
+
+    #[wasm_bindgen(js_name = setSparseEnabled)]
+    pub fn set_sparse_enabled(&mut self, enabled: bool) {
+        self.sparse_enabled = enabled;
+    }
+
+    #[wasm_bindgen(js_name = setSparseThreshold)]
+    pub fn set_sparse_threshold(&mut self, ms: f64) {
+        self.sparse_threshold_ms = ms;
     }
 
     fn pcr_pid(&self) -> u16 {
         if self.video_enabled {
             self.video_pid
         } else {
+            let sparse = self.sparse_enabled;
             self.audio_streams
-                .first()
+                .iter()
+                .find(|s| !(sparse && s.suppressed))
                 .map(|s| s.pid)
                 .unwrap_or(DEFAULT_AUDIO_PID)
         }
@@ -222,8 +251,6 @@ impl TsMuxer {
             let stream = &self.audio_streams[idx];
             (stream.pid, stream.channel_count)
         };
-        let pcr_pid = self.pcr_pid();
-        let is_pcr = pid == pcr_pid;
 
         if !self.pat_pmt_emitted {
             self.write_pat();
@@ -231,6 +258,46 @@ impl TsMuxer {
             self.pat_pmt_emitted = true;
         }
 
+        if self.sparse_enabled {
+            let silent = is_silent(samples);
+            let frame_ms = (samples.len() / channel_count as usize) as f64 / 48.0;
+            let stream = &mut self.audio_streams[idx];
+            if silent {
+                stream.silence_ms += frame_ms;
+            } else {
+                stream.silence_ms = 0.0;
+            }
+
+            if stream.silence_ms > self.sparse_threshold_ms && !stream.suppressed {
+                stream.suppressed = true;
+                self.pmt_dirty = true;
+                self.pmt_resend_count = PMT_RESEND_COUNT;
+            } else if !silent && stream.suppressed {
+                stream.suppressed = false;
+                stream.cc = 0;
+                self.pmt_dirty = true;
+                self.pmt_resend_count = PMT_RESEND_COUNT;
+            }
+        }
+
+        if self.pmt_dirty {
+            self.write_pat();
+            self.write_pmt();
+            self.pmt_dirty = false;
+        }
+        if self.pmt_resend_count > 0 {
+            self.write_pat();
+            self.write_pmt();
+            self.pmt_resend_count -= 1;
+        }
+
+        let suppressed = self.audio_streams[idx].suppressed;
+        if self.sparse_enabled && suppressed {
+            return;
+        }
+
+        let pcr_pid = self.pcr_pid();
+        let is_pcr = pid == pcr_pid;
         let aes3_payload = aes3::wrap_smpte302m_pes(samples, channel_count, 24);
         let pes = build_pes_audio(&aes3_payload, pts_90k);
         let cc = &mut self.audio_streams[idx].cc;
@@ -283,9 +350,14 @@ impl TsMuxer {
                 &self.video_descriptor,
             ));
         }
-        let audio_descriptors: Vec<Vec<u8>> =
-            self.audio_streams.iter().map(|s| s.descriptor()).collect();
-        for (i, s) in self.audio_streams.iter().enumerate() {
+        let sparse = self.sparse_enabled;
+        let active_audio: Vec<&AudioStream> = self
+            .audio_streams
+            .iter()
+            .filter(|s| !(sparse && s.suppressed))
+            .collect();
+        let audio_descriptors: Vec<Vec<u8>> = active_audio.iter().map(|s| s.descriptor()).collect();
+        for (i, s) in active_audio.iter().enumerate() {
             entries.push((s.stream_type(), s.pid, &audio_descriptors[i]));
         }
 
@@ -483,6 +555,15 @@ fn us_to_90k(us: f64) -> u64 {
     (us.max(0.0) * 9.0 / 100.0) as u64
 }
 
+fn is_silent(samples: &[f32]) -> bool {
+    for &s in samples {
+        if s.abs() > SILENCE_THRESHOLD {
+            return false;
+        }
+    }
+    true
+}
+
 impl Default for TsMuxer {
     fn default() -> Self {
         Self::new()
@@ -651,5 +732,113 @@ mod tests {
         let af_flags = first_video_pusi_af_flags(&m.poll());
         assert_eq!(af_flags & 0x10, 0x10);
         assert_eq!(af_flags & 0x40, 0x40);
+    }
+
+    fn last_pmt_section(out: &[u8]) -> Vec<u8> {
+        let mut result: Option<Vec<u8>> = None;
+        for chunk in out.chunks(TS_PACKET_SIZE) {
+            let pid = ((chunk[1] as u16 & 0x1F) << 8) | chunk[2] as u16;
+            if pid == PMT_PID {
+                let sl = (((chunk[6] as u16 & 0x0F) << 8) | chunk[7] as u16) as usize;
+                result = Some(chunk[5..5 + 3 + sl].to_vec());
+            }
+        }
+        result.expect("no PMT found in output")
+    }
+
+    #[test]
+    fn sparse_drops_silent_pid_from_pmt() {
+        let mut m = TsMuxer::new();
+        m.set_video_enabled(false);
+        m.set_audio_codec("s302m", 2);
+        m.set_sparse_enabled(true);
+        m.set_sparse_threshold(10.0);
+
+        m.push_pcm(&[0.5_f32; 480], 0.0);
+        let out = m.poll();
+        let pmt = last_pmt_section(&out);
+        let entry = [0x06, 0xE1, 0x01];
+        assert!(
+            pmt.windows(3).any(|w| w == entry),
+            "PID 0x101 ES entry should be in PMT when audio is active"
+        );
+
+        for _ in 0..3 {
+            m.push_pcm(&[0.0_f32; 480], 0.0);
+        }
+        let out = m.poll();
+        let pmt = last_pmt_section(&out);
+        assert!(
+            !pmt.windows(3).any(|w| w == entry),
+            "PID 0x101 ES entry should be absent from PMT after sustained silence"
+        );
+    }
+
+    #[test]
+    fn sparse_readds_pid_on_signal() {
+        let mut m = TsMuxer::new();
+        m.set_video_enabled(false);
+        m.set_audio_codec("s302m", 2);
+        m.set_sparse_enabled(true);
+        m.set_sparse_threshold(10.0);
+
+        for _ in 0..3 {
+            m.push_pcm(&[0.0_f32; 480], 0.0);
+        }
+        m.poll();
+
+        m.push_pcm(&[0.5_f32; 480], 0.0);
+        let out = m.poll();
+        let pmt = last_pmt_section(&out);
+        let entry = [0x06, 0xE1, 0x01];
+        assert!(
+            pmt.windows(3).any(|w| w == entry),
+            "PID 0x101 ES entry should reappear in PMT when audio resumes"
+        );
+    }
+
+    #[test]
+    fn sparse_disabled_emits_all_pids() {
+        let mut m = TsMuxer::new();
+        m.set_video_enabled(false);
+        m.set_audio_codec("s302m", 2);
+        m.set_sparse_enabled(false);
+
+        for _ in 0..100 {
+            m.push_pcm(&[0.0_f32; 480], 0.0);
+        }
+        let out = m.poll();
+        let pmt = last_pmt_section(&out);
+        let entry = [0x06, 0xE1, 0x01];
+        assert!(
+            pmt.windows(3).any(|w| w == entry),
+            "PID 0x101 ES entry should remain in PMT when sparse is disabled"
+        );
+    }
+
+    #[test]
+    fn sparse_pmt_resend_after_change() {
+        let mut m = TsMuxer::new();
+        m.set_video_enabled(false);
+        m.set_audio_codec("s302m", 2);
+        m.set_sparse_enabled(true);
+        m.set_sparse_threshold(10.0);
+
+        let mut pmt_count = 0u32;
+        for _ in 0..15 {
+            m.push_pcm(&[0.0_f32; 480], 0.0);
+            let out = m.poll();
+            for chunk in out.chunks(TS_PACKET_SIZE) {
+                let pid = ((chunk[1] as u16 & 0x1F) << 8) | chunk[2] as u16;
+                if pid == PMT_PID {
+                    pmt_count += 1;
+                }
+            }
+        }
+        assert!(
+            pmt_count >= 10,
+            "expected multiple PMT re-emissions after suppression, got {}",
+            pmt_count
+        );
     }
 }
