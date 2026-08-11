@@ -181,7 +181,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v7
         with:
           path: artifacts
 
@@ -213,7 +213,7 @@ jobs:
             echo "make_latest=false"        >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: ${{ steps.meta.outputs.name }}
