@@ -21,6 +21,7 @@ use std::io::{self, Read};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
+mod aes3;
 mod nal;
 
 const TS_PACKET_SIZE: usize = 188;
@@ -194,11 +195,12 @@ pub struct TsEvent {
     pmt_format_ids: Vec<String>,
     nal_offsets: Vec<u32>, // flat [offset0, length0, offset1, length1, ...] relative to payload bytes
     nal_types: Vec<u8>,    // NAL type code per NALU (empty for non-video PIDs)
+    samples: Vec<f32>,     // decoded PCM (kind=5 pcm events only); empty otherwise
 }
 
 #[wasm_bindgen]
 impl TsEvent {
-    /// 0 = pat, 1 = pmt, 2 = pes, 3 = random_access, 4 = error
+    /// 0 = pat, 1 = pmt, 2 = pes, 3 = random_access, 4 = error, 5 = pcm
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> u8 {
         self.kind
@@ -276,6 +278,13 @@ impl TsEvent {
     pub fn nal_types(&self) -> Vec<u8> {
         self.nal_types.clone()
     }
+
+    /// Decoded PCM samples for kind=5 events (interleaved f32, [-1.0, 1.0)).
+    /// Empty for all other event kinds. `programNum` carries channel_count.
+    #[wasm_bindgen(getter)]
+    pub fn samples(&self) -> Vec<f32> {
+        self.samples.clone()
+    }
 }
 
 impl TsEvent {
@@ -293,6 +302,7 @@ impl TsEvent {
             pmt_format_ids: Vec::new(),
             nal_offsets: Vec::new(),
             nal_types: Vec::new(),
+            samples: Vec::new(),
         }
     }
     fn pmt(entries: &[(Pid, StreamType)], format_ids: &[String]) -> Self {
@@ -314,6 +324,7 @@ impl TsEvent {
             pmt_format_ids: format_ids.to_vec(),
             nal_offsets: Vec::new(),
             nal_types: Vec::new(),
+            samples: Vec::new(),
         }
     }
     fn pes(
@@ -339,6 +350,7 @@ impl TsEvent {
             pmt_format_ids: Vec::new(),
             nal_offsets,
             nal_types,
+            samples: Vec::new(),
         }
     }
     fn random_access(pid: Pid) -> Self {
@@ -355,6 +367,7 @@ impl TsEvent {
             pmt_format_ids: Vec::new(),
             nal_offsets: Vec::new(),
             nal_types: Vec::new(),
+            samples: Vec::new(),
         }
     }
     fn error(s: impl Into<String>) -> Self {
@@ -371,6 +384,24 @@ impl TsEvent {
             pmt_format_ids: Vec::new(),
             nal_offsets: Vec::new(),
             nal_types: Vec::new(),
+            samples: Vec::new(),
+        }
+    }
+    fn pcm(pid: Pid, pts: i64, channel_count: u8, samples: Vec<f32>) -> Self {
+        Self {
+            kind: 5,
+            pid: pid.as_u16(),
+            pts,
+            dts: -1,
+            stream_type: aes3::S302M_STREAM_TYPE,
+            data: Vec::new(),
+            text: String::new(),
+            program_num: channel_count as u16,
+            random_access: false,
+            pmt_format_ids: Vec::new(),
+            nal_offsets: Vec::new(),
+            nal_types: Vec::new(),
+            samples,
         }
     }
 }
@@ -468,7 +499,7 @@ fn extract_format_id(descriptors: &[Descriptor]) -> String {
     descriptors
         .iter()
         .find_map(|d| {
-            if d.tag == 0x05 && d.data.len() >= 4 {
+            if d.tag == aes3::REGISTRATION_DESC_TAG && d.data.len() >= 4 {
                 std::str::from_utf8(&d.data[..4]).ok().map(String::from)
             } else {
                 None
@@ -513,6 +544,14 @@ impl TsDemuxer {
             .iter()
             .find(|e| e.pid == pid)
             .map(|e| e.stream_type)
+    }
+
+    fn is_smpte302m_pid(&self, pid: u16) -> bool {
+        self.pmt_entries
+            .iter()
+            .find(|e| e.pid == pid)
+            .map(|e| aes3::is_s302m_registration(e.format_id.as_bytes()))
+            .unwrap_or(false)
     }
 
     // Roll the per-PID bitrate ring forward so it covers [now-10s, now], then
@@ -618,6 +657,18 @@ impl TsDemuxer {
             nal_offsets,
             nal_types.clone(),
         ));
+
+        // SMPTE 302M: decode AES3 frames to f32 and emit a kind=5 pcm event.
+        // Channel count is parsed from the per-PES AES3 header (always 48000 Hz).
+        if self.is_smpte302m_pid(pid_u16) {
+            let samples = aes3::unwrap_smpte302m_pes(payload);
+            if !samples.is_empty() {
+                let channel_count = aes3::s302m_info_from_header(payload)
+                    .map(|i| i.channel_count)
+                    .unwrap_or(2);
+                events.push(TsEvent::pcm(pid, pts, channel_count, samples));
+            }
+        }
 
         self.push_packet(PacketEntry {
             t_ms,
