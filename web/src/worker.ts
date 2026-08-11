@@ -319,6 +319,14 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
       queue({ type: 'stats', stats: statsMsg, demux: getDemuxStats() });
       flushOutgoing();
     }, 1000);
+    meterTimer = setInterval(() => {
+      if (!demux || !inited) return;
+      const meter = demux.meterSnapshot();
+      if (meter) {
+        queue({ type: 'meter', meter });
+        flushOutgoing();
+      }
+    }, 50);
   } catch (e) {
     if (myGen === gen) {
       doStop();
@@ -331,6 +339,7 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
 
 function doStop() {
   if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+  if (meterTimer) { clearInterval(meterTimer); meterTimer = null; }
   pollMaxMs = 0;
   prevRxLoss = 0;
   prevRxDropped = 0;

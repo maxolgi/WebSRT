@@ -258,7 +258,7 @@ impl PidMeter {
         let mut im = [0.0f64; FFT_SIZE];
         for i in 0..FFT_SIZE {
             let idx = (self.fft_idx + i) % FFT_SIZE;
-            let w = 0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / FFT_SIZE as f64).cos());
+            let w = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / (FFT_SIZE as f64 - 1.0)).cos();
             re[i] = self.fft_ring[idx] as f64 * w;
         }
         fft_inplace(&mut re, &mut im);
@@ -270,12 +270,13 @@ impl PidMeter {
         }
 
         let mut edges = [0usize; 65];
-        for b in 0..64 {
-            let lo = (b as f64 / 64.0 * half as f64).powi(1) as usize;
-            let hi = ((b + 1) as f64 / 64.0 * half as f64).powi(1) as usize;
-            edges[b] = lo.min(half - 1);
-            edges[b + 1] = hi.min(half);
+        edges[0] = 1;
+        for b in 1..=64usize {
+            let edge = (512f64.powf(b as f64 / 64.0)).floor() as usize;
+            edges[b] = (edges[b - 1] + 1).max(edge);
         }
+        edges[64] = 512;
+
         let mut bins = vec![-80.0f32; 64];
         for b in 0..64 {
             let lo = edges[b];
@@ -286,7 +287,7 @@ impl PidMeter {
                     max_mag = mags[i];
                 }
             }
-            let db = 20.0 * (max_mag / (FFT_SIZE as f64 / 4.0) + 1e-12).log10();
+            let db = 20.0 * (max_mag + 1e-12).log10();
             bins[b] = db as f32;
         }
         bins
@@ -326,6 +327,9 @@ impl Default for MeterState {
 
 impl MeterState {
     pub fn update(&mut self, pid: u16, samples: &[f32], channel_count: u8, pts: i64) {
+        if self.selected_pid == 0 || !self.pids.contains_key(&self.selected_pid) {
+            self.selected_pid = pid;
+        }
         let selected = pid == self.selected_pid;
         let sel_ch = self.selected_channel;
         let meter = self
@@ -366,7 +370,12 @@ impl MeterState {
             }
         }
 
-        let (scope_l, scope_r, spectrum) = if let Some(meter) = self.pids.get(&self.selected_pid) {
+        let scope_pid = if self.pids.contains_key(&self.selected_pid) {
+            self.selected_pid
+        } else {
+            pids.first().copied().unwrap_or(0)
+        };
+        let (scope_l, scope_r, spectrum) = if let Some(meter) = self.pids.get(&scope_pid) {
             let (l, r) = meter.scope();
             (l, r, meter.spectrum())
         } else {
