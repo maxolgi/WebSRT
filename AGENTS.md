@@ -30,6 +30,7 @@ build tools — Debian/Ubuntu, Fedora, Arch, macOS):
 # Checks + tests
 ./build.sh check                  # cargo check --workspace + tsc --noEmit
 ./build.sh test                   # cargo test --workspace + node web/smoke.mjs
+cargo fmt --check                 # verify Rust formatting (run `cargo fmt --all` to fix)
 
 # Combined workflows (AGENTS.md "Critical build order")
 ./build.sh srt-protocol           # rule 1: gateway + srt-wasm after editing forked srt-rs
