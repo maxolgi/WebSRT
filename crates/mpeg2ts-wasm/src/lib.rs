@@ -21,7 +21,7 @@ use std::io::{self, Read};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
-mod aes3;
+pub mod aes3;
 mod nal;
 
 const TS_PACKET_SIZE: usize = 188;
