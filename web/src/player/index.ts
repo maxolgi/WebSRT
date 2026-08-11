@@ -131,6 +131,7 @@ class Player extends EventTarget implements PlayerHandle {
         onDrift: (driftMs) => { if (driftMs !== null) this.emit('drift', driftMs); },
         onDecodedFrame: (frame) => this.emit('decodedframe', frame),
         onDecodedAudio: (data) => this.emit('decodedaudio', data),
+        onAudioMeter: (data) => this.emit('audiometer', data),
       },
     });
 

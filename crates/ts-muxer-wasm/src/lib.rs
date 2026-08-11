@@ -290,7 +290,11 @@ impl TsMuxer {
         }
 
         let entries_esil: usize = entries.iter().map(|(_, _, d)| d.len()).sum();
-        let section_length: u16 = (12 + entries.len() * 5 + entries_esil) as u16;
+        // section_length counts the bytes after this field through CRC32
+        // inclusive: program_number(2) + version(1) + section_number(1) +
+        // last_section_number(1) + PCR_PID(2) + program_info_length(2) +
+        // entries + CRC32(4) = 13 + entries + descriptors.
+        let section_length: u16 = (13 + entries.len() * 5 + entries_esil) as u16;
 
         let mut s: Vec<u8> = Vec::with_capacity(32 + section_length as usize);
         s.push(0x02);

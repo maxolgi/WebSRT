@@ -31,6 +31,22 @@ export interface AudioStats {
   outputMode: 'MediaStreamTrackGenerator' | 'AudioWorklet' | null;
 }
 
+export interface AudioMeterData {
+  peaks: Float32Array;
+  rms: Float32Array;
+  clips: Uint32Array;
+  bufferFill: number;
+  underruns: number;
+  channelCount: number;
+  sampleRate: number;
+  lufs: Float32Array;
+  phase: Float32Array;
+  scopeL: Float32Array;
+  scopeR: Float32Array;
+  spectrum: Float32Array;
+  selectedChannel: number;
+}
+
 export interface RenderStats {
   frameCount: number;
   droppedLate: number;

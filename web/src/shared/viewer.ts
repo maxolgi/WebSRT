@@ -8,6 +8,7 @@ import { VideoPipeline, OpusAudioPipeline, AacAudioPipeline } from '../decode';
 import { PcmPlayer } from '../pcm-player';
 import { CanvasRenderer } from '../render';
 import type { WorkerMsg, StatsMsg, DemuxStatsMsg } from '../worker';
+import type { AudioMeterData } from './types';
 
 export type ConnectionState = 'idle' | 'connecting' | 'connected';
 
@@ -38,6 +39,9 @@ export interface ViewerUi {
   onDecodedFrame?(frame: VideoFrame): void;
   /** Decoded audio data (decodeInWorker mode only). Host owns lifecycle — must call data.close(). */
   onDecodedAudio?(data: AudioData): void;
+  /** Per-channel PCM audio metering (peaks/rms/clips/lufs/etc.) at ~30fps
+   *  from the PcmPlayer worklet. Optional — omit when no meter UI is attached. */
+  onAudioMeter?(data: AudioMeterData): void;
 }
 
 export interface ViewerConfig {
@@ -424,6 +428,8 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
         if (!pcmPlayer) {
           pcmPlayer = new PcmPlayer();
           log(`PCM PID ${msg.pid}: ${msg.channelCount}ch SMPTE 302M (worklet init)`, 'info');
+          // Register meter callback once, when the player is first created.
+          if (ui.onAudioMeter) pcmPlayer.onMeter(ui.onAudioMeter);
         }
         if (!pcmPlayer.ready) {
           void pcmPlayer.init(msg.channelCount).then(() => {

@@ -10,7 +10,7 @@ import type {
   TimeSeriesBucket,
   TestActions,
 } from './types';
-import type { VideoStats, AudioStats, RenderStats, DemuxStats } from '../shared/types';
+import type { VideoStats, AudioStats, AudioMeterData, RenderStats, DemuxStats } from '../shared/types';
 import type { StatsMsg } from '../worker';
 
 const HISTORY_CAP = 300;
@@ -25,6 +25,7 @@ export class DebugStore {
   readonly demuxStats = signal<DemuxStats | null>(null);
   readonly videoStats = signal<VideoStats | null>(null);
   readonly audioStats = signal<AudioStats | null>(null);
+  readonly audioMeter = signal<AudioMeterData | null>(null);
   readonly renderStats = signal<RenderStats | null>(null);
   readonly gpuInfo = signal<GpuInfo | null>(null);
   readonly mediaCaps = signal<MediaCapResult[]>([]);

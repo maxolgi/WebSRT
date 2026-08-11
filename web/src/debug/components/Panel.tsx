@@ -7,6 +7,7 @@ import { SrtTab } from './SrtTab'
 import { DemuxTab } from './DemuxTab'
 import { ConsoleTab } from './ConsoleTab'
 import { TestTab } from './TestTab'
+import { AudioTab } from './AudioTab'
 
 interface Props {
   store: DebugStore
@@ -15,6 +16,7 @@ interface Props {
 const TABS = [
   { id: 'stream', label: 'Stream' },
   { id: 'codec', label: 'Codec' },
+  { id: 'audio', label: 'Audio' },
   { id: 'gpu', label: 'GPU' },
   { id: 'srt', label: 'SRT' },
   { id: 'demux', label: 'Demux' },
@@ -46,6 +48,7 @@ export function DebugPanel({ store }: Props) {
       <div class="debug-content">
         {activeTab === 'stream' && <StreamTab store={store} />}
         {activeTab === 'codec' && <CodecTab store={store} />}
+        {activeTab === 'audio' && <AudioTab store={store} />}
         {activeTab === 'gpu' && <GpuTab store={store} />}
         {activeTab === 'srt' && <SrtTab store={store} />}
         {activeTab === 'demux' && <DemuxTab store={store} />}

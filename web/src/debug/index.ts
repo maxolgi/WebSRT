@@ -69,6 +69,9 @@ export function mountDebug(
     store.srtStats.value = d.stats;
     if (d.demux) store.demuxStats.value = d.demux;
   };
+  const onAudioMeter = (e: Event): void => {
+    store.audioMeter.value = (e as CustomEvent).detail;
+  };
   const onDrift = (e: Event): void => {
     store.driftMs.value = (e as CustomEvent<number>).detail;
   };
@@ -77,6 +80,7 @@ export function mountDebug(
   };
 
   handle.addEventListener('stats', onStats);
+  handle.addEventListener('audiometer', onAudioMeter);
   handle.addEventListener('drift', onDrift);
   handle.addEventListener('error', onError);
 
@@ -102,6 +106,7 @@ export function mountDebug(
       stopSampler();
       detachConsole();
       handle.removeEventListener('stats', onStats);
+      handle.removeEventListener('audiometer', onAudioMeter);
       handle.removeEventListener('drift', onDrift);
       handle.removeEventListener('error', onError);
       handle.removeEventListener('stats', onceWorkerReady);
