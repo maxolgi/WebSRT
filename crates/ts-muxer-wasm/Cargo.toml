@@ -8,5 +8,6 @@ rust-version.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+mpeg2ts-wasm = { path = "../mpeg2ts-wasm" }
 wasm-bindgen = "0.2"
 web-time = "1"
