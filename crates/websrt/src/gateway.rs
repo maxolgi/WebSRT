@@ -402,9 +402,22 @@ impl Gateway {
                         },
                     };
 
+                    let mut srt_config = self.srt_config.clone();
+                    // Seed the SRT send rate from the broadcaster's measured
+                    // bitrate (×1.25 for 25% overhead). This paces the gateway's
+                    // SRT sender via `LiveBandwidthMode::Max`, eliminating the
+                    // feedback loop that `Estimated` mode creates with the batchy
+                    // gateway input. A freshly started stream reports 0; the
+                    // session then falls back to `Estimated` mode until the
+                    // stream has been alive long enough for a measurement.
+                    let measured = self.streams.measured_bitrate_bps(&stream_name);
+                    if measured > 0 {
+                        srt_config.max_send_rate = Some(measured * 5 / 4);
+                    }
+
                     let (entry, handle) = BrowserSession::create(
                         connection, viewer,
-                        self.sim_loss, self.sim_seed, self.srt_config.clone(),
+                        self.sim_loss, self.sim_seed, srt_config,
                         publish_tx,
                         Some(guard),
                         stream_name.clone(),
