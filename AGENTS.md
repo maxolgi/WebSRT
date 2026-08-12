@@ -117,13 +117,13 @@ commits pushed to a fork are NOT pulled automatically**. You must run `cargo upd
 ### Updating forked crates
 
 Cargo.lock pins each fork to a specific commit hash. **New commits pushed to a
-fork are NOT pulled automatically.** After pushing changes to a fork, you must
+fork are NOT pulled automatically.** After the human pushes changes to a fork, you must
 explicitly update Cargo.lock:
 
-    # After pushing to maxolgi/srt-rs (branch: main):
+    # After the human pushes to maxolgi/srt-rs (branch: main):
     cargo update -p srt-protocol -p srt-tokio
 
-    # After pushing to maxolgi/mpeg2ts (branch: master):
+    # After the human pushes to maxolgi/mpeg2ts (branch: master):
     cargo update -p mpeg2ts
 
     # Or update both at once:
@@ -137,8 +137,8 @@ directory on `cargo clean` or `cargo update`. To edit fork source:
 
 1. Clone the fork separately (e.g., `git clone git@github.com:maxolgi/srt-rs.git`)
 2. Make changes on the correct branch (`main` for srt-rs, `master` for mpeg2ts)
-3. Push to GitHub
-4. Run `cargo update -p <crate>` in WebSRT to pull the new commit
+3. Commit your changes, then ask the human to push to GitHub
+4. After the human pushes, run `cargo update -p <crate>` in WebSRT to pull the new commit
 
 ### Inherited QUIC features (via WebTransport)
 
