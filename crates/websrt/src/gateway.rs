@@ -404,14 +404,14 @@ impl Gateway {
 
                     let mut srt_config = self.srt_config.clone();
                     // Seed the SRT send rate from the broadcaster's measured
-                    // bitrate (×1.25 for 25% overhead). This paces the gateway's
-                    // SRT sender via `LiveBandwidthMode::Max`, eliminating the
-                    // feedback loop that `Estimated` mode creates with the batchy
-                    // gateway input. A freshly started stream reports 0; the
-                    // session then falls back to `Estimated` mode until the
-                    // stream has been alive long enough for a measurement.
+                    // bitrate (×1.25 for 25% overhead) — but only for
+                    // high-bitrate streams where Estimated mode's asymmetric EWMA
+                    // causes throughput oscillation at high TSBPD latency.
+                    // Low-bitrate VBR video (webcam, screen-share) stays on
+                    // Estimated: Max mode's fixed ceiling would throttle I-frame
+                    // bursts and cause too-late drops.
                     let measured = self.streams.measured_bitrate_bps(&stream_name);
-                    if measured > 0 {
+                    if measured > 4_000_000 {
                         srt_config.max_send_rate = Some(measured * 5 / 4);
                     }
 
