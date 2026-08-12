@@ -42,7 +42,7 @@ impl Default for SrtConfig {
     fn default() -> Self {
         Self {
             payload_size: PAYLOAD_SIZE,
-            send_buffer_size: 8192,
+            send_buffer_size: 32768,
             recv_buffer_size: 8192,
             peer_idle_timeout: std::time::Duration::from_secs(30),
             send_latency: std::time::Duration::from_millis(10),
