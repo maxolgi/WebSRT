@@ -144,6 +144,14 @@ impl SrtInitiator {
         settings.peer_idle_timeout = config.peer_idle_timeout;
         settings.send_latency = config.send_latency;
         settings.recv_latency = config.recv_latency;
+        // Pace the SND timer to the measured input rate instead of the 1 Gbps
+        // default, which bursts a full sender buffer per tick and overwhelms the
+        // browser at high channel counts. 25% overhead = headroom above the
+        // measured rate; 2 MB/s is the floor SRT paces at before it has measured.
+        settings.bandwidth = srt_protocol::options::LiveBandwidthMode::Estimated {
+            overhead: srt_protocol::options::Percent(25),
+            expected: srt_protocol::options::DataRate(2_000_000),
+        };
         settings.too_late_packet_drop = true;
         settings.initial_rtt = Some(initial_rtt);
         let connect = Connect::new_skip_induction(
