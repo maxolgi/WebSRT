@@ -2668,7 +2668,7 @@ dependencies = [
 [[package]]
 name = "mpeg2ts"
 version = "0.6.0"
-source = "git+https://github.com/maxolgi/mpeg2ts.git?branch=master#b5e7561727e8ca5714ae6a04ec7f069143ab4dc7"
+source = "git+https://github.com/maxolgi/mpeg2ts.git?branch=master#d87ec84c9d11e36ae81d01242e71c66263e0c158"
 
 [[package]]
 name = "mpeg2ts-wasm"
