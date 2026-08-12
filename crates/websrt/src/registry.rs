@@ -36,7 +36,7 @@ const MAX_MSGS_PER_TICK: usize = 256;
 /// Skip pushing new data when the SRT send buffer is above this many packets
 /// (~90% of the 32768 send_buffer_size). Prevents silent packet drops inside
 /// SendBuffer::push_data, which overwrites the oldest unacked packet.
-const SEND_BUFFER_HIGH_WATER: u64 = 29491;
+const SEND_BUFFER_HIGH_WATER: u64 = 16384;
 
 /// All per-session state shared between the recv_pump task and the centralized
 /// ticker. Held inside `Arc` so both can reference it concurrently.
