@@ -14,6 +14,7 @@
 
 use mpeg2ts::es::StreamType;
 use mpeg2ts::pes::PesHeader;
+use mpeg2ts::ts::payload::Pmt;
 use mpeg2ts::ts::{Descriptor, Pid, ReadTsPacket, TsPacket, TsPacketReader, TsPayload};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -419,12 +420,22 @@ struct PartialPes {
     ra: bool,
 }
 
+/// Accumulator for multi-packet PSI sections (PMT with many ES entries).
+struct PartialPsi {
+    // Starts with pointer_field byte (0x00), then section data.
+    buf: Vec<u8>,
+    // Total section bytes needed: 3 (table_id + section_length) + section_length value.
+    section_total: usize,
+}
+
 /// Browser-facing demuxer.
 #[wasm_bindgen]
 pub struct TsDemuxer {
     feed: SharedFeedBuf,
     reader: TsPacketReader<SharedFeedBuf>,
     partials: HashMap<Pid, PartialPes>,
+    // PSI section reassembly for multi-packet PMT sections.
+    partial_psi: HashMap<u16, PartialPsi>,
     // Most recent adaptation_field.random_access_indicator seen per PID.
     // Consumed (reset to false) when the next PES event for that PID is
     // emitted, so the keyframe hint reaches the pipeline instead of being
@@ -463,6 +474,7 @@ impl TsDemuxer {
             feed,
             reader,
             partials: HashMap::new(),
+            partial_psi: HashMap::new(),
             last_ra: HashMap::new(),
             program_num: None,
             pmt_pid: None,
@@ -511,6 +523,54 @@ fn extract_format_id(descriptors: &[Descriptor]) -> String {
             }
         })
         .unwrap_or_default()
+}
+
+/// Reassemble multi-packet PSI sections (PMT with many ES entries).
+/// Returns a parsed `Pmt` when the section is complete, `None` while
+/// still accumulating.
+fn assemble_psi(
+    partials: &mut HashMap<u16, PartialPsi>,
+    pid: u16,
+    bytes: &[u8],
+    pusi: bool,
+) -> Option<Pmt> {
+    // When the fork returns Raw for a multi-packet PMT, PUSI is inferred
+    // from payload type (always false for Raw). Use the presence of an
+    // existing partial as fallback to distinguish start vs continuation.
+    let is_start = pusi || !partials.contains_key(&pid);
+
+    if is_start {
+        let ptr = *bytes.get(0)? as usize;
+        let section_start = 1 + ptr;
+        if bytes.len() < section_start + 3 {
+            return None;
+        }
+        let sl =
+            ((bytes[section_start + 1] & 0x0F) as usize) << 8 | bytes[section_start + 2] as usize;
+        let mut buf = vec![0u8];
+        buf.extend_from_slice(&bytes[section_start..]);
+        partials.insert(
+            pid,
+            PartialPsi {
+                buf,
+                section_total: 3 + sl,
+            },
+        );
+    } else {
+        let p = partials.get_mut(&pid)?;
+        p.buf.extend_from_slice(bytes);
+    }
+
+    let complete = {
+        let p = partials.get(&pid)?;
+        p.buf.len() >= 1 + p.section_total
+    };
+    if !complete {
+        return None;
+    }
+
+    let p = partials.remove(&pid)?;
+    Pmt::read_from(io::Cursor::new(&p.buf)).ok()
 }
 
 impl TsDemuxer {
@@ -822,37 +882,7 @@ impl TsDemuxer {
                 }
             }
             TsPayload::Pmt(pmt) => {
-                // Refresh the snapshot of elementary streams. Registration
-                // descriptor (tag 0x05) format id disambiguates 0x06 streams
-                // (AV01 → video, Opus → audio); empty when absent.
-                let mut new_entries: Vec<PmtEntry> = Vec::with_capacity(pmt.es_info.len());
-                let mut entries: Vec<(Pid, StreamType)> = Vec::with_capacity(pmt.es_info.len());
-                for e in &pmt.es_info {
-                    let format_id = extract_format_id(&e.descriptors);
-                    new_entries.push(PmtEntry {
-                        pid: e.elementary_pid.as_u16(),
-                        stream_type: e.stream_type.clone() as u8,
-                        format_id: format_id.clone(),
-                    });
-                    entries.push((e.elementary_pid, e.stream_type.clone()));
-                }
-                let format_ids: Vec<String> =
-                    new_entries.iter().map(|e| e.format_id.clone()).collect();
-                self.pmt_entries = new_entries;
-
-                events.push(TsEvent::pmt(&entries, &format_ids));
-                self.push_packet(PacketEntry {
-                    t_ms: elapsed_ms,
-                    pid: pid_u16,
-                    kind: KIND_PMT,
-                    pts: -1,
-                    dts: -1,
-                    size: 0,
-                    ra: false,
-                    nal_summary: Vec::new(),
-                    tei,
-                    pusi,
-                });
+                self.handle_pmt(&pmt, elapsed_ms, tei, pusi, events);
             }
             TsPayload::PesStart(pes) => {
                 let pes_payload_len = pes.data.len();
@@ -892,7 +922,26 @@ impl TsDemuxer {
                 self.accumulate_bytes(pid_u16, n, now);
                 self.maybe_flush(pid, elapsed_ms, tei, pusi, events);
             }
-            TsPayload::Null(_) | TsPayload::Raw(_) | TsPayload::Section(_) => {
+            TsPayload::Raw(bytes) => {
+                if self.pmt_pid == Some(pid_u16) {
+                    if let Some(pmt) = assemble_psi(&mut self.partial_psi, pid_u16, bytes, pusi) {
+                        self.handle_pmt(&pmt, elapsed_ms, tei, pusi, events);
+                    }
+                }
+                self.push_packet(PacketEntry {
+                    t_ms: elapsed_ms,
+                    pid: pid_u16,
+                    kind: KIND_OTHER,
+                    pts: -1,
+                    dts: -1,
+                    size: 0,
+                    ra: false,
+                    nal_summary: Vec::new(),
+                    tei,
+                    pusi,
+                });
+            }
+            TsPayload::Null(_) | TsPayload::Section(_) => {
                 // ignore payload, but still record a timeline row for visibility.
                 self.push_packet(PacketEntry {
                     t_ms: elapsed_ms,
@@ -908,6 +957,45 @@ impl TsDemuxer {
                 });
             }
         }
+    }
+
+    fn handle_pmt(
+        &mut self,
+        pmt: &Pmt,
+        elapsed_ms: f64,
+        tei: bool,
+        pusi: bool,
+        events: &mut Vec<TsEvent>,
+    ) {
+        let pmt_pid = self.pmt_pid.unwrap_or(0x1000);
+        let mut new_entries: Vec<PmtEntry> = Vec::with_capacity(pmt.es_info.len());
+        let mut entries: Vec<(Pid, StreamType)> = Vec::with_capacity(pmt.es_info.len());
+        for e in &pmt.es_info {
+            let format_id = extract_format_id(&e.descriptors);
+            new_entries.push(PmtEntry {
+                pid: e.elementary_pid.as_u16(),
+                stream_type: e.stream_type.clone() as u8,
+                format_id: format_id.clone(),
+            });
+            entries.push((e.elementary_pid, e.stream_type.clone()));
+            self.reader.register_pes_pid(e.elementary_pid);
+        }
+        let format_ids: Vec<String> = new_entries.iter().map(|e| e.format_id.clone()).collect();
+        self.pmt_entries = new_entries;
+
+        events.push(TsEvent::pmt(&entries, &format_ids));
+        self.push_packet(PacketEntry {
+            t_ms: elapsed_ms,
+            pid: pmt_pid,
+            kind: KIND_PMT,
+            pts: -1,
+            dts: -1,
+            size: 0,
+            ra: false,
+            nal_summary: Vec::new(),
+            tei,
+            pusi,
+        });
     }
 
     fn maybe_flush(
