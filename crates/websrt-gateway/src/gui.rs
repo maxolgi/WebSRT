@@ -460,6 +460,56 @@ impl eframe::App for GuiApp {
                                 }
                             });
                     }
+                    if !stats.per_session.is_empty() {
+                        ui.add_space(2.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.small(format!(
+                                "Ticker: avg {}µs / max {}µs ({} ticks)",
+                                stats.ticker_avg_us, stats.ticker_max_us, stats.ticker_count,
+                            ));
+                        });
+                        ui.add_space(2.0);
+                        egui::Grid::new("session_stats")
+                            .num_columns(7)
+                            .spacing([16.0, 2.0])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.small("session");
+                                ui.small("stream");
+                                ui.small("tx_data");
+                                ui.small("tx_buf");
+                                ui.small("tx_retx");
+                                ui.small("rtt_ms");
+                                ui.small("pushed");
+                                ui.end_row();
+                                for s in &stats.per_session {
+                                    let srt = s.srt.as_ref();
+                                    ui.small(format!("#{}", s.session_id));
+                                    ui.small(&s.stream_name);
+                                    ui.small(format!(
+                                        "{}",
+                                        srt.map(|v| v.tx_data).unwrap_or(0)
+                                    ));
+                                    ui.small(format!(
+                                        "{}",
+                                        srt.map(|v| v.tx_buffered).unwrap_or(0)
+                                    ));
+                                    ui.small(format!(
+                                        "{}",
+                                        srt.map(|v| v.tx_retransmit).unwrap_or(0)
+                                    ));
+                                    ui.small(format!(
+                                        "{}",
+                                        srt.and_then(|v| {
+                                            v.tx_rtt.map(|d| d.as_millis() as u64)
+                                        })
+                                        .unwrap_or(0)
+                                    ));
+                                    ui.small(format!("{}", s.messages_pushed));
+                                    ui.end_row();
+                                }
+                            });
+                    }
                 }
             }
             Tab::Logs => {

@@ -82,6 +82,9 @@ pub(crate) struct SessionEntry {
 pub(crate) struct SessionRegistry {
     entries: RwLock<HashMap<u64, Arc<SessionEntry>>>,
     last_stats_log: StdMutex<Option<Instant>>,
+    tick_count: AtomicU64,
+    tick_total_us: AtomicU64,
+    tick_max_us: AtomicU64,
 }
 
 impl SessionRegistry {
@@ -89,7 +92,19 @@ impl SessionRegistry {
         Self {
             entries: RwLock::new(HashMap::new()),
             last_stats_log: StdMutex::new(None),
+            tick_count: AtomicU64::new(0),
+            tick_total_us: AtomicU64::new(0),
+            tick_max_us: AtomicU64::new(0),
         }
+    }
+
+    /// Read and reset the ticker timing counters. Returns `(count, avg_us, max_us)`.
+    pub fn ticker_stats_reset(&self) -> (u64, u64, u64) {
+        let count = self.tick_count.swap(0, Ordering::Relaxed);
+        let total = self.tick_total_us.swap(0, Ordering::Relaxed);
+        let max = self.tick_max_us.swap(0, Ordering::Relaxed);
+        let avg = if count > 0 { total / count } else { 0 };
+        (count, avg, max)
     }
 
     /// Insert a session entry. The key is `entry.session_id` (assigned by
@@ -276,9 +291,13 @@ impl SessionRegistry {
         }
 
         let elapsed = now.elapsed();
+        let us = elapsed.as_micros() as u64;
+        self.tick_count.fetch_add(1, Ordering::Relaxed);
+        self.tick_total_us.fetch_add(us, Ordering::Relaxed);
+        self.tick_max_us.fetch_max(us, Ordering::Relaxed);
         if elapsed > Duration::from_millis(2) {
             tracing::warn!(
-                duration_us = elapsed.as_micros() as u64,
+                duration_us = us,
                 sessions = entries.len(),
                 "tick_all exceeded 2ms budget"
             );

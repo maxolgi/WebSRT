@@ -86,6 +86,12 @@ pub struct GatewayStats {
     pub active_sessions: usize,
     /// Per-session snapshot, sorted by session_id.
     pub per_session: Vec<SessionStats>,
+    /// Ticker average duration in microseconds (since last stats poll).
+    pub ticker_avg_us: u64,
+    /// Ticker max duration in microseconds (since last stats poll).
+    pub ticker_max_us: u64,
+    /// Number of ticks since last stats poll.
+    pub ticker_count: u64,
 }
 
 /// Snapshot of SRT-level statistics for one session.
@@ -125,6 +131,7 @@ impl GatewayStatsHandle {
     /// Read the current gateway stats. Cheap to call — locks the stream
     /// registry briefly, no I/O.
     pub fn stats(&self) -> GatewayStats {
+        let (tick_count, tick_avg_us, tick_max_us) = self.sessions.ticker_stats_reset();
         GatewayStats {
             streams: self.streams.stream_count(),
             alive_streams: self.streams.alive_stream_count(),
@@ -134,6 +141,9 @@ impl GatewayStatsHandle {
             per_stream: self.streams.snapshot_streams(),
             active_sessions: self.sessions.active_session_count(),
             per_session: self.sessions.snapshot_sessions(),
+            ticker_avg_us: tick_avg_us,
+            ticker_max_us: tick_max_us,
+            ticker_count: tick_count,
         }
     }
 }

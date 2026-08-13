@@ -40,6 +40,9 @@ export interface TimeSeriesBucket {
   srtLoss: number;
   srtDropped: number;
   pollMaxMs: number;
+  wasmHandleAvgUs: number;
+  wasmPollAvgUs: number;
+  loopIterAvgMs: number;
 }
 
 export interface DebugDiagnostics {

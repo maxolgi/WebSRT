@@ -138,6 +138,9 @@ function updateStats(s: StatsMsg, demux: DemuxStatsMsg | null) {
     `buf'd    ${s.rxBuffered}\n` +
     `ACK/NAK  ${s.rxAck}/${s.rxNak}` +
     `\npoll max ${s.pollMaxMs.toFixed(1)}ms` +
+    `\nWASM hndl ${s.wasmHandleAvgUs.toFixed(1)}µs/call` +
+    `\nWASM poll  ${s.wasmPollAvgUs.toFixed(1)}µs/call` +
+    `\nloop avg  ${s.loopIterAvgMs.toFixed(2)}ms/iter` +
     (dmx ? `\ndemux    ${dmx}` : '') +
     (latestDriftMs !== null
       ? `\ndrift    ${latestDriftMs >= 0 ? '+' : ''}${latestDriftMs.toFixed(0)}ms (video vs audio)`

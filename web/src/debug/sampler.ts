@@ -66,6 +66,9 @@ export function startSampler(
         srtLoss,
         srtDropped,
         pollMaxMs: srt.pollMaxMs,
+        wasmHandleAvgUs: srt.wasmHandleAvgUs,
+        wasmPollAvgUs: srt.wasmPollAvgUs,
+        loopIterAvgMs: srt.loopIterAvgMs,
       };
       store.pushHistory(bucket);
     }

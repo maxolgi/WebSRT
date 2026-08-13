@@ -546,6 +546,26 @@ pub(crate) async fn run_gateway(
                             })
                             .collect::<Vec<_>>()
                             .join(",");
+                        let per_session: String = stats
+                            .per_session
+                            .iter()
+                            .map(|s| {
+                                let srt = s.srt.as_ref();
+                                format!(
+                                    r#"{{"session_id":{},"stream":"{}","tx_data":{},"tx_buffered":{},"tx_retransmit":{},"tx_loss":{},"rtt_ms":{},"messages_pushed":{},"viewer_lag":{}}}"#,
+                                    s.session_id,
+                                    json_escape(&s.stream_name),
+                                    srt.map(|v| v.tx_data).unwrap_or(0),
+                                    srt.map(|v| v.tx_buffered).unwrap_or(0),
+                                    srt.map(|v| v.tx_retransmit).unwrap_or(0),
+                                    srt.map(|v| v.tx_loss).unwrap_or(0),
+                                    srt.and_then(|v| v.tx_rtt.map(|d| d.as_millis() as u64)).unwrap_or(0),
+                                    s.messages_pushed,
+                                    s.viewer_lag_count,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",");
                         let ingester_json = {
                             let stats_map = ts_stats.lock().unwrap();
                             if stats_map.is_empty() {
@@ -567,13 +587,17 @@ pub(crate) async fn run_gateway(
                             }
                         };
                         let json = format!(
-                            r#"{{"status":"{}","streams":{},"alive_streams":{},"viewers":{},"max_viewers":{},"per_stream":[{}],"ingester":{}}}"#,
+                            r#"{{"status":"{}","streams":{},"alive_streams":{},"viewers":{},"max_viewers":{},"per_stream":[{}],"per_session":[{}],"ticker":{{"count":{},"avg_us":{},"max_us":{}}},"ingester":{}}}"#,
                             if stats.alive_streams > 0 { "ok" } else { "no_source" },
                             stats.streams,
                             stats.alive_streams,
                             stats.total_viewers,
                             stats.max_viewers,
                             per_stream,
+                            per_session,
+                            stats.ticker_count,
+                            stats.ticker_avg_us,
+                            stats.ticker_max_us,
                             ingester_json,
                         );
                         let response = format!(

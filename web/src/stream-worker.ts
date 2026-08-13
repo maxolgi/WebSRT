@@ -557,6 +557,9 @@ function serializeStats(s: SrtStats): StatsMsg {
     txLoss: s.txLoss,
     txBuffered: s.txBuffered,
     pollMaxMs: pollMaxMs,
+    wasmHandleAvgUs: 0,
+    wasmPollAvgUs: 0,
+    loopIterAvgMs: 0,
   };
   pollMaxMs = 0;
   return msg;

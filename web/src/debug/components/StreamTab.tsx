@@ -114,6 +114,9 @@ function SrtStatsTable({ srt, drift }: { srt: StatsMsg; drift: number | null }) 
           <tr><td>buffered</td><td>{srt.rxBuffered}</td></tr>
           <tr><td>ACK / NAK</td><td>{srt.rxAck} / {srt.rxNak}</td></tr>
           <tr><td>poll max</td><td>{srt.pollMaxMs.toFixed(1)}ms</td></tr>
+          <tr><td>WASM handle</td><td>{srt.wasmHandleAvgUs.toFixed(1)}µs/call</td></tr>
+          <tr><td>WASM poll</td><td>{srt.wasmPollAvgUs.toFixed(1)}µs/call</td></tr>
+          <tr><td>loop avg</td><td>{srt.loopIterAvgMs.toFixed(2)}ms</td></tr>
           {drift !== null && (
             <tr><td>A/V drift</td><td>{drift >= 0 ? '+' : ''}{drift.toFixed(0)}ms</td></tr>
           )}

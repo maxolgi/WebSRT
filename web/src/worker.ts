@@ -24,6 +24,9 @@ export interface StatsMsg {
   txLoss: number;
   txBuffered: number;
   pollMaxMs: number;
+  wasmHandleAvgUs: number;
+  wasmPollAvgUs: number;
+  loopIterAvgMs: number;
   videoStats?: VideoStats;
   audioStats?: AudioStats;
 }
@@ -63,6 +66,12 @@ let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
 let gen = 0;
 let epoch = 0;
 let pollMaxMs = 0;
+let wasmHandleTotalUs = 0;
+let wasmHandleCount = 0;
+let wasmPollTotalUs = 0;
+let wasmPollCount = 0;
+let loopIterTotalMs = 0;
+let loopIterCount = 0;
 let prevRxLoss = 0;
 let prevRxDropped = 0;
 let statsTimer: ReturnType<typeof setInterval> | null = null;
@@ -341,6 +350,12 @@ function doStop() {
   if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
   if (meterTimer) { clearInterval(meterTimer); meterTimer = null; }
   pollMaxMs = 0;
+  wasmHandleTotalUs = 0;
+  wasmHandleCount = 0;
+  wasmPollTotalUs = 0;
+  wasmPollCount = 0;
+  loopIterTotalMs = 0;
+  loopIterCount = 0;
   prevRxLoss = 0;
   prevRxDropped = 0;
   const w = wt;
@@ -425,7 +440,10 @@ async function runSrtLoop(myGen: number) {
       const value = winner.res.value;
       if (!value) break;
       if (VERBOSE) console.debug('wt datagram', value.byteLength, 'bytes');
+      let _t0 = performance.now();
       processActions(rx.handle_datagram(value, nowUs));
+      wasmHandleTotalUs += (performance.now() - _t0) * 1000;
+      wasmHandleCount++;
       readPromise = r.read();
 
       // Batch: drain up to BATCH_SIZE-1 more datagrams that are already
@@ -452,7 +470,10 @@ async function runSrtLoop(myGen: number) {
         }
         if (next.res.done || !next.res.value) break mainLoop;
         if (VERBOSE) console.debug('wt datagram', next.res.value.byteLength, 'bytes');
+        _t0 = performance.now();
         processActions(rx.handle_datagram(next.res.value, nowUs));
+        wasmHandleTotalUs += (performance.now() - _t0) * 1000;
+        wasmHandleCount++;
         readPromise = r.read();
       }
     } else if (winner.kind === 'read_error') {
@@ -463,12 +484,17 @@ async function runSrtLoop(myGen: number) {
       break;
     }
 
+    const _pollT0 = performance.now();
     processActions(rx.poll(nowUs));
+    wasmPollTotalUs += (performance.now() - _pollT0) * 1000;
+    wasmPollCount++;
     flushOutgoing();
 
     const cycleMs = performance.now() - lastCycle;
     lastCycle = performance.now();
     if (cycleMs > pollMaxMs) pollMaxMs = cycleMs;
+    loopIterTotalMs += cycleMs;
+    loopIterCount++;
   }
 }
 
@@ -537,8 +563,17 @@ function serializeStats(s: SrtStats): StatsMsg {
     txLoss: s.txLoss,
     txBuffered: s.txBuffered,
     pollMaxMs: pollMaxMs,
+    wasmHandleAvgUs: wasmHandleCount > 0 ? wasmHandleTotalUs / wasmHandleCount : 0,
+    wasmPollAvgUs: wasmPollCount > 0 ? wasmPollTotalUs / wasmPollCount : 0,
+    loopIterAvgMs: loopIterCount > 0 ? loopIterTotalMs / loopIterCount : 0,
   };
   pollMaxMs = 0;
+  wasmHandleTotalUs = 0;
+  wasmHandleCount = 0;
+  wasmPollTotalUs = 0;
+  wasmPollCount = 0;
+  loopIterTotalMs = 0;
+  loopIterCount = 0;
   return msg;
 }
 
