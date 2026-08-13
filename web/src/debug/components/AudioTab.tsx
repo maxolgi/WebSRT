@@ -29,9 +29,12 @@ const lufsClass = (l: number): string => {
   return 'stat-bad';
 };
 
+type SubTab = 'overview' | 'peak' | 'lufs' | 'phase' | 'scope' | 'spectrum';
+
 export function AudioTab({ store }: Props): JSX.Element {
   const [, forceRender] = useState(0);
   const [selectedCh, setSelectedCh] = useState(0);
+  const [subTab, setSubTab] = useState<SubTab>('overview');
 
   const scopeRef = useRef<HTMLCanvasElement | null>(null);
   const specRef = useRef<HTMLCanvasElement | null>(null);
@@ -47,6 +50,7 @@ export function AudioTab({ store }: Props): JSX.Element {
   }, []);
 
   useEffect(() => {
+    if (subTab !== 'scope') return;
     const canvas = scopeRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -91,6 +95,7 @@ export function AudioTab({ store }: Props): JSX.Element {
   });
 
   useEffect(() => {
+    if (subTab !== 'spectrum') return;
     const canvas = specRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -167,195 +172,241 @@ export function AudioTab({ store }: Props): JSX.Element {
     window.dispatchEvent(new CustomEvent(AUDIO_CHANNEL_EVENT, { detail: v }));
   };
 
+  const SUB_TABS: Array<{ id: SubTab; label: string }> = [
+    { id: 'overview', label: 'Overview' },
+    { id: 'peak', label: 'Peak' },
+    { id: 'lufs', label: 'LUFS' },
+    { id: 'phase', label: 'Phase' },
+    { id: 'scope', label: 'Scope' },
+    { id: 'spectrum', label: 'Spectrum' },
+  ];
+
+  const channelSelector = (
+    <span style={{ marginLeft: '10px', fontWeight: 'normal', textTransform: 'none', letterSpacing: 0 }}>
+      Channel:
+      <select
+        value={selectedCh}
+        onChange={(e) => onSelectChannel(parseInt((e.currentTarget as HTMLSelectElement).value, 10) || 0)}
+        style={{ font: 'inherit', fontSize: '11px', marginLeft: '4px' }}
+      >
+        {Array.from({ length: ch }, (_, i) => (
+          <option value={i}>{i}</option>
+        ))}
+      </select>
+    </span>
+  );
+
   return (
     <>
-      <div class="debug-section">
-        <h3>Stream Overview</h3>
-        <table class="debug-table">
-          <tbody>
-            <tr><td>PIDs</td><td>{meter.pids.length}</td></tr>
-            <tr><td>Total Channels</td><td>{ch}</td></tr>
-            <tr><td>Sample Rate</td><td>48000 Hz</td></tr>
-          </tbody>
-        </table>
+      <div
+        class="debug-tabs"
+        style={{ position: 'sticky', top: '-8px', background: '#1a1a1a', zIndex: 2, margin: '-8px -8px 8px -8px' }}
+      >
+        {SUB_TABS.map((t) => (
+          <button
+            class={`debug-tab ${subTab === t.id ? 'active' : ''}`}
+            onClick={() => setSubTab(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
 
-      <div class="debug-section">
-        <h3>Peak Meters (dBFS)</h3>
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, 12px)',
-            gap: '2px',
-            overflowY: 'auto',
-            maxHeight: '200px',
-            justifyItems: 'center',
-          }}
-        >
-          {Array.from({ length: ch }, (_, i) => {
-            const db = toDb(meter.peaks[i]);
-            const frac = clamp01((db - DB_FLOOR) / (0 - DB_FLOOR));
-            const phFrac = clamp01((peakHold[i] - DB_FLOOR) / (0 - DB_FLOOR));
-            const clipped = (meter.clips[i] ?? 0) > 0;
-            return (
-              <div
-                key={i}
-                title={`ch ${i}: ${db.toFixed(1)} dBFS`}
-                style={{ width: '8px', height: '120px', background: '#222', position: 'relative' }}
-              >
-                <div
-                  style={{
-                    position: 'absolute',
-                    bottom: 0,
-                    left: 0,
-                    right: 0,
-                    height: `${frac * 100}%`,
-                    background: meterColor(db),
-                  }}
-                />
-                <div
-                  style={{
-                    position: 'absolute',
-                    left: 0,
-                    right: 0,
-                    bottom: `${phFrac * 100}%`,
-                    height: '2px',
-                    background: '#fff',
-                  }}
-                />
-                {clipped && (
-                  <div
-                    style={{
-                      position: 'absolute',
-                      top: '1px',
-                      left: '1px',
-                      width: '4px',
-                      height: '4px',
-                      borderRadius: '50%',
-                      background: '#f00',
-                    }}
-                  />
-                )}
-              </div>
-            );
-          })}
-        </div>
-        <div style={{ fontSize: '10px', color: '#888', marginTop: '2px' }}>
-          <span style={{ color: '#3f3' }}>■</span> &lt; -12
-          &nbsp; <span style={{ color: '#fc3' }}>■</span> -12..-3
-          &nbsp; <span style={{ color: '#f33' }}>■</span> &gt; -3 dBFS
-          &nbsp; • peak hold {PEAK_HOLD_DB_PER_S} dB/s
-          &nbsp; • <span style={{ color: '#f00' }}>●</span> clip
-        </div>
-      </div>
-
-      <div class="debug-section">
-        <h3>RMS / Loudness (LUFS)</h3>
-        <div style={{ maxHeight: '260px', overflowY: 'auto' }}>
+      {subTab === 'overview' && (
+        <div class="debug-section">
+          <h3>Stream Overview</h3>
           <table class="debug-table">
-            <thead>
-              <tr>
-                <th style={{ textAlign: 'left', padding: '2px 6px' }}>Ch</th>
-                <th style={{ textAlign: 'right', padding: '2px 6px' }}>Peak</th>
-                <th style={{ textAlign: 'right', padding: '2px 6px' }}>RMS</th>
-                <th style={{ textAlign: 'right', padding: '2px 6px' }}>LUFS</th>
-                <th style={{ textAlign: 'right', padding: '2px 6px' }}>Clips</th>
-              </tr>
-            </thead>
             <tbody>
-              {Array.from({ length: ch }, (_, i) => (
-                <tr key={i}>
-                  <td style={{ textAlign: 'left', padding: '2px 6px' }}>{i}</td>
-                  <td style={{ textAlign: 'right', padding: '2px 6px' }}>{toDb(meter.peaks[i]).toFixed(1)}</td>
-                  <td style={{ textAlign: 'right', padding: '2px 6px' }}>{toDb(meter.rms[i]).toFixed(1)}</td>
-                  <td class={lufsClass(meter.lufs[i] ?? -Infinity)} style={{ textAlign: 'right', padding: '2px 6px' }}>
-                    {(meter.lufs[i] ?? 0).toFixed(1)}
-                  </td>
-                  <td class={(meter.clips[i] ?? 0) > 0 ? 'stat-bad' : ''} style={{ textAlign: 'right', padding: '2px 6px' }}>
-                    {meter.clips[i] ?? 0}
-                  </td>
-                </tr>
-              ))}
+              <tr><td>PIDs</td><td>{meter.pids.length}</td></tr>
+              <tr><td>Total Channels</td><td>{ch}</td></tr>
+              <tr><td>Sample Rate</td><td>48000 Hz</td></tr>
+              <tr><td>Selected PID</td><td>{meter.selectedPid}</td></tr>
+              <tr><td>Selected Channel</td><td>{meter.selectedChannel}</td></tr>
             </tbody>
           </table>
         </div>
-      </div>
+      )}
 
-      <div class="debug-section">
-        <h3>Phase Correlation (stereo pairs)</h3>
-        {pairCount === 0 ? (
-          <div style={{ color: '#999' }}>No stereo pairs (need ≥ 2 channels).</div>
-        ) : (
-          Array.from({ length: pairCount }, (_, p) => {
-            const c = meter.phase[p] ?? 0;
-            return (
-              <div key={p} style={{ display: 'flex', alignItems: 'center', gap: '6px', margin: '2px 0' }}>
-                <span style={{ width: '120px', color: '#999', fontSize: '11px' }}>
-                  Pair {p + 1} (ch {2 * p}-{2 * p + 1})
-                </span>
+      {subTab === 'peak' && (
+        <div class="debug-section">
+          <h3>Peak Meters (dBFS)</h3>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, 12px)',
+              gap: '2px',
+              overflowY: 'auto',
+              maxHeight: '400px',
+              justifyItems: 'center',
+            }}
+          >
+            {Array.from({ length: ch }, (_, i) => {
+              const db = toDb(meter.peaks[i]);
+              const frac = clamp01((db - DB_FLOOR) / (0 - DB_FLOOR));
+              const phFrac = clamp01((peakHold[i] - DB_FLOOR) / (0 - DB_FLOOR));
+              const clipped = (meter.clips[i] ?? 0) > 0;
+              return (
                 <div
-                  style={{
-                    position: 'relative',
-                    flex: 1,
-                    height: '12px',
-                    background: 'linear-gradient(to right, #f66, #fc6 50%, #6f6)',
-                    borderRadius: '2px',
-                  }}
+                  key={i}
+                  title={`ch ${i}: ${db.toFixed(1)} dBFS`}
+                  style={{ width: '8px', height: '120px', background: '#222', position: 'relative' }}
                 >
                   <div
                     style={{
                       position: 'absolute',
-                      left: `${clamp01((c + 1) / 2) * 100}%`,
-                      top: '-2px',
-                      bottom: '-2px',
-                      width: '2px',
-                      background: '#fff',
-                      transform: 'translateX(-1px)',
+                      bottom: 0,
+                      left: 0,
+                      right: 0,
+                      height: `${frac * 100}%`,
+                      background: meterColor(db),
                     }}
                   />
+                  <div
+                    style={{
+                      position: 'absolute',
+                      left: 0,
+                      right: 0,
+                      bottom: `${phFrac * 100}%`,
+                      height: '2px',
+                      background: '#fff',
+                    }}
+                  />
+                  {clipped && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        top: '1px',
+                        left: '1px',
+                        width: '4px',
+                        height: '4px',
+                        borderRadius: '50%',
+                        background: '#f00',
+                      }}
+                    />
+                  )}
                 </div>
-                <span style={{ width: '40px', textAlign: 'right', fontSize: '11px', color: '#ccc' }}>
-                  {c.toFixed(2)}
-                </span>
-              </div>
-            );
-          })
-        )}
-        <div style={{ fontSize: '10px', color: '#888', marginTop: '2px' }}>
-          -1 anti-phase (red) · 0 mono (yellow) · +1 in-phase (green)
+              );
+            })}
+          </div>
+          <div style={{ fontSize: '10px', color: '#888', marginTop: '4px' }}>
+            <span style={{ color: '#3f3' }}>■</span> &lt; -12
+            &nbsp; <span style={{ color: '#fc3' }}>■</span> -12..-3
+            &nbsp; <span style={{ color: '#f33' }}>■</span> &gt; -3 dBFS
+            &nbsp; • peak hold {PEAK_HOLD_DB_PER_S} dB/s
+            &nbsp; • <span style={{ color: '#f00' }}>●</span> clip
+          </div>
         </div>
-      </div>
+      )}
 
-      <div class="debug-section">
-        <h3>
-          Vectorscope &amp; Spectrum
-          <span style={{ marginLeft: '10px', fontWeight: 'normal', textTransform: 'none', letterSpacing: 0 }}>
-            Channel:
-            <select
-              value={selectedCh}
-              onChange={(e) => onSelectChannel(parseInt((e.currentTarget as HTMLSelectElement).value, 10) || 0)}
-              style={{ font: 'inherit', fontSize: '11px', marginLeft: '4px' }}
-            >
-              {Array.from({ length: ch }, (_, i) => (
-                <option value={i}>{i}</option>
-              ))}
-            </select>
-          </span>
-        </h3>
-        <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
-          <canvas
-            ref={scopeRef}
-            style={{ width: `${SCOPE_SIZE}px`, height: `${SCOPE_SIZE}px`, display: 'block', background: '#000' }}
-          />
-          <div style={{ fontSize: '10px', color: '#888', maxWidth: '160px' }}>
-            <div>L → top-left · R → top-right</div>
-            <div>Mono (in-phase) draws a <span style={{ color: '#3f3' }}>vertical</span> line; out-of-phase spreads horizontally.</div>
-            <div style={{ marginTop: '6px', color: '#666' }}>
-              Showing PID {meter.selectedPid} channel {meter.selectedChannel}.
+      {subTab === 'lufs' && (
+        <div class="debug-section">
+          <h3>RMS / Loudness (LUFS)</h3>
+          <div style={{ maxHeight: '500px', overflowY: 'auto' }}>
+            <table class="debug-table">
+              <thead>
+                <tr>
+                  <th style={{ textAlign: 'left', padding: '2px 6px' }}>Ch</th>
+                  <th style={{ textAlign: 'right', padding: '2px 6px' }}>Peak</th>
+                  <th style={{ textAlign: 'right', padding: '2px 6px' }}>RMS</th>
+                  <th style={{ textAlign: 'right', padding: '2px 6px' }}>LUFS</th>
+                  <th style={{ textAlign: 'right', padding: '2px 6px' }}>Clips</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Array.from({ length: ch }, (_, i) => (
+                  <tr key={i}>
+                    <td style={{ textAlign: 'left', padding: '2px 6px' }}>{i}</td>
+                    <td style={{ textAlign: 'right', padding: '2px 6px' }}>{toDb(meter.peaks[i]).toFixed(1)}</td>
+                    <td style={{ textAlign: 'right', padding: '2px 6px' }}>{toDb(meter.rms[i]).toFixed(1)}</td>
+                    <td class={lufsClass(meter.lufs[i] ?? -Infinity)} style={{ textAlign: 'right', padding: '2px 6px' }}>
+                      {(meter.lufs[i] ?? 0).toFixed(1)}
+                    </td>
+                    <td class={(meter.clips[i] ?? 0) > 0 ? 'stat-bad' : ''} style={{ textAlign: 'right', padding: '2px 6px' }}>
+                      {meter.clips[i] ?? 0}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {subTab === 'phase' && (
+        <div class="debug-section">
+          <h3>Phase Correlation (stereo pairs)</h3>
+          {pairCount === 0 ? (
+            <div style={{ color: '#999' }}>No stereo pairs (need ≥ 2 channels).</div>
+          ) : (
+            Array.from({ length: pairCount }, (_, p) => {
+              const c = meter.phase[p] ?? 0;
+              return (
+                <div key={p} style={{ display: 'flex', alignItems: 'center', gap: '6px', margin: '2px 0' }}>
+                  <span style={{ width: '120px', color: '#999', fontSize: '11px' }}>
+                    Pair {p + 1} (ch {2 * p}-{2 * p + 1})
+                  </span>
+                  <div
+                    style={{
+                      position: 'relative',
+                      flex: 1,
+                      height: '12px',
+                      background: 'linear-gradient(to right, #f66, #fc6 50%, #6f6)',
+                      borderRadius: '2px',
+                    }}
+                  >
+                    <div
+                      style={{
+                        position: 'absolute',
+                        left: `${clamp01((c + 1) / 2) * 100}%`,
+                        top: '-2px',
+                        bottom: '-2px',
+                        width: '2px',
+                        background: '#fff',
+                        transform: 'translateX(-1px)',
+                      }}
+                    />
+                  </div>
+                  <span style={{ width: '40px', textAlign: 'right', fontSize: '11px', color: '#ccc' }}>
+                    {c.toFixed(2)}
+                  </span>
+                </div>
+              );
+            })
+          )}
+          <div style={{ fontSize: '10px', color: '#888', marginTop: '4px' }}>
+            -1 anti-phase (red) · 0 mono (yellow) · +1 in-phase (green)
+          </div>
+        </div>
+      )}
+
+      {subTab === 'scope' && (
+        <div class="debug-section">
+          <h3>
+            Vectorscope
+            {channelSelector}
+          </h3>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+            <canvas
+              ref={scopeRef}
+              style={{ width: `${SCOPE_SIZE}px`, height: `${SCOPE_SIZE}px`, display: 'block', background: '#000' }}
+            />
+            <div style={{ fontSize: '10px', color: '#888', maxWidth: '160px' }}>
+              <div>L → top-left · R → top-right</div>
+              <div>Mono (in-phase) draws a <span style={{ color: '#3f3' }}>vertical</span> line; out-of-phase spreads horizontally.</div>
+              <div style={{ marginTop: '6px', color: '#666' }}>
+                Showing PID {meter.selectedPid} channel {meter.selectedChannel}.
+              </div>
             </div>
           </div>
         </div>
-        <div style={{ marginTop: '8px' }}>
+      )}
+
+      {subTab === 'spectrum' && (
+        <div class="debug-section">
+          <h3>
+            Spectrum
+            {channelSelector}
+          </h3>
           <canvas
             ref={specRef}
             style={{ width: '100%', height: `${SPEC_HEIGHT}px`, display: 'block' }}
@@ -364,7 +415,7 @@ export function AudioTab({ store }: Props): JSX.Element {
             {SPEC_BINS} log-spaced bins · range {SPEC_FLOOR}..0 dB · blue=low / red=high freq · white = peak hold
           </div>
         </div>
-      </div>
+      )}
     </>
   );
 }
