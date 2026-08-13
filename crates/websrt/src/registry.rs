@@ -31,12 +31,7 @@ use wtransport::Connection;
 
 /// Per-tick cap on viewer messages drained into a session's sender. Prevents
 /// one fast session from starving others under bulk backlog.
-const MAX_MSGS_PER_TICK: usize = 256;
-
-/// Skip pushing new data when the SRT send buffer is above this many packets
-/// (~90% of the 32768 send_buffer_size). Prevents silent packet drops inside
-/// SendBuffer::push_data, which overwrites the oldest unacked packet.
-const SEND_BUFFER_HIGH_WATER: u64 = 16384;
+const MAX_MSGS_PER_TICK: usize = 32;
 
 /// All per-session state shared between the recv_pump task and the centralized
 /// ticker. Held inside `Arc` so both can reference it concurrently.
@@ -184,11 +179,6 @@ impl SessionRegistry {
                 let (mut actions, mut data) = init.tick(now);
                 if init.is_connected() {
                     for _ in 0..MAX_MSGS_PER_TICK {
-                        if let Some(s) = init.stats() {
-                            if s.tx_buffered_data > SEND_BUFFER_HIGH_WATER {
-                                break;
-                            }
-                        }
                         let maybe_msg = {
                             let mut viewer = entry.viewer.lock();
                             viewer.as_mut().map(|v| v.try_recv())

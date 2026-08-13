@@ -24,7 +24,7 @@ use wtransport::ServerConfig;
 /// Default viewer cap.
 const DEFAULT_MAX_VIEWERS: usize = 16;
 /// Broadcast ring-buffer depth. At ~1700 msg/sec this is ~2.4s of buffer.
-const DEFAULT_BROADCAST_CAPACITY: usize = 32768;
+const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
 
 /// High-level SRT-over-WebTransport gateway.
 ///
@@ -476,7 +476,7 @@ async fn run_ticker(
     shutdown: impl Future<Output = ()>,
 ) {
     let mut ticker = tokio::time::interval(Duration::from_millis(2));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut cleanup_interval = tokio::time::interval(Duration::from_secs(60));
     cleanup_interval.tick().await; // consume immediate first tick
 
