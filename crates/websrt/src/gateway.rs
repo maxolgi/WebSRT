@@ -180,16 +180,9 @@ impl Gateway {
 
     /// Run the WebTransport accept loop until `shutdown` completes.
     pub async fn run(self, shutdown: impl Future<Output = ()>) -> Result<()> {
-        use std::sync::Arc;
-        use wtransport::quinn::TransportConfig;
-
-        let mut transport = TransportConfig::default();
-        transport.congestion_controller_factory(Arc::new(crate::nocc::UnlimitedFactory));
-        transport.datagram_send_buffer_size(4 * 1024 * 1024);
-
         let config = ServerConfig::builder()
             .with_bind_address(self.bind_addr)
-            .with_custom_transport(self.identity, transport)
+            .with_identity(self.identity)
             .max_idle_timeout(Some(self.limits.max_idle_timeout))
             .map_err(|e| anyhow::anyhow!("invalid idle timeout: {e}"))?
             .build();
