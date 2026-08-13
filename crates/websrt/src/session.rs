@@ -267,10 +267,10 @@ pub(crate) fn send_action(
                 tracing::debug!(len = bytes.len(), "sim-loss dropped");
                 return Ok(());
             }
-            if bytes.len() > 1200 {
+            if bytes.len() > 1400 {
                 tracing::warn!(
                     len = bytes.len(),
-                    "outgoing datagram > 1200B; QUIC may reject"
+                    "outgoing datagram > 1400B; QUIC may reject"
                 );
             }
             if let Err(e) = conn.send_datagram(bytes) {

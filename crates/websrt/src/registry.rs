@@ -31,7 +31,7 @@ use wtransport::Connection;
 
 /// Per-tick cap on viewer messages drained into a session's sender. Prevents
 /// one fast session from starving others under bulk backlog.
-const MAX_MSGS_PER_TICK: usize = 32;
+const MAX_MSGS_PER_TICK: usize = 256;
 
 /// All per-session state shared between the recv_pump task and the centralized
 /// ticker. Held inside `Arc` so both can reference it concurrently.

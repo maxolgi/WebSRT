@@ -18,8 +18,10 @@ use srt_protocol::statistics::SocketStatistics;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
-/// WebTransport datagram PMTU — must match the wasm-side constant.
-pub const PAYLOAD_SIZE: u64 = 1100;
+/// SRT payload size: standard MPEG-TS value of 1316 bytes (7 × 188-byte TS
+/// packets per SRT packet). Must match the wasm-side constant. The HSv5
+/// handshake negotiates `min(gateway, browser)`, so both sides must use this.
+pub const PAYLOAD_SIZE: u64 = 1316;
 
 /// Configurable SRT protocol parameters.
 #[derive(Debug, Clone)]
@@ -45,7 +47,7 @@ impl Default for SrtConfig {
     fn default() -> Self {
         Self {
             payload_size: PAYLOAD_SIZE,
-            send_buffer_size: 8192,
+            send_buffer_size: 32768,
             recv_buffer_size: 8192,
             peer_idle_timeout: std::time::Duration::from_secs(30),
             send_latency: std::time::Duration::from_millis(10),

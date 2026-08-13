@@ -24,7 +24,7 @@ use wtransport::ServerConfig;
 /// Default viewer cap.
 const DEFAULT_MAX_VIEWERS: usize = 16;
 /// Broadcast ring-buffer depth. At ~1700 msg/sec this is ~2.4s of buffer.
-const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
+const DEFAULT_BROADCAST_CAPACITY: usize = 32768;
 
 /// High-level SRT-over-WebTransport gateway.
 ///
@@ -349,13 +349,13 @@ impl Gateway {
                     tracing::info!(%peer, "WT session established");
 
                     match connection.max_datagram_size() {
-                        Some(max) if max >= 1200 => {
+                        Some(max) if max >= 1332 => {
                             tracing::debug!(max, "WT datagram PMTU adequate");
                         }
                         Some(max) => {
                             tracing::warn!(
                                 max,
-                                required = 1200,
+                                required = 1332,
                                 "WT datagram PMTU too small; closing session"
                             );
                             connection.close(
@@ -476,7 +476,7 @@ async fn run_ticker(
     shutdown: impl Future<Output = ()>,
 ) {
     let mut ticker = tokio::time::interval(Duration::from_millis(2));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut cleanup_interval = tokio::time::interval(Duration::from_secs(60));
     cleanup_interval.tick().await; // consume immediate first tick
 
