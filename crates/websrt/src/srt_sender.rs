@@ -39,6 +39,12 @@ pub struct SrtConfig {
     /// True if the stream has been identified as SMPTE 302M audio (CBR). Selects
     /// a tighter `LiveBandwidthMode::Estimated` overhead than VBR video.
     pub is_s302m: bool,
+    /// `LiveBandwidthMode::Estimated` overhead percentage for s302m audio
+    /// streams. Default 100 = 2× multiplier.
+    pub s302m_overhead_pct: u32,
+    /// `LiveBandwidthMode::Estimated` overhead percentage for non-s302m
+    /// streams. Default 900 = 10× multiplier.
+    pub video_overhead_pct: u32,
 }
 
 impl Default for SrtConfig {
@@ -51,6 +57,8 @@ impl Default for SrtConfig {
             send_latency: std::time::Duration::from_millis(10),
             recv_latency: std::time::Duration::from_millis(10),
             is_s302m: false,
+            s302m_overhead_pct: 100,
+            video_overhead_pct: 900,
         }
     }
 }
@@ -151,7 +159,11 @@ impl SrtInitiator {
         // s302m audio is CBR, so 2× overhead (Percent(100)) paces safely;
         // VBR video needs 10× overhead (Percent(900)) to absorb I-frame bursts.
         settings.bandwidth = srt_protocol::options::LiveBandwidthMode::Estimated {
-            overhead: srt_protocol::options::Percent(if config.is_s302m { 100 } else { 900 }),
+            overhead: srt_protocol::options::Percent(if config.is_s302m {
+                config.s302m_overhead_pct
+            } else {
+                config.video_overhead_pct
+            } as u64),
             expected: srt_protocol::options::DataRate(2_000_000),
         };
         settings.too_late_packet_drop = true;

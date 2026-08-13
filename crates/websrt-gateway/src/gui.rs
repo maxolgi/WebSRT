@@ -60,6 +60,8 @@ struct GuiConfig {
     web_port: u16,
     web_bind: String,
     max_viewers: usize,
+    s302m_overhead: u32,
+    video_overhead: u32,
     #[cfg(feature = "sim-loss")]
     #[serde(default)]
     sim_loss: u8,
@@ -149,6 +151,8 @@ impl GuiConfig {
             web_port: cli.web_port,
             web_bind: "0.0.0.0".to_string(),
             max_viewers: cli.max_viewers,
+            s302m_overhead: cli.s302m_overhead,
+            video_overhead: cli.video_overhead,
             #[cfg(feature = "sim-loss")]
             sim_loss: cli.sim_loss,
             #[cfg(feature = "sim-loss")]
@@ -181,6 +185,8 @@ impl GuiConfig {
             web_bind: self.web_bind.clone(),
             web_root: None,
             max_viewers: self.max_viewers,
+            s302m_overhead: self.s302m_overhead,
+            video_overhead: self.video_overhead,
             #[cfg(feature = "sim-loss")]
             sim_loss: self.sim_loss,
             #[cfg(feature = "sim-loss")]
@@ -538,6 +544,20 @@ fn draw_config_form(ui: &mut egui::Ui, config: &mut GuiConfig, enabled: bool) {
             ui.add_enabled(
                 enabled,
                 egui::DragValue::new(&mut config.latency).range(1..=10_000),
+            );
+            ui.end_row();
+
+            ui.label("s302m overhead %:");
+            ui.add_enabled(
+                enabled,
+                egui::DragValue::new(&mut config.s302m_overhead).range(0..=5000),
+            );
+            ui.end_row();
+
+            ui.label("video overhead %:");
+            ui.add_enabled(
+                enabled,
+                egui::DragValue::new(&mut config.video_overhead).range(0..=5000),
             );
             ui.end_row();
 

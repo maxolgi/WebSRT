@@ -147,6 +147,14 @@ pub struct Cli {
     #[arg(long, default_value_t = 120u64)]
     pub latency: u64,
 
+    /// Estimated bandwidth overhead % for s302m audio (100 = 2× multiplier).
+    #[arg(long, default_value_t = 100u32)]
+    pub s302m_overhead: u32,
+
+    /// Estimated bandwidth overhead % for video streams (900 = 10× multiplier).
+    #[arg(long, default_value_t = 900u32)]
+    pub video_overhead: u32,
+
     /// SRT encryption passphrase for the OBS leg (10–79 chars).
     /// If set, AES encryption is negotiated on the SRT connection.
     #[arg(long)]
@@ -465,7 +473,9 @@ pub(crate) async fn run_gateway(
     let mut builder = Gateway::builder()
         .bind_addr(format!("{}:{}", cli.bind, cli.wt_port).parse::<std::net::SocketAddr>()?)
         .identity(cert.identity.clone_identity())
-        .max_viewers(cli.max_viewers);
+        .max_viewers(cli.max_viewers)
+        .s302m_overhead(cli.s302m_overhead)
+        .video_overhead(cli.video_overhead);
 
     #[cfg(feature = "sim-loss")]
     {

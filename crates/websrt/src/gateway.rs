@@ -532,6 +532,16 @@ impl GatewayBuilder {
         self
     }
 
+    pub fn s302m_overhead(mut self, pct: u32) -> Self {
+        self.srt_config.s302m_overhead_pct = pct;
+        self
+    }
+
+    pub fn video_overhead(mut self, pct: u32) -> Self {
+        self.srt_config.video_overhead_pct = pct;
+        self
+    }
+
     /// Set the full SRT protocol configuration. Overrides any prior `latency_ms`
     /// settings (and vice-versa — whichever is called last wins).
     pub fn srt_config(mut self, config: SrtConfig) -> Self {
