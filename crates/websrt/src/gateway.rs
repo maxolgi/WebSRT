@@ -494,7 +494,7 @@ async fn run_ticker(
                 }
             }
             _ = ticker.tick() => {
-                registry.tick_all().await;
+                registry.tick_all(&streams).await;
             }
         }
     }

@@ -9,8 +9,36 @@ use anyhow::Result;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio::sync::Notify;
+
+/// How often the EWMA message-rate sampler refreshes from `messages_sent`.
+const RATE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+/// Per-tick cap returned when the stream hasn't been measured yet.
+const RATE_DEFAULT_CAP: usize = 32;
+/// Extra messages per tick beyond the measured rate, for slow catch-up.
+const RATE_OVERHEAD: usize = 2;
+
+/// Lazy-sampled EWMA of a stream's message rate (messages/sec). Sampled
+/// on read from the atomic `messages_sent` counter every
+/// [`RATE_SAMPLE_INTERVAL`]. A 90/10 EWMA keeps the estimate stable against
+/// short bursts.
+struct RateSampler {
+    last_sample: Instant,
+    last_count: u64,
+    ewma_msg_per_sec: f64,
+}
+
+impl RateSampler {
+    fn new() -> Self {
+        Self {
+            last_sample: Instant::now(),
+            last_count: 0,
+            ewma_msg_per_sec: 0.0,
+        }
+    }
+}
 
 /// One viewer's subscription. Holds a `broadcast::Receiver`. Each browser
 /// session owns one of these and polls it for messages to feed into its
@@ -40,6 +68,7 @@ pub struct Broadcaster {
     /// `select!` to fire and the task to exit cleanly.
     shutdown: Arc<Notify>,
     task_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    rate_sampler: Mutex<RateSampler>,
 }
 
 impl Broadcaster {
@@ -70,6 +99,7 @@ impl Broadcaster {
             send_failures: AtomicU64::new(0),
             shutdown: shutdown.clone(),
             task_handle: Mutex::new(None),
+            rate_sampler: Mutex::new(RateSampler::new()),
         });
         let bc_clone = broadcaster.clone();
         let tx2 = tx.clone();
@@ -178,6 +208,35 @@ impl Broadcaster {
     pub fn send_failures(&self) -> u64 {
         self.send_failures.load(Ordering::Relaxed)
     }
+
+    /// Estimated per-tick message cap for smooth drain. Samples
+    /// [`messages_sent`](Self::messages_sent) every [`RATE_SAMPLE_INTERVAL`]
+    /// and maintains a 90/10 EWMA. Returns `ceil(ewma / ticks_per_sec) + 2`,
+    /// or [`RATE_DEFAULT_CAP`] when no measurement exists yet.
+    pub fn msg_rate_per_tick(&self, ticks_per_sec: u32) -> usize {
+        let mut sampler = self.rate_sampler.lock();
+        let now = Instant::now();
+        if now.duration_since(sampler.last_sample) >= RATE_SAMPLE_INTERVAL {
+            let current = self.messages_sent.load(Ordering::Relaxed);
+            let elapsed = now.duration_since(sampler.last_sample).as_secs_f64();
+            if elapsed > 0.0 {
+                let delta = current.saturating_sub(sampler.last_count);
+                let instant_rate = delta as f64 / elapsed;
+                if sampler.ewma_msg_per_sec == 0.0 {
+                    sampler.ewma_msg_per_sec = instant_rate;
+                } else {
+                    sampler.ewma_msg_per_sec = 0.9 * sampler.ewma_msg_per_sec + 0.1 * instant_rate;
+                }
+            }
+            sampler.last_sample = now;
+            sampler.last_count = current;
+        }
+        if sampler.ewma_msg_per_sec <= 0.0 || ticks_per_sec == 0 {
+            return RATE_DEFAULT_CAP;
+        }
+        let per_tick = (sampler.ewma_msg_per_sec / ticks_per_sec as f64).ceil() as usize;
+        per_tick.saturating_add(RATE_OVERHEAD).max(1)
+    }
 }
 
 impl ViewerRx {
@@ -189,6 +248,20 @@ impl ViewerRx {
             Err(broadcast::error::TryRecvError::Empty) => Ok(None),
             Err(broadcast::error::TryRecvError::Lagged(n)) => Err(n),
             Err(broadcast::error::TryRecvError::Closed) => Ok(None),
+        }
+    }
+
+    /// Drain and discard all immediately-available messages. Called once
+    /// when a viewer first connects so it starts from the live edge instead
+    /// of replaying messages that accumulated during the SRT handshake —
+    /// those are already past the TSBPD deadline and delivering them only
+    /// triggers NAK/retransmit churn.
+    pub fn drop_backlog(&mut self) {
+        loop {
+            match self.try_recv() {
+                Ok(Some(_)) | Err(_) => continue,
+                Ok(None) => break,
+            }
         }
     }
 }

@@ -121,6 +121,17 @@ impl StreamRegistry {
         streams.get(name).map(|b| b.viewer_count()).unwrap_or(0)
     }
 
+    /// Per-tick message drain cap for a stream, based on the broadcaster's
+    /// EWMA message-rate estimate. Falls back to 32 when the stream is
+    /// unknown or hasn't been measured yet.
+    pub fn msg_rate_per_tick(&self, name: &str, ticks_per_sec: u32) -> usize {
+        let streams = self.streams.lock();
+        streams
+            .get(name)
+            .map(|b| b.msg_rate_per_tick(ticks_per_sec))
+            .unwrap_or(32)
+    }
+
     /// Sum of viewer counts across all streams (for health reporting).
     pub fn total_viewers(&self) -> usize {
         let streams = self.streams.lock();

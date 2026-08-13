@@ -167,6 +167,7 @@ impl BrowserSession {
             publish_dropped: AtomicU64::new(0),
             publish_first_drop_logged: AtomicBool::new(false),
             last_srt_stats: StdMutex::new(None),
+            viewer_primed: AtomicBool::new(false),
             guard,
             peer,
             stream_name,

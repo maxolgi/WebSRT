@@ -20,6 +20,7 @@ use crate::broadcaster::ViewerRx;
 use crate::ingest::TsMessage;
 use crate::session::{route_release_data, send_action, LossInjector};
 use crate::srt_sender::SrtInitiator;
+use crate::stream_registry::StreamRegistry;
 use parking_lot::{Mutex as StdMutex, RwLock};
 use srt_protocol::statistics::SocketStatistics;
 use std::collections::HashMap;
@@ -29,9 +30,12 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 use wtransport::Connection;
 
-/// Per-tick cap on viewer messages drained into a session's sender. Prevents
-/// one fast session from starving others under bulk backlog.
+/// Hard ceiling on viewer messages drained per tick, regardless of the
+/// stream's measured rate. Prevents runaway bursts.
 const MAX_MSGS_PER_TICK: usize = 256;
+/// Ticker cadence: one tick every 2ms → 500 ticks/sec. Used to convert the
+/// broadcaster's EWMA messages/sec estimate into a per-tick cap.
+const TICKS_PER_SEC: u32 = 500;
 
 /// All per-session state shared between the recv_pump task and the centralized
 /// ticker. Held inside `Arc` so both can reference it concurrently.
@@ -58,6 +62,10 @@ pub(crate) struct SessionEntry {
     pub publish_first_drop_logged: AtomicBool,
     /// Last SRT stats snapshot, refreshed each tick for periodic logging.
     pub last_srt_stats: StdMutex<Option<SocketStatistics>>,
+    /// Set to true the first tick the initiator is connected, after draining
+    /// the viewer's stale backlog. Prevents replaying messages that
+    /// accumulated during the handshake.
+    pub viewer_primed: AtomicBool,
     /// RAII guard for connection limiting. Drops when the session exits,
     /// releasing the per-IP and global session slot. Field is never read —
     /// its purpose is to be held and dropped (like `SrtIngester.kind`).
@@ -149,7 +157,7 @@ impl SessionRegistry {
 
     /// Drive every active session's SRT state machine once. Called by the
     /// single ticker task approximately every 2ms.
-    pub(crate) async fn tick_all(&self) {
+    pub(crate) async fn tick_all(&self, streams: &StreamRegistry) {
         let now = Instant::now();
         let entries = self.snapshot();
         let mut to_remove: Vec<u64> = Vec::new();
@@ -178,7 +186,16 @@ impl SessionRegistry {
                 let mut init = entry.initiator.lock().await;
                 let (mut actions, mut data) = init.tick(now);
                 if init.is_connected() {
-                    for _ in 0..MAX_MSGS_PER_TICK {
+                    if !entry.viewer_primed.swap(true, Ordering::Relaxed) {
+                        let mut viewer = entry.viewer.lock();
+                        if let Some(v) = viewer.as_mut() {
+                            v.drop_backlog();
+                        }
+                    }
+                    let cap = streams
+                        .msg_rate_per_tick(&entry.stream_name, TICKS_PER_SEC)
+                        .min(MAX_MSGS_PER_TICK);
+                    for _ in 0..cap {
                         let maybe_msg = {
                             let mut viewer = entry.viewer.lock();
                             viewer.as_mut().map(|v| v.try_recv())
@@ -347,6 +364,7 @@ mod tests {
             publish_dropped: AtomicU64::new(0),
             publish_first_drop_logged: AtomicBool::new(false),
             last_srt_stats: StdMutex::new(None),
+            viewer_primed: AtomicBool::new(false),
             guard: None,
             peer: DUMMY_REMOTE,
             stream_name: format!("stream-{session_id}"),
@@ -420,6 +438,7 @@ mod tests {
             publish_dropped: AtomicU64::new(0),
             publish_first_drop_logged: AtomicBool::new(false),
             last_srt_stats: StdMutex::new(None),
+            viewer_primed: AtomicBool::new(false),
             guard: None,
             peer: DUMMY_REMOTE,
             stream_name: format!("stream-{session_id}"),
@@ -429,13 +448,14 @@ mod tests {
     #[tokio::test]
     async fn empty_registry_is_noop() {
         let reg = SessionRegistry::new();
+        let streams = StreamRegistry::new(4, 8);
         assert_eq!(reg.active_session_count(), 0);
         assert!(reg.snapshot().is_empty());
         assert!(reg.snapshot_sessions().is_empty());
         // tick_all on empty registry must not panic across rapid back-to-back
         // calls (exercises both branches of the should_log_stats gate).
-        reg.tick_all().await;
-        reg.tick_all().await;
+        reg.tick_all(&streams).await;
+        reg.tick_all(&streams).await;
     }
 
     #[tokio::test]
@@ -536,6 +556,7 @@ mod tests {
     async fn tick_all_removes_finished_entries() {
         let (server, addr, hash) = make_test_server().await;
         let reg = SessionRegistry::new();
+        let streams = StreamRegistry::new(4, 8);
 
         let conn1 = accept_one_conn(&server, hash, addr.port()).await;
         let e1 = make_entry(conn1, 1, None);
@@ -550,7 +571,7 @@ mod tests {
         assert_eq!(reg.snapshot().len(), 2);
         // Finished entries hit the early `continue` branch — no initiator or
         // conn activity; they land in `to_remove` and are pruned at the end.
-        reg.tick_all().await;
+        reg.tick_all(&streams).await;
         assert_eq!(
             reg.snapshot().len(),
             0,
@@ -568,14 +589,15 @@ mod tests {
         // inner stats-logging loop has work to do on the firing branch.
         let (server, addr, hash) = make_test_server().await;
         let reg = SessionRegistry::new();
+        let streams = StreamRegistry::new(4, 8);
 
         let conn = accept_one_conn(&server, hash, addr.port()).await;
         let entry = make_entry(conn, 1, None);
         *entry.last_srt_stats.lock() = Some(SocketStatistics::default());
         reg.insert(entry);
 
-        reg.tick_all().await; // should_log_stats = true (first call)
-        reg.tick_all().await; // should_log_stats = false (<5s since last)
+        reg.tick_all(&streams).await; // should_log_stats = true (first call)
+        reg.tick_all(&streams).await; // should_log_stats = false (<5s since last)
 
         server.close(0u32.into(), b"");
     }
@@ -627,6 +649,7 @@ mod tests {
 
         let (server, addr, hash) = make_test_server().await;
         let conn = accept_one_conn(&server, hash, addr.port()).await;
+        let streams = StreamRegistry::new(4, 8);
 
         let (bc_tx, bc_rx) = tokio::sync::mpsc::channel::<TsMessage>(16);
         let ingester = ChannelIngester::new(bc_rx);
@@ -638,10 +661,13 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let entry = make_connected_entry(conn, 1, Some(viewer_rx));
+        // Skip the first-connect backlog drop so the test messages survive
+        // to be drained by the loop below.
+        entry.viewer_primed.store(true, Ordering::Relaxed);
         let reg = SessionRegistry::new();
         reg.insert(entry.clone());
 
-        reg.tick_all().await;
+        reg.tick_all(&streams).await;
 
         assert!(
             entry.messages_pushed.load(Ordering::Relaxed) > 0,
@@ -660,6 +686,7 @@ mod tests {
 
         let (server, addr, hash) = make_test_server().await;
         let conn = accept_one_conn(&server, hash, addr.port()).await;
+        let streams = StreamRegistry::new(4, 8);
 
         let capacity = 2usize;
         let (bc_tx, bc_rx) = tokio::sync::mpsc::channel::<TsMessage>(16);
@@ -672,10 +699,13 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let entry = make_connected_entry(conn, 1, Some(viewer_rx));
+        // Skip the first-connect backlog drop so the overflow is visible to
+        // the drain loop's Lagged branch.
+        entry.viewer_primed.store(true, Ordering::Relaxed);
         let reg = SessionRegistry::new();
         reg.insert(entry.clone());
 
-        reg.tick_all().await;
+        reg.tick_all(&streams).await;
 
         assert!(
             entry.viewer_lag_count.load(Ordering::Relaxed) > 0,

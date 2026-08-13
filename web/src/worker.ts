@@ -398,7 +398,9 @@ async function runSrtLoop(myGen: number) {
   let readPromise = r.read();
   let lastCycle = performance.now();
 
-  for (;;) {
+  const BATCH_SIZE = 16;
+
+  mainLoop: for (;;) {
     if (myGen !== gen || !rx || !inited) break;
 
     const POLL_MS = 5;
@@ -425,6 +427,34 @@ async function runSrtLoop(myGen: number) {
       if (VERBOSE) console.debug('wt datagram', value.byteLength, 'bytes');
       processActions(rx.handle_datagram(value, nowUs));
       readPromise = r.read();
+
+      // Batch: drain up to BATCH_SIZE-1 more datagrams that are already
+      // buffered in the WebTransport receive queue before yielding back to
+      // poll+flush. Racing readPromise against an already-resolved sentinel
+      // resolves in a single microtask when data is waiting — far cheaper
+      // than a full event-loop turn. When the queue is empty the sentinel
+      // wins and we fall through to poll.
+      for (let i = 1; i < BATCH_SIZE; i++) {
+        const next = await Promise.race([
+          readPromise.then(
+            (res) => ({ kind: 'dgram' as const, res }),
+            (err: unknown) => ({ kind: 'read_error' as const, err }),
+          ),
+          Promise.resolve({ kind: 'idle' as const }),
+        ]);
+        if (next.kind === 'idle') break;
+        if (next.kind === 'read_error') {
+          if (myGen === gen) {
+            queue({ type: 'log', msg: `wt read: ${next.err}`, cls: 'err' });
+            flushOutgoing();
+          }
+          break mainLoop;
+        }
+        if (next.res.done || !next.res.value) break mainLoop;
+        if (VERBOSE) console.debug('wt datagram', next.res.value.byteLength, 'bytes');
+        processActions(rx.handle_datagram(next.res.value, nowUs));
+        readPromise = r.read();
+      }
     } else if (winner.kind === 'read_error') {
       if (myGen === gen) {
         queue({ type: 'log', msg: `wt read: ${winner.err}`, cls: 'err' });
