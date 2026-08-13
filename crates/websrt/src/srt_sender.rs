@@ -36,11 +36,9 @@ pub struct SrtConfig {
     pub send_latency: std::time::Duration,
     /// TSBPD receive latency.
     pub recv_latency: std::time::Duration,
-    /// Fixed send rate in bytes/sec for `LiveBandwidthMode::Max`, pacing the
-    /// SND timer to the measured input rate instead of the asymmetric EWMA in
-    /// `Estimated` mode (which oscillates with batchy input). `None` falls back
-    /// to `Estimated` mode.
-    pub max_send_rate: Option<u64>,
+    /// True if the stream has been identified as SMPTE 302M audio (CBR). Selects
+    /// a tighter `LiveBandwidthMode::Estimated` overhead than VBR video.
+    pub is_s302m: bool,
 }
 
 impl Default for SrtConfig {
@@ -52,7 +50,7 @@ impl Default for SrtConfig {
             peer_idle_timeout: std::time::Duration::from_secs(30),
             send_latency: std::time::Duration::from_millis(10),
             recv_latency: std::time::Duration::from_millis(10),
-            max_send_rate: None,
+            is_s302m: false,
         }
     }
 }
@@ -103,9 +101,6 @@ impl SrtConfig {
         if self.recv_latency < std::time::Duration::from_millis(1) {
             anyhow::bail!("recv_latency must be >= 1ms, got {:?}", self.recv_latency);
         }
-        if self.max_send_rate == Some(0) {
-            anyhow::bail!("max_send_rate must be > 0 when set, got 0");
-        }
         Ok(())
     }
 }
@@ -153,20 +148,11 @@ impl SrtInitiator {
         settings.peer_idle_timeout = config.peer_idle_timeout;
         settings.send_latency = config.send_latency;
         settings.recv_latency = config.recv_latency;
-        // Pace the SND timer to the measured input rate when available. A fixed
-        // `Max` rate avoids the feedback loop between `Estimated`'s asymmetric
-        // EWMA (fast-attack/slow-decay) and the batchy gateway input, which
-        // produces large throughput oscillation at high TSBPD latency. When no
-        // measurement is available yet, fall back to `Estimated` with a 2 MB/s
-        // floor SRT paces at before it has measured.
-        settings.bandwidth = match config.max_send_rate {
-            Some(rate) => {
-                srt_protocol::options::LiveBandwidthMode::Max(srt_protocol::options::DataRate(rate))
-            }
-            None => srt_protocol::options::LiveBandwidthMode::Estimated {
-                overhead: srt_protocol::options::Percent(25),
-                expected: srt_protocol::options::DataRate(2_000_000),
-            },
+        // s302m audio is CBR, so 2× overhead (Percent(100)) paces safely;
+        // VBR video needs 10× overhead (Percent(900)) to absorb I-frame bursts.
+        settings.bandwidth = srt_protocol::options::LiveBandwidthMode::Estimated {
+            overhead: srt_protocol::options::Percent(if config.is_s302m { 100 } else { 900 }),
+            expected: srt_protocol::options::DataRate(2_000_000),
         };
         settings.too_late_packet_drop = true;
         settings.initial_rtt = Some(initial_rtt);

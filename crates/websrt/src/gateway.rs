@@ -403,17 +403,7 @@ impl Gateway {
                     };
 
                     let mut srt_config = self.srt_config.clone();
-                    // Seed the SRT send rate from the broadcaster's measured
-                    // bitrate (×1.25 for 25% overhead) — but only for
-                    // high-bitrate streams where Estimated mode's asymmetric EWMA
-                    // causes throughput oscillation at high TSBPD latency.
-                    // Low-bitrate VBR video (webcam, screen-share) stays on
-                    // Estimated: Max mode's fixed ceiling would throttle I-frame
-                    // bursts and cause too-late drops.
-                    let measured = self.streams.measured_bitrate_bps(&stream_name);
-                    if measured > 4_000_000 {
-                        srt_config.max_send_rate = Some(measured * 5 / 4);
-                    }
+                    srt_config.is_s302m = self.streams.is_s302m(&stream_name);
 
                     let (entry, handle) = BrowserSession::create(
                         connection, viewer,

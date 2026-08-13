@@ -121,14 +121,11 @@ impl StreamRegistry {
         streams.get(name).map(|b| b.viewer_count()).unwrap_or(0)
     }
 
-    /// Measured bitrate (bytes/sec) for a single stream. Returns 0 if the
-    /// stream doesn't exist or hasn't accumulated enough samples yet.
-    pub fn measured_bitrate_bps(&self, name: &str) -> u64 {
+    /// True if the stream has been identified as SMPTE 302M audio. Returns
+    /// `false` if the stream doesn't exist.
+    pub fn is_s302m(&self, name: &str) -> bool {
         let streams = self.streams.lock();
-        streams
-            .get(name)
-            .map(|b| b.measured_bitrate_bps())
-            .unwrap_or(0)
+        streams.get(name).map(|b| b.is_s302m()).unwrap_or(false)
     }
 
     /// Sum of viewer counts across all streams (for health reporting).

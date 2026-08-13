@@ -9,7 +9,6 @@ use anyhow::Result;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::broadcast;
 use tokio::sync::Notify;
 
@@ -37,16 +36,11 @@ pub struct Broadcaster {
     messages_sent: AtomicU64,
     /// Number of offered messages that had no active receiver (dropped).
     send_failures: AtomicU64,
-    /// Cumulative payload bytes pulled from the source and offered to the
-    /// broadcast channel. Sampled by `measured_bitrate_bps` to derive a fixed
-    /// send rate for `LiveBandwidthMode::Max`, avoiding the feedback loop that
-    /// `LiveBandwidthMode::Estimated` creates with the batchy gateway input.
-    bytes_sent: AtomicU64,
-    /// `(last_sample_time, last_total_bytes)` — baseline for the next EWMA
-    /// sample. Updated lazily on each `measured_bitrate_bps` call.
-    rate_sample: Mutex<(Instant, u64)>,
-    /// Current EWMA of the stream bitrate, in bytes/sec.
-    ewma_rate_bps: AtomicU64,
+    /// True once codec detection has concluded (found BSSD, or scanned enough
+    /// messages to conclude the stream is not s302m).
+    codec_detected: AtomicBool,
+    /// True if the stream has been identified as SMPTE 302M audio.
+    is_s302m: AtomicBool,
     /// Shutdown signal. `notify_one()` on this causes the background task's
     /// `select!` to fire and the task to exit cleanly.
     shutdown: Arc<Notify>,
@@ -79,9 +73,8 @@ impl Broadcaster {
             alive,
             messages_sent: AtomicU64::new(0),
             send_failures: AtomicU64::new(0),
-            bytes_sent: AtomicU64::new(0),
-            rate_sample: Mutex::new((Instant::now(), 0)),
-            ewma_rate_bps: AtomicU64::new(0),
+            codec_detected: AtomicBool::new(false),
+            is_s302m: AtomicBool::new(false),
             shutdown: shutdown.clone(),
             task_handle: Mutex::new(None),
         });
@@ -102,9 +95,14 @@ impl Broadcaster {
                             Ok(Some(msg)) => {
                                 sent += 1;
                                 bc_clone.messages_sent.fetch_add(1, Ordering::Relaxed);
-                                bc_clone
-                                    .bytes_sent
-                                    .fetch_add(msg.1.len() as u64, Ordering::Relaxed);
+                                if !bc_clone.codec_detected.load(Ordering::Relaxed) {
+                                    if msg.1.windows(4).any(|w| w == b"BSSD") {
+                                        bc_clone.is_s302m.store(true, Ordering::Relaxed);
+                                        bc_clone.codec_detected.store(true, Ordering::Relaxed);
+                                    } else if sent >= 1000 {
+                                        bc_clone.codec_detected.store(true, Ordering::Relaxed);
+                                    }
+                                }
                                 if tx2.send(msg).is_err() {
                                     if tx2.receiver_count() > 0 {
                                         bc_clone.send_failures.fetch_add(1, Ordering::Relaxed);
@@ -196,37 +194,9 @@ impl Broadcaster {
         self.send_failures.load(Ordering::Relaxed)
     }
 
-    /// Measured stream bitrate in bytes/sec (lazy-sampled EWMA). Returns 0
-    /// until at least one 2-second sample window has elapsed since spawn, so a
-    /// freshly started stream reports no measurement. The rate is refreshed on
-    /// read: if 2+ seconds have passed since the last sample, a new point is
-    /// folded into the EWMA (`ewma = ewma*9/10 + instant*1/10`); the first
-    /// non-zero sample seeds the EWMA directly.
-    pub fn measured_bitrate_bps(&self) -> u64 {
-        let now = Instant::now();
-        let mut sample = self.rate_sample.lock();
-        let elapsed = now.duration_since(sample.0);
-        if elapsed >= std::time::Duration::from_secs(2) {
-            let total = self.bytes_sent.load(Ordering::Relaxed);
-            let delta_bytes = total.saturating_sub(sample.1);
-            let elapsed_ms = elapsed.as_millis() as u64;
-            let instant_rate = if elapsed_ms > 0 {
-                delta_bytes * 1000 / elapsed_ms
-            } else {
-                0
-            };
-            let prev = self.ewma_rate_bps.load(Ordering::Relaxed);
-            let new_ewma = if prev == 0 {
-                instant_rate
-            } else {
-                (prev * 9 + instant_rate) / 10
-            };
-            self.ewma_rate_bps.store(new_ewma, Ordering::Relaxed);
-            *sample = (now, total);
-            new_ewma
-        } else {
-            self.ewma_rate_bps.load(Ordering::Relaxed)
-        }
+    /// True if the stream has been identified as SMPTE 302M audio.
+    pub fn is_s302m(&self) -> bool {
+        self.is_s302m.load(Ordering::Relaxed)
     }
 }
 
