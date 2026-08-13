@@ -60,8 +60,7 @@ struct GuiConfig {
     web_port: u16,
     web_bind: String,
     max_viewers: usize,
-    s302m_overhead: u32,
-    video_overhead: u32,
+    max_bandwidth: u64,
     #[cfg(feature = "sim-loss")]
     #[serde(default)]
     sim_loss: u8,
@@ -151,8 +150,7 @@ impl GuiConfig {
             web_port: cli.web_port,
             web_bind: "0.0.0.0".to_string(),
             max_viewers: cli.max_viewers,
-            s302m_overhead: cli.s302m_overhead,
-            video_overhead: cli.video_overhead,
+            max_bandwidth: cli.max_bandwidth,
             #[cfg(feature = "sim-loss")]
             sim_loss: cli.sim_loss,
             #[cfg(feature = "sim-loss")]
@@ -185,8 +183,7 @@ impl GuiConfig {
             web_bind: self.web_bind.clone(),
             web_root: None,
             max_viewers: self.max_viewers,
-            s302m_overhead: self.s302m_overhead,
-            video_overhead: self.video_overhead,
+            max_bandwidth: self.max_bandwidth,
             #[cfg(feature = "sim-loss")]
             sim_loss: self.sim_loss,
             #[cfg(feature = "sim-loss")]
@@ -547,18 +544,12 @@ fn draw_config_form(ui: &mut egui::Ui, config: &mut GuiConfig, enabled: bool) {
             );
             ui.end_row();
 
-            ui.label("s302m overhead %:");
+            ui.label("Max bandwidth (kbps):");
             ui.add_enabled(
                 enabled,
-                egui::DragValue::new(&mut config.s302m_overhead).range(0..=5000),
-            );
-            ui.end_row();
-
-            ui.label("video overhead %:");
-            ui.add_enabled(
-                enabled,
-                egui::DragValue::new(&mut config.video_overhead).range(0..=5000),
-            );
+                egui::DragValue::new(&mut config.max_bandwidth).range(0..=1_000_000),
+            )
+            .on_hover_text("0 = unlimited");
             ui.end_row();
 
             ui.label("SRT passphrase:");

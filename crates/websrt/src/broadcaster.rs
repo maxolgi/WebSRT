@@ -36,11 +36,6 @@ pub struct Broadcaster {
     messages_sent: AtomicU64,
     /// Number of offered messages that had no active receiver (dropped).
     send_failures: AtomicU64,
-    /// True once codec detection has concluded (found BSSD, or scanned enough
-    /// messages to conclude the stream is not s302m).
-    codec_detected: AtomicBool,
-    /// True if the stream has been identified as SMPTE 302M audio.
-    is_s302m: AtomicBool,
     /// Shutdown signal. `notify_one()` on this causes the background task's
     /// `select!` to fire and the task to exit cleanly.
     shutdown: Arc<Notify>,
@@ -73,8 +68,6 @@ impl Broadcaster {
             alive,
             messages_sent: AtomicU64::new(0),
             send_failures: AtomicU64::new(0),
-            codec_detected: AtomicBool::new(false),
-            is_s302m: AtomicBool::new(false),
             shutdown: shutdown.clone(),
             task_handle: Mutex::new(None),
         });
@@ -95,14 +88,6 @@ impl Broadcaster {
                             Ok(Some(msg)) => {
                                 sent += 1;
                                 bc_clone.messages_sent.fetch_add(1, Ordering::Relaxed);
-                                if !bc_clone.codec_detected.load(Ordering::Relaxed) {
-                                    if msg.1.windows(4).any(|w| w == b"BSSD") {
-                                        bc_clone.is_s302m.store(true, Ordering::Relaxed);
-                                        bc_clone.codec_detected.store(true, Ordering::Relaxed);
-                                    } else if sent >= 1000 {
-                                        bc_clone.codec_detected.store(true, Ordering::Relaxed);
-                                    }
-                                }
                                 if tx2.send(msg).is_err() {
                                     if tx2.receiver_count() > 0 {
                                         bc_clone.send_failures.fetch_add(1, Ordering::Relaxed);
@@ -192,11 +177,6 @@ impl Broadcaster {
     /// Offered messages dropped because no viewer was subscribed.
     pub fn send_failures(&self) -> u64 {
         self.send_failures.load(Ordering::Relaxed)
-    }
-
-    /// True if the stream has been identified as SMPTE 302M audio.
-    pub fn is_s302m(&self) -> bool {
-        self.is_s302m.load(Ordering::Relaxed)
     }
 }
 

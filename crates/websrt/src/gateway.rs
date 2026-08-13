@@ -402,12 +402,9 @@ impl Gateway {
                         },
                     };
 
-                    let mut srt_config = self.srt_config.clone();
-                    srt_config.is_s302m = self.streams.is_s302m(&stream_name);
-
                     let (entry, handle) = BrowserSession::create(
                         connection, viewer,
-                        self.sim_loss, self.sim_seed, srt_config,
+                        self.sim_loss, self.sim_seed, self.srt_config.clone(),
                         publish_tx,
                         Some(guard),
                         stream_name.clone(),
@@ -532,13 +529,8 @@ impl GatewayBuilder {
         self
     }
 
-    pub fn s302m_overhead(mut self, pct: u32) -> Self {
-        self.srt_config.s302m_overhead_pct = pct;
-        self
-    }
-
-    pub fn video_overhead(mut self, pct: u32) -> Self {
-        self.srt_config.video_overhead_pct = pct;
+    pub fn max_bandwidth(mut self, bps: Option<u64>) -> Self {
+        self.srt_config.max_bandwidth = bps;
         self
     }
 

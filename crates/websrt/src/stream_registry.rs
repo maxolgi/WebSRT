@@ -121,13 +121,6 @@ impl StreamRegistry {
         streams.get(name).map(|b| b.viewer_count()).unwrap_or(0)
     }
 
-    /// True if the stream has been identified as SMPTE 302M audio. Returns
-    /// `false` if the stream doesn't exist.
-    pub fn is_s302m(&self, name: &str) -> bool {
-        let streams = self.streams.lock();
-        streams.get(name).map(|b| b.is_s302m()).unwrap_or(false)
-    }
-
     /// Sum of viewer counts across all streams (for health reporting).
     pub fn total_viewers(&self) -> usize {
         let streams = self.streams.lock();

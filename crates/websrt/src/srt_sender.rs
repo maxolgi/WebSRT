@@ -36,15 +36,9 @@ pub struct SrtConfig {
     pub send_latency: std::time::Duration,
     /// TSBPD receive latency.
     pub recv_latency: std::time::Duration,
-    /// True if the stream has been identified as SMPTE 302M audio (CBR). Selects
-    /// a tighter `LiveBandwidthMode::Estimated` overhead than VBR video.
-    pub is_s302m: bool,
-    /// `LiveBandwidthMode::Estimated` overhead percentage for s302m audio
-    /// streams. Default 100 = 2× multiplier.
-    pub s302m_overhead_pct: u32,
-    /// `LiveBandwidthMode::Estimated` overhead percentage for non-s302m
-    /// streams. Default 900 = 10× multiplier.
-    pub video_overhead_pct: u32,
+    /// Fixed send-rate ceiling in bytes/sec for `LiveBandwidthMode::Max`.
+    /// `None` leaves `settings.bandwidth` at the SRT default (`Unlimited`).
+    pub max_bandwidth: Option<u64>,
 }
 
 impl Default for SrtConfig {
@@ -56,9 +50,7 @@ impl Default for SrtConfig {
             peer_idle_timeout: std::time::Duration::from_secs(30),
             send_latency: std::time::Duration::from_millis(10),
             recv_latency: std::time::Duration::from_millis(10),
-            is_s302m: false,
-            s302m_overhead_pct: 100,
-            video_overhead_pct: 900,
+            max_bandwidth: None,
         }
     }
 }
@@ -109,6 +101,9 @@ impl SrtConfig {
         if self.recv_latency < std::time::Duration::from_millis(1) {
             anyhow::bail!("recv_latency must be >= 1ms, got {:?}", self.recv_latency);
         }
+        if let Some(0) = self.max_bandwidth {
+            anyhow::bail!("max_bandwidth must be > 0 when set");
+        }
         Ok(())
     }
 }
@@ -156,16 +151,11 @@ impl SrtInitiator {
         settings.peer_idle_timeout = config.peer_idle_timeout;
         settings.send_latency = config.send_latency;
         settings.recv_latency = config.recv_latency;
-        // s302m audio is CBR, so 2× overhead (Percent(100)) paces safely;
-        // VBR video needs 10× overhead (Percent(900)) to absorb I-frame bursts.
-        settings.bandwidth = srt_protocol::options::LiveBandwidthMode::Estimated {
-            overhead: srt_protocol::options::Percent(if config.is_s302m {
-                config.s302m_overhead_pct
-            } else {
-                config.video_overhead_pct
-            } as u64),
-            expected: srt_protocol::options::DataRate(2_000_000),
-        };
+        if let Some(rate) = config.max_bandwidth {
+            settings.bandwidth = srt_protocol::options::LiveBandwidthMode::Max(
+                srt_protocol::options::DataRate(rate),
+            );
+        }
         settings.too_late_packet_drop = true;
         settings.initial_rtt = Some(initial_rtt);
         let connect = Connect::new_skip_induction(
@@ -434,6 +424,20 @@ mod tests {
         let mut c = SrtConfig::default();
         c.recv_latency = std::time::Duration::from_millis(0);
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn max_bandwidth_zero_rejected() {
+        let mut c = SrtConfig::default();
+        c.max_bandwidth = Some(0);
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn max_bandwidth_some_positive_ok() {
+        let mut c = SrtConfig::default();
+        c.max_bandwidth = Some(1);
+        assert!(c.validate().is_ok());
     }
 
     #[test]
