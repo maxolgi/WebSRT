@@ -43,6 +43,7 @@
       }
       button:hover { background: #333; }
       button:disabled { opacity: 0.5; cursor: default; }
+      button.muted { opacity: 0.5; }
       #capture-btn:not(:disabled), #publish-btn:not(:disabled) {
         background: #1b5e20; color: #b9f6ca; border-color: #2e7d32;
       }
@@ -141,7 +142,7 @@
         <canvas id="playback-canvas" width="640" height="360"></canvas>
         <div class="controls">
           <button id="playback-toggle">play</button>
-          <button id="playback-mute" disabled>muted</button>
+          <button id="playback-mute" disabled class="muted">mute</button>
           <label>latency: <input type="number" id="playback-latency" min="20" max="8000" step="10" value="120" />ms</label>
         </div>
       </div>

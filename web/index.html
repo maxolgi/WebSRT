@@ -37,6 +37,7 @@
       }
       button:hover { background: #333; }
       button:disabled { opacity: 0.5; }
+      button.muted { opacity: 0.5; }
       .controls { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
       a { color: #6cf; }
       a.back { display: inline-block; margin-bottom: 8px; text-decoration: none; }
@@ -171,7 +172,7 @@
       <div class="controls">
         <button id="connect">connect</button>
         <label>latency: <input type="number" id="latency-num" min="20" max="8000" step="10" value="120" />ms</label>
-        <button id="mute" disabled>muted</button>
+        <button id="mute" disabled class="muted">mute</button>
         <button id="fullscreen">fullscreen</button>
         <button id="debug-toggle">debug</button>
       </div>

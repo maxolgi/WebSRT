@@ -47,7 +47,7 @@ latencyNum.addEventListener('change', () => {
 
 muteBtn.addEventListener('click', () => {
   handle.setMuted(!handle.muted);
-  muteBtn.textContent = handle.muted ? 'muted' : 'mute';
+  muteBtn.classList.toggle('muted', handle.muted);
 });
 
 fullscreenBtn.addEventListener('click', () => {
@@ -73,13 +73,18 @@ handle.addEventListener('statechange', (ev) => {
   connectBtn.textContent = buttonLabel[s];
   if (s === 'idle') {
     muteBtn.disabled = true;
-    muteBtn.textContent = 'muted';
+    muteBtn.classList.add('muted');
   }
+});
+
+handle.addEventListener('open', () => {
+  muteBtn.disabled = false;
+  muteBtn.classList.toggle('muted', handle.muted);
 });
 
 handle.addEventListener('playing', () => {
   muteBtn.disabled = false;
-  muteBtn.textContent = handle.muted ? 'muted' : 'mute';
+  muteBtn.classList.toggle('muted', handle.muted);
 });
 
 // --- Debug panel resize handle (sits on the panel's left edge) ---

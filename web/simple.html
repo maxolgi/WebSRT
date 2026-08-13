@@ -16,6 +16,7 @@
       .err { color: #f66; }
       .info { color: #6cf; }
       input, button { font: inherit; padding: 4px; }
+      button.muted { opacity: 0.5; }
       .layout { display: flex; gap: 16px; align-items: flex-start; }
       .left-panel { flex: 2 1 0; min-width: 0; }
       .right-panel { flex: 1 1 0; min-width: 0; }
@@ -30,7 +31,7 @@
         <div class="controls">
           <button id="connect">connect</button>
           <label>latency: <input type="number" id="latency-num" min="20" max="8000" step="10" value="120" />ms</label>
-          <button id="mute" disabled>muted</button>
+          <button id="mute" disabled class="muted">mute</button>
           <button id="fullscreen">fullscreen</button>
         </div>
       </div>

@@ -36,7 +36,7 @@ function log(msg: string, cls = '') {
 function setStatus(s: string) { statusEl.textContent = s; }
 
 function setMuteBtn() {
-  muteBtn.textContent = handle.muted ? 'muted' : 'mute';
+  muteBtn.classList.toggle('muted', handle.muted);
 }
 
 const savedLatency = localStorage.getItem('latency');

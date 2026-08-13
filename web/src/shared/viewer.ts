@@ -221,7 +221,7 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
     if (audioEl) { try { audioEl.pause(); } catch {} audioEl.srcObject = null; audioEl.remove(); }
     audioEl = null;
     audioReady = false;
-    if (muteBtn) { muteBtn.disabled = true; muteBtn.textContent = 'muted'; }
+    if (muteBtn) { muteBtn.disabled = true; muteBtn.classList.add('muted'); }
   }
 
   function startDriftMonitor() {
@@ -260,9 +260,9 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
       audioEl.srcObject = new MediaStream([track]);
       audioEl.muted = mutedState;
       log(mutedState ? 'audio ready (muted — click to unmute)' : 'audio ready', 'info');
-      if (muteBtn) { muteBtn.disabled = false; muteBtn.textContent = mutedState ? 'muted' : 'mute'; }
+      if (muteBtn) { muteBtn.disabled = false; muteBtn.classList.toggle('muted', mutedState); }
     } else {
-      if (muteBtn) { muteBtn.disabled = false; muteBtn.textContent = mutedState ? 'muted' : 'mute'; }
+      if (muteBtn) { muteBtn.disabled = false; muteBtn.classList.toggle('muted', mutedState); }
     }
   }
 
@@ -434,12 +434,14 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
         if (msg.pid !== activePcmPid) break;
         if (!pcmPlayer) {
           pcmPlayer = new PcmPlayer();
+          pcmPlayer.setMuted(mutedState);
           if (ui.onAudioMeter) pcmPlayer.onMeter(ui.onAudioMeter);
         }
         if (!pcmPlayer.ready) {
           void pcmPlayer.init(msg.channelCount).then(() => {
             void pcmPlayer?.resume();
             pcmPlayer?.feed(msg.samples, msg.channelCount);
+            if (muteBtn) { muteBtn.disabled = false; muteBtn.classList.toggle('muted', mutedState); }
           });
         } else {
           pcmPlayer.feed(msg.samples, msg.channelCount);
@@ -493,7 +495,8 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
       audioEl.muted = muted;
       if (!muted) audioEl.play().catch((e) => log(`audio play failed: ${e}`, 'err'));
     }
-    if (muteBtn) muteBtn.textContent = muted ? 'muted' : 'mute';
+    pcmPlayer?.setMuted(muted);
+    if (muteBtn) muteBtn.classList.toggle('muted', muted);
   }
 
   return {

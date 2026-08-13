@@ -102,9 +102,11 @@ registerProcessor('pcm-player', PcmPlayerProcessor);
 export class PcmPlayer {
   private audioCtx: AudioContext | null = null;
   private workletNode: AudioWorkletNode | null = null;
+  private gainNode: GainNode | null = null;
   private initPromise: Promise<void> | null = null;
   private sampleRate = 48000;
   private droppedPackets = 0;
+  private _muted = true;
 
   get ready(): boolean {
     return this.workletNode !== null;
@@ -130,7 +132,10 @@ export class PcmPlayer {
       numberOfOutputs: 1,
       outputChannelCount: [channelCount],
     });
-    this.workletNode.connect(this.audioCtx.destination);
+    this.gainNode = this.audioCtx.createGain();
+    this.gainNode.gain.value = this._muted ? 0 : 1;
+    this.workletNode.connect(this.gainNode);
+    this.gainNode.connect(this.audioCtx.destination);
   }
 
   feed(samples: Float32Array, channelCount: number): void {
@@ -143,6 +148,11 @@ export class PcmPlayer {
 
   /** No-op: metering moved to WASM. Stub kept until viewer.ts is updated. */
   onMeter(_: (data: AudioMeterData) => void): void {}
+
+  setMuted(muted: boolean): void {
+    this._muted = muted;
+    if (this.gainNode) this.gainNode.gain.value = muted ? 0 : 1;
+  }
 
   /** No-op: metering moved to WASM. Stub kept until AudioTab is updated. */
   setSelectedChannel(_: number): void {}

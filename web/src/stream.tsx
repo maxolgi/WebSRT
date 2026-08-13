@@ -101,7 +101,7 @@ function mountPlayback(stream: string): void {
     const s = (ev as CustomEvent<PlayerState>).detail;
     playbackToggleBtn.textContent = (s === 'idle' || s === 'error') ? 'play' : 'stop';
     if (s === 'connected') playbackMuteBtn.disabled = false;
-    else { playbackMuteBtn.disabled = true; playbackMuteBtn.textContent = 'muted'; }
+    else { playbackMuteBtn.disabled = true; playbackMuteBtn.classList.add('muted'); }
   });
   h.addEventListener('resize', (ev) => {
     const { width, height } = (ev as CustomEvent<PlayerResizeDetail>).detail;
@@ -125,7 +125,7 @@ playbackLatencyNum.addEventListener('change', () => {
 playbackMuteBtn.addEventListener('click', () => {
   if (!pbHandle) return;
   pbHandle.setMuted(!pbHandle.muted);
-  playbackMuteBtn.textContent = pbHandle.muted ? 'muted' : 'mute';
+  playbackMuteBtn.classList.toggle('muted', pbHandle.muted);
 });
 
 function setPanelVisible(visible: boolean) {
