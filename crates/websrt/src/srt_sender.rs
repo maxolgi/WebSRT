@@ -47,7 +47,7 @@ impl Default for SrtConfig {
     fn default() -> Self {
         Self {
             payload_size: PAYLOAD_SIZE,
-            send_buffer_size: 32768,
+            send_buffer_size: 65536,
             recv_buffer_size: 8192,
             peer_idle_timeout: std::time::Duration::from_secs(30),
             send_latency: std::time::Duration::from_millis(10),
@@ -70,9 +70,9 @@ impl SrtConfig {
         if self.send_buffer_size == 0 {
             anyhow::bail!("send_buffer_size must be >= 1");
         }
-        if self.send_buffer_size > 100_000 {
+        if self.send_buffer_size > 320_000 {
             anyhow::bail!(
-                "send_buffer_size must be <= 100000, got {}",
+                "send_buffer_size must be <= 320000, got {}",
                 self.send_buffer_size
             );
         }
@@ -456,7 +456,6 @@ mod tests {
         assert!(c.validate().is_ok());
     }
 
-    #[test]
     fn send_buffer_boundary_100000_ok() {
         let mut c = SrtConfig::default();
         c.send_buffer_size = 100_000;
@@ -464,9 +463,16 @@ mod tests {
     }
 
     #[test]
-    fn send_buffer_boundary_100001_rejected() {
+    fn send_buffer_boundary_320000_ok() {
         let mut c = SrtConfig::default();
-        c.send_buffer_size = 100_001;
+        c.send_buffer_size = 320_000;
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn send_buffer_boundary_320001_rejected() {
+        let mut c = SrtConfig::default();
+        c.send_buffer_size = 320_001;
         assert!(c.validate().is_err());
     }
 

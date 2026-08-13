@@ -269,9 +269,11 @@ impl SrtReceiver {
     fn new_inner(latency_ms: u32, initial_rtt_ms: Option<f64>) -> SrtReceiver {
         console_error_panic_hook::set_once();
         let mut init = ConnInitSettings::default();
-        init.send_buffer_size = srt_protocol::options::PacketCount(8192);
+        let needed = (latency_ms as u64 * 20_000 / 1000) * 2;
+        let buf_size = needed.clamp(8192, 320_000) as u32;
+        init.send_buffer_size = srt_protocol::options::PacketCount(buf_size.into());
         init.max_packet_size = srt_protocol::options::PacketSize(PAYLOAD_SIZE);
-        init.recv_buffer_size = srt_protocol::options::PacketCount(8192);
+        init.recv_buffer_size = srt_protocol::options::PacketCount(buf_size.into());
         init.send_latency = std::time::Duration::from_millis(latency_ms as u64);
         init.recv_latency = std::time::Duration::from_millis(latency_ms as u64);
         init.too_late_packet_drop = true;
