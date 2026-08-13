@@ -43,11 +43,7 @@ impl Controller for Unlimited {
 pub struct UnlimitedFactory;
 
 impl ControllerFactory for UnlimitedFactory {
-    fn build(
-        self: Arc<Self>,
-        _now: Instant,
-        _current_mtu: u16,
-    ) -> Box<dyn Controller> {
+    fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
         Box::new(Unlimited)
     }
 }

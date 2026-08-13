@@ -258,7 +258,8 @@ impl PidMeter {
         let mut im = [0.0f64; FFT_SIZE];
         for i in 0..FFT_SIZE {
             let idx = (self.fft_idx + i) % FFT_SIZE;
-            let w = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / (FFT_SIZE as f64 - 1.0)).cos();
+            let w =
+                0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / (FFT_SIZE as f64 - 1.0)).cos();
             re[i] = self.fft_ring[idx] as f64 * w;
         }
         fft_inplace(&mut re, &mut im);
