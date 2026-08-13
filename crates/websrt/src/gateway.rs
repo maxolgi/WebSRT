@@ -349,13 +349,13 @@ impl Gateway {
                     tracing::info!(%peer, "WT session established");
 
                     match connection.max_datagram_size() {
-                        Some(max) if max >= 1332 => {
+                        Some(max) if max >= 1200 => {
                             tracing::debug!(max, "WT datagram PMTU adequate");
                         }
                         Some(max) => {
                             tracing::warn!(
                                 max,
-                                required = 1332,
+                                required = 1200,
                                 "WT datagram PMTU too small; closing session"
                             );
                             connection.close(
