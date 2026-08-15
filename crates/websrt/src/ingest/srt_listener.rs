@@ -2,7 +2,7 @@ use super::{build_key_settings, Ingester, SrtConnectionIngester};
 use crate::stream_registry::StreamRegistry;
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
-use srt_protocol::options::ByteCount;
+use srt_protocol::options::{ByteCount, PacketCount};
 use srt_protocol::settings::KeySettings;
 use srt_tokio::{SrtIncoming, SrtListener};
 use std::sync::Arc;
@@ -10,6 +10,19 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 const UDP_BUF_SIZE: ByteCount = ByteCount(8_388_608);
+
+/// Receiver buffer depth in packets, sized from TSBPD latency. TSBPD holds
+/// `latency × packet_rate` packets in the receiver buffer simultaneously; the
+/// srt-protocol default (8192×1500 B ≈ 8.3k packets) overflows at high
+/// channel counts — e.g. 128ch s302m ≈ 20k pkt/s needs 20k packets per
+/// second of latency — silently capping ingest throughput (~150 Mbps
+/// observed) and stalling publishers on flow control. Mirrors the browser
+/// side's formula from 3560a46: `latency_ms × 20000/1000 × 2`, clamped to
+/// [8192, 320000].
+fn recv_buffer_packets(latency: Duration) -> u64 {
+    let ms = latency.as_millis() as u64;
+    (ms * 20_000 / 1000 * 2).clamp(8192, 320_000)
+}
 
 pub struct SrtListenerService {
     #[allow(dead_code)]
@@ -31,6 +44,13 @@ impl SrtListenerService {
             .set(|o| {
                 o.connect.udp_recv_buffer_size = UDP_BUF_SIZE;
                 o.connect.udp_send_buffer_size = UDP_BUF_SIZE;
+                // Latency-scaled SRT receiver buffer (in bytes; srt-protocol
+                // divides by MSS to get packets). See recv_buffer_packets.
+                // Flow-control window must be raised in lockstep: SRT requires
+                // RCVBUF <= FC * MSS (set FC first, then RCVBUF).
+                let pkts = PacketCount(recv_buffer_packets(latency));
+                o.sender.flow_control_window_size = pkts;
+                o.receiver.buffer_size = ByteCount(recv_buffer_packets(latency) * (1500 - 28) as u64);
             })
             .bind(addr.as_ref())
             .await
