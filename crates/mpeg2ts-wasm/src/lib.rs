@@ -895,27 +895,15 @@ impl TsDemuxer {
                 } else {
                     None
                 };
-                // Expected ES payload bytes = pes_packet_len minus the PES
-                // header bytes PesHeader parsing already consumed (they never
-                // reach entry.buf). Mirrors upstream
-                // `PesPacketReader::handle_pes_start_payload` (src/pes/reader.rs):
-                // `pes_packet_len - optional_header_len`, where
-                // `PesHeader::optional_header_len` (src/pes/packet.rs) is
-                // `3 + pts(5) + dts(5) + escr(6)`. Without this the length
-                // check can never fire, deferring every exact-sized PES to
-                // the next PesStart (~21ms extra latency). Upstream errors on
-                // underflow; we're a tolerant demuxer, so malformed lengths
-                // fall back to unbounded (flush at next PesStart).
-                entry.declared_len = if pes.pes_packet_len > 0 {
-                    let optional_header_len: u16 = 3
-                        + pes.header.pts.map_or(0, |_| 5)
-                        + pes.header.dts.map_or(0, |_| 5)
-                        + pes.header.escr.map_or(0, |_| 6);
-                    pes.pes_packet_len
-                        .checked_sub(optional_header_len)
-                        .map(usize::from)
-                } else {
-                    None
+                // Expected ES payload bytes, from the fork's public API
+                // (`PesHeader::es_payload_len`, mpeg2ts 6958b62) — single
+                // source of truth, no duplicated header arithmetic here.
+                // Ok(None) = unbounded (flush at next PesStart). We're a
+                // tolerant demuxer: Err (malformed length) also falls back
+                // to unbounded, where the fork's own reader would error.
+                entry.declared_len = match pes.header.es_payload_len(pes.pes_packet_len) {
+                    Ok(n) => n,
+                    Err(_) => None,
                 };
                 entry.header = Some(pes.header.clone());
                 entry.ra = self.last_ra.get(&pid).copied().unwrap_or(false);

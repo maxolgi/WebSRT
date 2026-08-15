@@ -1309,7 +1309,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1566,7 +1566,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2668,7 +2668,7 @@ dependencies = [
 [[package]]
 name = "mpeg2ts"
 version = "0.6.0"
-source = "git+https://github.com/maxolgi/mpeg2ts.git?branch=master#0e003ca4007a49a6abfe296d59395530c82acc1a"
+source = "git+https://github.com/maxolgi/mpeg2ts.git?branch=master#6958b62d19901e084ac1bd9d818f7dc38adcc179"
 
 [[package]]
 name = "mpeg2ts-wasm"
@@ -2803,7 +2803,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3503,7 +3503,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.5",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3817,7 +3817,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4275,7 +4275,7 @@ dependencies = [
 [[package]]
 name = "srt-protocol"
 version = "0.4.4"
-source = "git+https://github.com/maxolgi/srt-rs.git?branch=main#ac4333228b1a3e19efc0d361119fda4f7c7693e5"
+source = "git+https://github.com/maxolgi/srt-rs.git?branch=main#587be48a91589a6f7d3901df0c6f527be0d053f9"
 dependencies = [
  "aes",
  "array-init",
@@ -4304,7 +4304,7 @@ dependencies = [
 [[package]]
 name = "srt-tokio"
 version = "0.4.4"
-source = "git+https://github.com/maxolgi/srt-rs.git?branch=main#ac4333228b1a3e19efc0d361119fda4f7c7693e5"
+source = "git+https://github.com/maxolgi/srt-rs.git?branch=main#587be48a91589a6f7d3901df0c6f527be0d053f9"
 dependencies = [
  "bytes",
  "futures",
@@ -4433,7 +4433,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5339,7 +5339,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
