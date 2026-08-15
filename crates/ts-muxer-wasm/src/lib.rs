@@ -245,14 +245,41 @@ impl TsMuxer {
 
     #[wasm_bindgen(js_name = push_pcm)]
     pub fn push_pcm(&mut self, samples: &[f32], pts_us: f64) {
-        let pts_90k = us_to_90k(pts_us);
-        self.pcr = pts_90k.wrapping_mul(300);
-
         let idx = self
             .audio_streams
             .iter()
             .position(|s| s.kind == AudioKind::Smpte302m)
             .unwrap_or(0);
+        self.push_pcm_stream(idx, samples, pts_us);
+    }
+
+    /// Like `push_pcm`, but targets the s302m stream carrying `pid`
+    /// (registered via `add_audioPid`). Unknown pids and non-s302m streams
+    /// are a no-op.
+    #[wasm_bindgen(js_name = push_pcm_pid)]
+    pub fn push_pcm_pid(&mut self, pid: u16, samples: &[f32], pts_us: f64) {
+        let Some(idx) = self.audio_streams.iter().position(|s| s.pid == pid) else {
+            return;
+        };
+        if self.audio_streams[idx].kind != AudioKind::Smpte302m {
+            return;
+        }
+        self.push_pcm_stream(idx, samples, pts_us);
+    }
+
+    #[wasm_bindgen(js_name = poll)]
+    pub fn poll(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.output)
+    }
+}
+
+impl TsMuxer {
+    /// Shared PCM push path: s302m AES3 wrapping, PES on the target stream's
+    /// PID, per-stream CC + sparse accounting, PSI emission.
+    fn push_pcm_stream(&mut self, idx: usize, samples: &[f32], pts_us: f64) {
+        let pts_90k = us_to_90k(pts_us);
+        self.pcr = pts_90k.wrapping_mul(300);
+
         let (pid, channel_count) = {
             let stream = &self.audio_streams[idx];
             (stream.pid, stream.channel_count)
@@ -329,13 +356,6 @@ impl TsMuxer {
         );
     }
 
-    #[wasm_bindgen(js_name = poll)]
-    pub fn poll(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.output)
-    }
-}
-
-impl TsMuxer {
     fn write_pat(&mut self) {
         let mut section: Vec<u8> = vec![
             0x00, 0xB0, 0x0D, 0x00, 0x01, 0xC1, 0x00, 0x00, 0x00, 0x01, 0xF0, 0x00,
@@ -930,5 +950,92 @@ mod tests {
                 pmt_pushes
             );
         }
+    }
+
+    #[test]
+    fn push_pcm_pid_targets_registered_pid() {
+        let mut m = TsMuxer::new();
+        m.set_video_enabled(false);
+        m.set_audio_codec("s302m", 2);
+        m.add_audio_pid(0x102, "s302m", 2);
+
+        m.push_pcm_pid(0x102, &[0.5_f32; 1920], 0.0);
+        let out = m.poll();
+        let pids: Vec<u16> = out.chunks(TS_PACKET_SIZE).map(pkt_pid).collect();
+        assert!(pids.contains(&0x102), "audio PES missing on 0x102");
+        assert!(
+            !pids.contains(&0x101),
+            "nothing should land on 0x101 when only 0x102 is pushed"
+        );
+        assert!(pids.contains(&PAT_PID), "PAT missing");
+        let pmt = last_pmt_section(&out);
+        assert!(
+            pmt.windows(2).any(|w| w == [0xE1, 0x01]),
+            "PMT should still list 0x101"
+        );
+        assert!(
+            pmt.windows(2).any(|w| w == [0xE1, 0x02]),
+            "PMT should list 0x102"
+        );
+    }
+
+    #[test]
+    fn push_pcm_pid_cc_advances_per_pid() {
+        let mut m = TsMuxer::new();
+        m.set_video_enabled(false);
+        m.set_audio_codec("s302m", 2);
+        m.add_audio_pid(0x102, "s302m", 2);
+
+        // 2 stereo frames → a single TS packet per push, so the PUSI CC of
+        // each PID advances by exactly 1 between its own pushes.
+        let loud = [0.5_f32; 4];
+        let mut outputs: Vec<Vec<u8>> = Vec::new();
+        m.push_pcm(&loud, 0.0); // lands on 0x101
+        outputs.push(m.poll());
+        m.push_pcm_pid(0x102, &loud, 20_000.0);
+        outputs.push(m.poll());
+        m.push_pcm(&loud, 40_000.0); // 0x101 again
+        outputs.push(m.poll());
+        m.push_pcm_pid(0x102, &loud, 60_000.0);
+        outputs.push(m.poll());
+
+        let pusi_ccs = |pid: u16| -> Vec<u8> {
+            outputs
+                .iter()
+                .flat_map(|o| o.chunks(TS_PACKET_SIZE))
+                .filter(|c| pkt_pid(c) == pid && (c[1] & 0x40) != 0)
+                .map(|c| c[3] & 0x0F)
+                .collect()
+        };
+        assert_eq!(
+            pusi_ccs(0x101),
+            vec![0, 1],
+            "push_pcm must land on 0x101 with its own CC"
+        );
+        assert_eq!(
+            pusi_ccs(0x102),
+            vec![0, 1],
+            "push_pcm_pid must keep a CC independent of 0x101 pushes"
+        );
+    }
+
+    #[test]
+    fn push_pcm_pid_unknown_or_opus_pid_is_noop() {
+        let mut m = TsMuxer::new();
+        m.set_video_enabled(false);
+        m.set_audio_codec("s302m", 2);
+        m.add_audio_pid(0x103, "opus", 2);
+
+        m.push_pcm_pid(0x999, &[0.5_f32; 4], 0.0);
+        assert!(m.poll().is_empty(), "unknown pid must emit nothing");
+        m.push_pcm_pid(0x103, &[0.5_f32; 4], 0.0);
+        assert!(m.poll().is_empty(), "non-s302m pid must emit nothing");
+
+        // Muxer still fully functional via the default path afterwards.
+        m.push_pcm(&[0.5_f32; 4], 0.0);
+        let out = m.poll();
+        let pids: Vec<u16> = out.chunks(TS_PACKET_SIZE).map(pkt_pid).collect();
+        assert!(pids.contains(&PAT_PID) && pids.contains(&PMT_PID));
+        assert!(pids.contains(&0x101), "push_pcm should land on 0x101");
     }
 }
