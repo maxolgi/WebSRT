@@ -24,6 +24,7 @@ wtransport.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+mpeg2ts.workspace = true
 rand = { workspace = true, optional = true }
 percent-encoding.workspace = true
 parking_lot.workspace = true

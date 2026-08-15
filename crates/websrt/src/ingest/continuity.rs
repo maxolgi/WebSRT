@@ -5,16 +5,22 @@
 //! indicates loss upstream of the gateway (OBS→gateway SRT); the absence of
 //! gaps means any downstream loss originates in the broadcaster fanout or the
 //! per-session SRT/QUIC path.
+//!
+//! Parsing and CC semantics live in the mpeg2ts fork ([`mpeg2ts::ts::CcChecker`]):
+//! each 188-byte chunk is parsed with [`mpeg2ts::ts::TsPacketReader`] and fed
+//! to the checker. This fixes the old scanner's misread of
+//! `adaptation_field_length == 0` packets (where it treated the first payload
+//! byte as AF flags and spuriously reset per-PID tracking).
 
 use super::{Ingester, TsMessage};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::collections::{HashMap, HashSet};
+use mpeg2ts::ts::{CcChecker, CcStatus, ReadTsPacket, TsPacketReader};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 const TS_PACKET_SIZE: usize = 188;
-const TS_SYNC_BYTE: u8 = 0x47;
 
 /// Cloneable view onto a [`TsContinuityChecker`]'s counters. The checker is
 /// moved into the broadcaster pipeline; this handle lets the embedding
@@ -45,7 +51,7 @@ impl TsStatsHandle {
 /// Does NOT modify the data — pure diagnostic.
 pub struct TsContinuityChecker<I> {
     inner: I,
-    last_cc: HashMap<u16, u8>,
+    cc_checker: CcChecker,
     warned_pids: HashSet<u16>,
     cc_gaps: Arc<AtomicU64>,
     cc_checks: Arc<AtomicU64>,
@@ -56,7 +62,7 @@ impl<I> TsContinuityChecker<I> {
     pub fn new(inner: I) -> Self {
         Self {
             inner,
-            last_cc: HashMap::new(),
+            cc_checker: CcChecker::new(),
             warned_pids: HashSet::new(),
             cc_gaps: Arc::new(AtomicU64::new(0)),
             cc_checks: Arc::new(AtomicU64::new(0)),
@@ -88,50 +94,41 @@ impl<I> TsContinuityChecker<I> {
 
     fn scan(&mut self, bytes: &[u8]) {
         for chunk in bytes.chunks_exact(TS_PACKET_SIZE) {
-            if chunk[0] != TS_SYNC_BYTE {
-                continue;
-            }
-            let pid = (u16::from(chunk[1] & 0x1F) << 8) | u16::from(chunk[2]);
-            let cc = chunk[3] & 0x0F;
-            let afc = (chunk[3] >> 4) & 0x03;
+            // A fresh reader per chunk keeps the scan aligned even when a
+            // chunk fails to parse (bad sync byte, malformed fields): such
+            // chunks are skipped, exactly like the old scanner's sync check.
+            let packet = match TsPacketReader::new(chunk).read_ts_packet() {
+                Ok(Some(packet)) => packet,
+                _ => continue,
+            };
+            let pid = packet.header.pid.as_u16();
+            let status = self.cc_checker.check(&packet);
 
-            // CC only increments on payload-bearing packets (AFC 0b01 or 0b11).
-            if afc == 0b00 || afc == 0b10 {
-                continue;
+            // cc_checks counts payload-bearing packets that participated in
+            // a CC comparison (i.e. everything except signalled resets).
+            if packet.payload.is_some() && !matches!(status, CcStatus::Reset) {
+                self.cc_checks.fetch_add(1, Ordering::Relaxed);
             }
-            // AFC 0b11 carries an adaptation field: honor its
-            // discontinuity_indicator (bit 7 of the AF flags byte, chunk[5])
-            // by resetting this PID's state and skipping the CC check.
-            if afc == 0b11 && chunk[5] & 0x80 != 0 {
-                self.last_cc.remove(&pid);
-                continue;
-            }
-
-            self.cc_checks.fetch_add(1, Ordering::Relaxed);
-            if let Some(&prev) = self.last_cc.get(&pid) {
-                let expected = (prev + 1) & 0x0F;
-                if expected != cc {
-                    let total = self.cc_gaps.fetch_add(1, Ordering::Relaxed) + 1;
-                    if self.warned_pids.insert(pid) {
-                        tracing::warn!(
-                            "ingester TS CC gap: PID 0x{:x} expected {} got {} (total gaps: {})",
-                            pid,
-                            expected,
-                            cc,
-                            total
-                        );
-                    } else {
-                        tracing::debug!(
-                            "ingester TS CC gap: PID 0x{:x} expected {} got {} (total gaps: {})",
-                            pid,
-                            expected,
-                            cc,
-                            total
-                        );
-                    }
+            if let CcStatus::Discontinuity { expected, got } = status {
+                let total = self.cc_gaps.fetch_add(1, Ordering::Relaxed) + 1;
+                if self.warned_pids.insert(pid) {
+                    tracing::warn!(
+                        "ingester TS CC gap: PID 0x{:x} expected {} got {} (total gaps: {})",
+                        pid,
+                        expected.as_u8(),
+                        got.as_u8(),
+                        total
+                    );
+                } else {
+                    tracing::debug!(
+                        "ingester TS CC gap: PID 0x{:x} expected {} got {} (total gaps: {})",
+                        pid,
+                        expected.as_u8(),
+                        got.as_u8(),
+                        total
+                    );
                 }
             }
-            self.last_cc.insert(pid, cc);
         }
     }
 }
@@ -153,6 +150,8 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    const TS_SYNC_BYTE: u8 = 0x47;
+
     fn make_ts_packet(pid: u16, cc: u8, afc: u8) -> [u8; 188] {
         let mut pkt = [0u8; 188];
         pkt[0] = 0x47;
@@ -163,8 +162,11 @@ mod tests {
     }
 
     fn make_ts_packet_with_disc(pid: u16, cc: u8) -> [u8; 188] {
+        // afc=0b11 with a real one-byte adaptation field (length 1) whose
+        // flags byte carries discontinuity_indicator (bit 7).
         let mut pkt = make_ts_packet(pid, cc, 0b11);
-        pkt[5] = 0x80;
+        pkt[4] = 1; // adaptation_field_length: one flags byte follows
+        pkt[5] = 0x80; // discontinuity_indicator = 1
         pkt
     }
 
@@ -263,6 +265,28 @@ mod tests {
         assert_eq!(checker.cc_gaps(), 0);
     }
 
+    // Regression test for the old scanner's bug: with afc=0b11 and
+    // adaptation_field_length == 0 (legal single stuffing byte), byte 5 is
+    // PAYLOAD, not AF flags. The old scanner read chunk[5] as flags, so a
+    // payload byte with bit 7 set spuriously cleared per-PID CC tracking and
+    // masked the real gap on the next packet. The fork-based scanner must
+    // keep tracking: gap after the stuffed packet is still detected.
+    #[test]
+    fn afc11_zero_len_af_payload_bit7_does_not_reset_cc() {
+        let mut checker = TsContinuityChecker::<()>::new(());
+        let mut stuffed = make_ts_packet(0x100, 3, 0b11);
+        assert_eq!(stuffed[4], 0); // adaptation_field_length == 0
+        stuffed[5] = 0xFF; // payload byte with bit 7 set
+        let packets = [
+            make_ts_packet(0x100, 2, 0b01), // initialize tracking at cc=2
+            stuffed,                        // cc=3: in-sequence, must NOT reset
+            make_ts_packet(0x100, 5, 0b01), // real gap (expected 4) — must be caught
+        ];
+        scan_packets(&mut checker, &packets);
+        assert_eq!(checker.cc_checks(), 3);
+        assert_eq!(checker.cc_gaps(), 1);
+    }
+
     proptest! {
         #[test]
         fn cc_counters_bounded_by_payload_bearing_packets(
@@ -282,7 +306,8 @@ mod tests {
                 pkt[2] = (pid & 0xFF) as u8;
                 pkt[3] = (afc << 4) | (cc & 0x0F);
                 if *afc == 0b11 && *disc {
-                    pkt[5] = 0x80;
+                    pkt[4] = 1; // adaptation_field_length: one flags byte
+                    pkt[5] = 0x80; // discontinuity_indicator = 1
                 }
                 buf.extend_from_slice(&pkt);
 
