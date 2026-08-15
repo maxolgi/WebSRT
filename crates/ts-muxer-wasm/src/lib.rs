@@ -26,6 +26,9 @@ const SYNC_BYTE: u8 = 0x47;
 
 const SILENCE_THRESHOLD: f32 = 1e-6;
 const PMT_RESEND_COUNT: u32 = 10;
+/// Minimum PTS interval between periodic PAT/PMT emissions in `push_pcm`
+/// (9000 ticks at 90 kHz = 100 ms).
+const PSI_INTERVAL_TICKS: u64 = 9_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AudioKind {
@@ -72,6 +75,7 @@ pub struct TsMuxer {
     pcr: u64,
     output: Vec<u8>,
     pat_pmt_emitted: bool,
+    last_psi_pts_90k: u64,
     sparse_enabled: bool,
     sparse_threshold_ms: f64,
     pmt_dirty: bool,
@@ -102,6 +106,7 @@ impl TsMuxer {
             pcr: 0,
             output: Vec::new(),
             pat_pmt_emitted: false,
+            last_psi_pts_90k: 0,
             sparse_enabled: true,
             sparse_threshold_ms: 300.0,
             pmt_dirty: false,
@@ -198,6 +203,7 @@ impl TsMuxer {
             self.write_pat();
             self.write_pmt();
             self.pat_pmt_emitted = true;
+            self.last_psi_pts_90k = pts_90k;
         }
 
         let pes = build_pes_video(data, pts_90k, dts_90k);
@@ -256,6 +262,7 @@ impl TsMuxer {
             self.write_pat();
             self.write_pmt();
             self.pat_pmt_emitted = true;
+            self.last_psi_pts_90k = pts_90k;
         }
 
         if self.sparse_enabled {
@@ -284,11 +291,22 @@ impl TsMuxer {
             self.write_pat();
             self.write_pmt();
             self.pmt_dirty = false;
+            self.last_psi_pts_90k = pts_90k;
         }
         if self.pmt_resend_count > 0 {
             self.write_pat();
             self.write_pmt();
             self.pmt_resend_count -= 1;
+            self.last_psi_pts_90k = pts_90k;
+        }
+
+        // Periodic PAT/PMT so mid-stream joiners can tune without waiting
+        // for a sparse-suppression transition. Runs before the suppression
+        // early-return to keep PSI flowing during silent gaps.
+        if pts_90k.saturating_sub(self.last_psi_pts_90k) >= PSI_INTERVAL_TICKS {
+            self.write_pat();
+            self.write_pmt();
+            self.last_psi_pts_90k = pts_90k;
         }
 
         let suppressed = self.audio_streams[idx].suppressed;
@@ -746,6 +764,10 @@ mod tests {
         result.expect("no PMT found in output")
     }
 
+    fn pkt_pid(chunk: &[u8]) -> u16 {
+        ((chunk[1] as u16 & 0x1F) << 8) | chunk[2] as u16
+    }
+
     #[test]
     fn sparse_drops_silent_pid_from_pmt() {
         let mut m = TsMuxer::new();
@@ -840,5 +862,73 @@ mod tests {
             "expected multiple PMT re-emissions after suppression, got {}",
             pmt_count
         );
+    }
+
+    #[test]
+    fn push_pcm_periodic_pmt_every_100ms() {
+        let mut m = TsMuxer::new();
+        m.set_video_enabled(false);
+        m.set_audio_codec("s302m", 2);
+
+        // 960 frames stereo @ 48 kHz = 20 ms per push, pts stepping 20 ms.
+        let frame = [0.5_f32; 1920];
+        let mut pmt_pushes: Vec<usize> = Vec::new();
+        for i in 0..50usize {
+            m.push_pcm(&frame, (i * 20_000) as f64);
+            let out = m.poll();
+            if out.chunks(TS_PACKET_SIZE).any(|c| pkt_pid(c) == PMT_PID) {
+                pmt_pushes.push(i);
+            }
+        }
+        assert!(
+            (8..=13).contains(&pmt_pushes.len()),
+            "expected a PMT roughly every 5th push (10 of 50), got {} in {:?}",
+            pmt_pushes.len(),
+            pmt_pushes
+        );
+        for w in pmt_pushes.windows(2) {
+            assert!(
+                w[1] - w[0] <= 10,
+                "gap longer than 200 ms between PSI emissions: {:?}",
+                pmt_pushes
+            );
+        }
+    }
+
+    #[test]
+    fn push_pcm_periodic_pmt_during_suppression() {
+        let mut m = TsMuxer::new();
+        m.set_video_enabled(false);
+        m.set_audio_codec("s302m", 2);
+        m.set_sparse_enabled(true);
+        m.set_sparse_threshold(10.0);
+
+        let silent = [0.0_f32; 1920]; // 20 ms stereo, over threshold instantly
+        let mut pmt_pushes: Vec<usize> = Vec::new();
+        for i in 0..40usize {
+            m.push_pcm(&silent, (i * 20_000) as f64);
+            let out = m.poll();
+            if out.chunks(TS_PACKET_SIZE).any(|c| pkt_pid(c) == PMT_PID) {
+                pmt_pushes.push(i);
+            }
+            for c in out.chunks(TS_PACKET_SIZE) {
+                assert_ne!(pkt_pid(c), 0x101, "no audio PES expected while suppressed");
+            }
+        }
+        // The dirty/resend burst covers roughly the first 11 pushes; periodic
+        // emission must keep PSI flowing after it.
+        let post_burst: Vec<usize> = pmt_pushes.iter().copied().filter(|&i| i > 11).collect();
+        assert!(
+            post_burst.len() >= 3,
+            "periodic PMTs should continue after resend burst, got pushes {:?}",
+            pmt_pushes
+        );
+        for w in pmt_pushes.windows(2) {
+            assert!(
+                w[1] - w[0] <= 10,
+                "gap longer than 200 ms between PSI emissions: {:?}",
+                pmt_pushes
+            );
+        }
     }
 }
