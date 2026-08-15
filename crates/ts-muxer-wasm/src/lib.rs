@@ -76,6 +76,9 @@ pub struct TsMuxer {
     output: Vec<u8>,
     pat_pmt_emitted: bool,
     last_psi_pts_90k: u64,
+    /// Sparse (silence) suppression is opt-in. When enabled, sustained
+    /// silence drops a PID from the PMT and resets its CC on resume —
+    /// the path has never been exercised against a real receiver chain.
     sparse_enabled: bool,
     sparse_threshold_ms: f64,
     pmt_dirty: bool,
@@ -107,7 +110,7 @@ impl TsMuxer {
             output: Vec::new(),
             pat_pmt_emitted: false,
             last_psi_pts_90k: 0,
-            sparse_enabled: true,
+            sparse_enabled: false,
             sparse_threshold_ms: 300.0,
             pmt_dirty: false,
             pmt_resend_count: 0,
@@ -167,6 +170,9 @@ impl TsMuxer {
         }
     }
 
+    /// Opt in to sparse (silence) suppression. Off by default: suppression
+    /// mutates the PMT (drops silent PIDs) and resets CC on resume, and has
+    /// never run against a real muxer source or receiver chain.
     #[wasm_bindgen(js_name = setSparseEnabled)]
     pub fn set_sparse_enabled(&mut self, enabled: bool) {
         self.sparse_enabled = enabled;
@@ -872,6 +878,34 @@ mod tests {
         assert!(
             pmt.windows(3).any(|w| w == entry),
             "PID 0x101 ES entry should remain in PMT when sparse is disabled"
+        );
+    }
+
+    #[test]
+    fn sparse_disabled_by_default() {
+        let mut m = TsMuxer::new();
+        m.set_video_enabled(false);
+        m.set_audio_codec("s302m", 2);
+        // No set_sparse_enabled call: a fresh muxer must not suppress.
+
+        // Sustained silence far past the default 300 ms threshold.
+        let mut all = Vec::new();
+        for i in 0..100usize {
+            m.push_pcm(&[0.0_f32; 480], (i as f64) * 5_000.0);
+            all.extend(m.poll());
+        }
+        let pmt = last_pmt_section(&all);
+        assert!(
+            pmt.windows(3).any(|w| w == [0x06, 0xE1, 0x01]),
+            "PID 0x101 ES entry must remain in the PMT by default"
+        );
+
+        // A silent push long after the threshold must still emit PES.
+        m.push_pcm(&[0.0_f32; 480], 500_000.0);
+        let out = m.poll();
+        assert!(
+            out.chunks(TS_PACKET_SIZE).any(|c| pkt_pid(c) == 0x101),
+            "silent audio must still emit PES when sparse is off by default"
         );
     }
 
