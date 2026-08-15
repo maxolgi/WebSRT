@@ -895,8 +895,25 @@ impl TsDemuxer {
                 } else {
                     None
                 };
+                // Expected ES payload bytes = pes_packet_len minus the PES
+                // header bytes PesHeader parsing already consumed (they never
+                // reach entry.buf). Mirrors upstream
+                // `PesPacketReader::handle_pes_start_payload` (src/pes/reader.rs):
+                // `pes_packet_len - optional_header_len`, where
+                // `PesHeader::optional_header_len` (src/pes/packet.rs) is
+                // `3 + pts(5) + dts(5) + escr(6)`. Without this the length
+                // check can never fire, deferring every exact-sized PES to
+                // the next PesStart (~21ms extra latency). Upstream errors on
+                // underflow; we're a tolerant demuxer, so malformed lengths
+                // fall back to unbounded (flush at next PesStart).
                 entry.declared_len = if pes.pes_packet_len > 0 {
-                    Some(pes.pes_packet_len as usize)
+                    let optional_header_len: u16 = 3
+                        + pes.header.pts.map_or(0, |_| 5)
+                        + pes.header.dts.map_or(0, |_| 5)
+                        + pes.header.escr.map_or(0, |_| 6);
+                    pes.pes_packet_len
+                        .checked_sub(optional_header_len)
+                        .map(usize::from)
                 } else {
                     None
                 };
@@ -1517,5 +1534,279 @@ impl TsDemuxer {
     pub fn set_meter_selection(&mut self, pid: u16, channel: u8) {
         self.meter_state.selected_pid = pid;
         self.meter_state.selected_channel = channel;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PAT_PID: u16 = 0x0000;
+    const PMT_PID: u16 = 0x1000;
+    const AUDIO_PID: u16 = 0x0101;
+    const VIDEO_PID: u16 = 0x0100;
+
+    // MPEG-2 CRC32 (poly 0x04C11DB7, init 0xFFFFFFFF, no reflection) —
+    // same algorithm the ts-muxer-wasm writer uses; PSI parsing verifies it.
+    fn crc32_mpeg(data: &[u8]) -> u32 {
+        let mut crc: u32 = 0xFFFFFFFF;
+        for &byte in data {
+            crc ^= u32::from(byte) << 24;
+            for _ in 0..8 {
+                if crc & 0x8000_0000 != 0 {
+                    crc = (crc << 1) ^ 0x04C1_1DB7;
+                } else {
+                    crc <<= 1;
+                }
+            }
+        }
+        crc
+    }
+
+    fn psi_packet(pid: u16, cc: u8, section: &[u8]) -> Vec<u8> {
+        let mut pkt = vec![0u8; TS_PACKET_SIZE];
+        pkt[0] = 0x47;
+        pkt[1] = 0x40 | ((pid >> 8) as u8 & 0x1F);
+        pkt[2] = (pid & 0xFF) as u8;
+        pkt[3] = 0x10 | (cc & 0x0F);
+        pkt[4] = 0x00; // pointer_field
+        pkt[5..5 + section.len()].copy_from_slice(section);
+        for byte in &mut pkt[5 + section.len()..] {
+            *byte = 0xFF;
+        }
+        pkt
+    }
+
+    fn pat_packet() -> Vec<u8> {
+        let mut section: Vec<u8> = vec![
+            0x00, 0xB0, 0x0D, 0x00, 0x01, 0xC1, 0x00, 0x00, 0x00, 0x01, 0xF0, 0x00,
+        ];
+        let crc = crc32_mpeg(&section);
+        section.extend_from_slice(&crc.to_be_bytes());
+        psi_packet(PAT_PID, 0, &section)
+    }
+
+    fn pmt_packet(entries: &[(u8, u16)]) -> Vec<u8> {
+        // 13 = fixed fields + CRC32; each entry adds 5 bytes (no descriptors).
+        let section_length = (13 + entries.len() * 5) as u16;
+        let mut s = vec![0x02, 0xB0 | ((section_length >> 8) as u8 & 0x0F)];
+        s.push((section_length & 0xFF) as u8);
+        s.extend_from_slice(&[0x00, 0x01, 0xC1, 0x00, 0x00]);
+        s.push(((entries.first().map(|(_, p)| *p).unwrap_or(0x1FFF) >> 8) as u8) | 0xE0);
+        s.push((entries.first().map(|(_, p)| *p).unwrap_or(0x1FFF) & 0xFF) as u8);
+        s.extend_from_slice(&[0xF0, 0x00]); // no program descriptors
+        for &(st, pid) in entries {
+            s.push(st);
+            s.push(((pid >> 8) as u8) | 0xE0);
+            s.push((pid & 0xFF) as u8);
+            s.extend_from_slice(&[0xF0, 0x00]); // no ES descriptors
+        }
+        let crc = crc32_mpeg(&s);
+        s.extend_from_slice(&crc.to_be_bytes());
+        psi_packet(PMT_PID, 0, &s)
+    }
+
+    fn encode_pts(value: u64, prefix: u8) -> [u8; 5] {
+        let v = value & 0x1FFFFFFFF;
+        let b0 = (prefix << 4) | (((v >> 29) & 0x0E) as u8) | 0x01;
+        let b1 = ((v >> 22) & 0xFF) as u8;
+        let b2 = (((v >> 14) & 0xFE) as u8) | 0x01;
+        let b3 = ((v >> 7) & 0xFF) as u8;
+        let b4 = (((v << 1) & 0xFE) as u8) | 0x01;
+        [b0, b1, b2, b3, b4]
+    }
+
+    // Exact-sized audio PES (same layout as ts-muxer-wasm build_pes_audio):
+    // pes_packet_len = 3 + 5 + data.len(), PTS-only header.
+    fn build_pes_audio(data: &[u8], pts_90k: u64) -> Vec<u8> {
+        let pes_packet_len = (3 + 5 + data.len()) as u16;
+        let mut pes = Vec::with_capacity(14 + data.len());
+        pes.extend_from_slice(&[0x00, 0x00, 0x01, 0xC0]);
+        pes.extend_from_slice(&pes_packet_len.to_be_bytes());
+        pes.extend_from_slice(&[0x80, 0x80, 0x05]);
+        pes.extend_from_slice(&encode_pts(pts_90k, 0b0010));
+        pes.extend_from_slice(data);
+        pes
+    }
+
+    // Unbounded video PES (pes_packet_len == 0) with PTS + DTS.
+    fn build_pes_video(data: &[u8], pts_90k: u64, dts_90k: u64) -> Vec<u8> {
+        let mut pes = Vec::with_capacity(19 + data.len());
+        pes.extend_from_slice(&[0x00, 0x00, 0x01, 0xE0, 0x00, 0x00]);
+        pes.extend_from_slice(&[0x80, 0xC0, 0x0A]);
+        pes.extend_from_slice(&encode_pts(pts_90k, 0b0011));
+        pes.extend_from_slice(&encode_pts(dts_90k, 0b0001));
+        pes.extend_from_slice(data);
+        pes
+    }
+
+    // Malformed exact-length audio PES: pes_packet_len smaller than the
+    // parsed optional header, so the ES-length subtraction would underflow.
+    fn build_pes_audio_short_len(data: &[u8], pts_90k: u64) -> Vec<u8> {
+        let mut pes = Vec::with_capacity(14 + data.len());
+        pes.extend_from_slice(&[0x00, 0x00, 0x01, 0xC0, 0x00, 0x02]);
+        pes.extend_from_slice(&[0x80, 0x80, 0x05]);
+        pes.extend_from_slice(&encode_pts(pts_90k, 0b0010));
+        pes.extend_from_slice(data);
+        pes
+    }
+
+    // Split a PES into 188-byte TS packets with PUSI on the first and
+    // incrementing CC. `total` must be a multiple of 184 so no stuffing is
+    // needed (payload-only packets, adaptation_field_control = 0b01).
+    fn packetize(pid: u16, cc: &mut u8, data: &[u8]) -> Vec<Vec<u8>> {
+        assert_eq!(data.len() % 184, 0, "test harness requires exact packets");
+        let mut pkts = Vec::new();
+        for (i, chunk) in data.chunks(184).enumerate() {
+            let mut pkt = vec![0u8; TS_PACKET_SIZE];
+            pkt[0] = 0x47;
+            pkt[1] = if i == 0 { 0x40 } else { 0x00 } | ((pid >> 8) as u8 & 0x1F);
+            pkt[2] = (pid & 0xFF) as u8;
+            pkt[3] = 0x10 | (*cc & 0x0F);
+            *cc = (*cc + 1) & 0x0F;
+            pkt[4..].copy_from_slice(chunk);
+            pkts.push(pkt);
+        }
+        pkts
+    }
+
+    fn es_bytes(n: usize) -> Vec<u8> {
+        // No zero bytes → no accidental Annex-B start codes for video PIDs.
+        (0..n).map(|i| ((i % 250) + 1) as u8).collect()
+    }
+
+    fn pes_events(events: &[TsEvent], pid: u16) -> Vec<&TsEvent> {
+        events
+            .iter()
+            .filter(|e| e.kind == 2 && e.pid == pid)
+            .collect()
+    }
+
+    fn tune(demuxer: &mut TsDemuxer, entries: &[(u8, u16)]) {
+        let events = demuxer.feed(&pat_packet());
+        assert!(events.iter().any(|e| e.kind == 0), "no PAT event");
+        let events = demuxer.feed(&pmt_packet(entries));
+        assert!(events.iter().any(|e| e.kind == 1), "no PMT event");
+    }
+
+    // Two back-to-back exact-sized audio PES packets on one PID with no
+    // intervening packets: the FIRST PES must be emitted as soon as its own
+    // last continuation packet arrives — not deferred to the second PesStart.
+    #[test]
+    fn exact_length_audio_pes_flushes_on_last_continuation() {
+        let mut demuxer = TsDemuxer::new();
+        tune(&mut demuxer, &[(0x0F, AUDIO_PID)]);
+
+        let pts1 = 90_000u64;
+        let pts2 = 90_000 + 1_920;
+        let es1 = es_bytes(184 * 3 - 14); // 3 TS packets
+        let es2 = es_bytes(184 * 2 - 14); // 2 TS packets
+        let mut cc = 0u8;
+        let pes1 = packetize(AUDIO_PID, &mut cc, &build_pes_audio(&es1, pts1));
+        let pes2 = packetize(AUDIO_PID, &mut cc, &build_pes_audio(&es2, pts2));
+
+        // Feed PES1 only. No event until the last continuation packet…
+        for pkt in &pes1[..pes1.len() - 1] {
+            assert!(
+                pes_events(&demuxer.feed(pkt), AUDIO_PID).is_empty(),
+                "PES1 emitted before its last packet"
+            );
+        }
+        // …then the event exists before PES2's PesStart arrives. PTS/payload
+        // must match what the old flush-at-next-PesStart path produced.
+        let events = demuxer.feed(&pes1[pes1.len() - 1]);
+        let emitted = pes_events(&events, AUDIO_PID);
+        assert_eq!(emitted.len(), 1, "PES1 not flushed on its last packet");
+        assert_eq!(emitted[0].pts, pts1 as i64);
+        assert_eq!(emitted[0].dts, -1);
+        assert_eq!(emitted[0].data, es1);
+        assert!(!emitted[0].random_access);
+
+        // PES2 likewise flushes on its own last continuation packet.
+        for pkt in &pes2[..pes2.len() - 1] {
+            assert!(
+                pes_events(&demuxer.feed(pkt), AUDIO_PID).is_empty(),
+                "PES2 emitted before its last packet"
+            );
+        }
+        let events = demuxer.feed(&pes2[pes2.len() - 1]);
+        let emitted = pes_events(&events, AUDIO_PID);
+        assert_eq!(emitted.len(), 1, "PES2 not flushed on its last packet");
+        assert_eq!(emitted[0].pts, pts2 as i64);
+        assert_eq!(emitted[0].data, es2);
+    }
+
+    // Unbounded video PES (pes_packet_len == 0, PTS+DTS) must keep the old
+    // behavior: no length-based flush, only the next PesStart finalizes it.
+    #[test]
+    fn unbounded_video_pes_flushes_at_next_pes_start() {
+        let mut demuxer = TsDemuxer::new();
+        tune(&mut demuxer, &[(0x1B, VIDEO_PID)]);
+
+        let pts1 = 90_000u64;
+        let dts1 = 89_550u64;
+        let es1 = es_bytes(184 * 2 - 19); // PTS+DTS header is 19 bytes
+        let es2 = es_bytes(184 * 2 - 19);
+        let mut cc = 0u8;
+        let pes1 = packetize(VIDEO_PID, &mut cc, &build_pes_video(&es1, pts1, dts1));
+        let pes2 = packetize(
+            VIDEO_PID,
+            &mut cc,
+            &build_pes_video(&es2, pts1 + 3_000, dts1 + 3_000),
+        );
+
+        for pkt in &pes1 {
+            assert!(
+                pes_events(&demuxer.feed(pkt), VIDEO_PID).is_empty(),
+                "unbounded PES flushed without a next PesStart"
+            );
+        }
+        // The second PesStart flushes PES1 with its own stashed header.
+        let events = demuxer.feed(&pes2[0]);
+        let emitted = pes_events(&events, VIDEO_PID);
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].pts, pts1 as i64);
+        assert_eq!(emitted[0].dts, dts1 as i64);
+        assert_eq!(emitted[0].data, es1);
+
+        // PES2 is unbounded too: its continuations flush nothing.
+        for pkt in &pes2[1..] {
+            assert!(pes_events(&demuxer.feed(pkt), VIDEO_PID).is_empty());
+        }
+    }
+
+    // pes_packet_len smaller than the consumed optional header (malformed):
+    // the subtraction underflows, so the demuxer must fall back to the
+    // unbounded flush-at-next-PesStart behavior instead of mis-flushing.
+    #[test]
+    fn short_pes_packet_len_underflow_falls_back_to_unbounded() {
+        let mut demuxer = TsDemuxer::new();
+        tune(&mut demuxer, &[(0x0F, AUDIO_PID)]);
+
+        let pts1 = 90_000u64;
+        let es1 = es_bytes(184 * 2 - 14);
+        let mut cc = 0u8;
+        let pes1 = packetize(AUDIO_PID, &mut cc, &build_pes_audio_short_len(&es1, pts1));
+        let pes2 = packetize(
+            AUDIO_PID,
+            &mut cc,
+            &build_pes_audio(&es_bytes(184 * 2 - 14), pts1 + 1_920),
+        );
+
+        for pkt in &pes1 {
+            assert!(
+                pes_events(&demuxer.feed(pkt), AUDIO_PID).is_empty(),
+                "malformed-length PES flushed early"
+            );
+        }
+        let events = demuxer.feed(&pes2[0]);
+        let emitted = pes_events(&events, AUDIO_PID);
+        assert_eq!(
+            emitted.len(),
+            1,
+            "underflow PES not flushed at next PesStart"
+        );
+        assert_eq!(emitted[0].pts, pts1 as i64);
+        assert_eq!(emitted[0].data, es1);
     }
 }
