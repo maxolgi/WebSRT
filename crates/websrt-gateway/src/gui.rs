@@ -486,10 +486,7 @@ impl eframe::App for GuiApp {
                                     let srt = s.srt.as_ref();
                                     ui.small(format!("#{}", s.session_id));
                                     ui.small(&s.stream_name);
-                                    ui.small(format!(
-                                        "{}",
-                                        srt.map(|v| v.tx_data).unwrap_or(0)
-                                    ));
+                                    ui.small(format!("{}", srt.map(|v| v.tx_data).unwrap_or(0)));
                                     ui.small(format!(
                                         "{}",
                                         srt.map(|v| v.tx_buffered).unwrap_or(0)

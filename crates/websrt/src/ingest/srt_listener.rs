@@ -50,7 +50,8 @@ impl SrtListenerService {
                 // RCVBUF <= FC * MSS (set FC first, then RCVBUF).
                 let pkts = PacketCount(recv_buffer_packets(latency));
                 o.sender.flow_control_window_size = pkts;
-                o.receiver.buffer_size = ByteCount(recv_buffer_packets(latency) * (1500 - 28) as u64);
+                o.receiver.buffer_size =
+                    ByteCount(recv_buffer_packets(latency) * (1500 - 28) as u64);
             })
             .bind(addr.as_ref())
             .await
