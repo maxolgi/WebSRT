@@ -176,7 +176,7 @@ Browser runs the **same** `srt-protocol` + `mpeg2ts` Rust crates compiled to WAS
 
 Gateway runs under supervisord (must use `--no-gui` in the supervisord config):
 - Config: `websrt.conf` → deployed to `/etc/supervisor/conf.d/websrt.conf`
-- Logs: `logs/gateway.out.log` + `logs/gateway.err.log`
+- Logs: `/var/log/websrt/gateway.out.log` + `/var/log/websrt/gateway.err.log`
 - Restart: `sudo supervisorctl reread && sudo supervisorctl update && sudo supervisorctl restart websrt`
 - **After rebuilding the binary**, must restart supervisord to pick it up
 - On boot, gateway writes `web/public/cert-hash.js` (hash for self-signed, null for mkcert)
