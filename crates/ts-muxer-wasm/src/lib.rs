@@ -362,19 +362,7 @@ impl TsMuxer {
         ];
         let crc = crc32(&section);
         section.extend_from_slice(&crc.to_be_bytes());
-
-        let mut pkt = [0u8; TS_PACKET_SIZE];
-        pkt[0] = SYNC_BYTE;
-        pkt[1] = 0x40 | ((PAT_PID >> 8) as u8 & 0x1F);
-        pkt[2] = (PAT_PID & 0xFF) as u8;
-        pkt[3] = 0x10 | (self.pat_cc & 0x0F);
-        self.pat_cc = (self.pat_cc + 1) & 0x0F;
-        pkt[4] = 0x00;
-        pkt[5..5 + section.len()].copy_from_slice(&section);
-        for byte in &mut pkt[5 + section.len()..] {
-            *byte = 0xFF;
-        }
-        self.output.extend_from_slice(&pkt);
+        packetize_psi(&mut self.output, PAT_PID, &mut self.pat_cc, &section);
     }
 
     fn write_pmt(&mut self) {
@@ -429,19 +417,48 @@ impl TsMuxer {
 
         let crc = crc32(&s);
         s.extend_from_slice(&crc.to_be_bytes());
+        packetize_psi(&mut self.output, self.pmt_pid, &mut self.pmt_cc, &s);
+    }
+}
+
+/// Packetize one PSI section (PAT or PMT) across N TS packets per
+/// ISO/IEC 13818-1 §2.4.4. The first packet sets PUSI and carries
+/// pointer_field=0x00 before the section start; continuation packets
+/// carry raw section bytes with PUSI clear; the final packet 0xFF-stuffs
+/// the remainder. Only one section is emitted per call, so a new section
+/// never starts mid-packet. For sections that fit a single packet the
+/// output is byte-identical to the historical one-packet writers.
+fn packetize_psi(output: &mut Vec<u8>, pid: u16, cc: &mut u8, section: &[u8]) {
+    let mut offset = 0usize;
+    let mut first = true;
+    while offset < section.len() {
+        // First packet reserves one payload byte for the pointer_field.
+        let overhead = if first { 1 } else { 0 };
+        let payload_room = TS_PACKET_SIZE - 4 - overhead;
+
+        let chunk = (section.len() - offset).min(payload_room);
 
         let mut pkt = [0u8; TS_PACKET_SIZE];
         pkt[0] = SYNC_BYTE;
-        pkt[1] = 0x40 | ((self.pmt_pid >> 8) as u8 & 0x1F);
-        pkt[2] = (self.pmt_pid & 0xFF) as u8;
-        pkt[3] = 0x10 | (self.pmt_cc & 0x0F);
-        self.pmt_cc = (self.pmt_cc + 1) & 0x0F;
-        pkt[4] = 0x00;
-        pkt[5..5 + s.len()].copy_from_slice(&s);
-        for byte in &mut pkt[5 + s.len()..] {
+        let pusi = if first { 0x40u8 } else { 0x00u8 };
+        pkt[1] = pusi | ((pid >> 8) as u8 & 0x1F);
+        pkt[2] = (pid & 0xFF) as u8;
+        pkt[3] = 0x10 | (*cc & 0x0F);
+        *cc = (*cc + 1) & 0x0F;
+
+        let mut pos = 4usize;
+        if first {
+            pkt[pos] = 0x00; // pointer_field: section starts right here
+            pos += 1;
+        }
+        pkt[pos..pos + chunk].copy_from_slice(&section[offset..offset + chunk]);
+        for byte in &mut pkt[pos + chunk..] {
             *byte = 0xFF;
         }
-        self.output.extend_from_slice(&pkt);
+        output.extend_from_slice(&pkt);
+
+        offset += chunk;
+        first = false;
     }
 }
 
@@ -1037,5 +1054,137 @@ mod tests {
         let pids: Vec<u16> = out.chunks(TS_PACKET_SIZE).map(pkt_pid).collect();
         assert!(pids.contains(&PAT_PID) && pids.contains(&PMT_PID));
         assert!(pids.contains(&0x101), "push_pcm should land on 0x101");
+    }
+
+    /// 64 s302m streams: 0x101 via set_audio_codec + 0x102..=0x140 via
+    /// add_audio_pid (CakeMix's 128-channel layout).
+    fn muxer_with_64_audio_pids() -> TsMuxer {
+        let mut m = TsMuxer::new();
+        m.set_video_enabled(false);
+        m.set_audio_codec("s302m", 2);
+        for pid in 0x102..=0x140u16 {
+            m.add_audio_pid(pid, "s302m", 2);
+        }
+        m
+    }
+
+    /// Reassemble complete PMT sections from a poll() buffer: a PUSI packet
+    /// starts a section (skipping the pointer_field byte), non-PUSI packets
+    /// on the PMT PID append, trailing 0xFF stuffing is trimmed via the
+    /// section_length field.
+    fn reassemble_pmt_sections(out: &[u8]) -> Vec<Vec<u8>> {
+        let mut sections = Vec::new();
+        let mut cur: Option<Vec<u8>> = None;
+        for chunk in out.chunks(TS_PACKET_SIZE) {
+            if pkt_pid(chunk) != PMT_PID {
+                continue;
+            }
+            if chunk[1] & 0x40 != 0 {
+                cur = Some(chunk[5..].to_vec()); // skip pointer_field
+            } else if let Some(buf) = cur.as_mut() {
+                buf.extend_from_slice(&chunk[4..]);
+            } else {
+                panic!("PMT continuation packet without a start packet");
+            }
+            let buf = cur.as_ref().expect("section in progress");
+            let total = (((buf[1] as usize & 0x0F) << 8) | buf[2] as usize) + 3;
+            if buf.len() >= total {
+                let mut done = cur.take().expect("section in progress");
+                done.truncate(total);
+                sections.push(done);
+            }
+        }
+        sections
+    }
+
+    #[test]
+    fn pmt_64_audio_pids_spans_multiple_packets() {
+        let mut m = muxer_with_64_audio_pids();
+        m.push_pcm(&[0.5_f32; 4], 0.0);
+        let out = m.poll();
+
+        assert_eq!(
+            out.len() % TS_PACKET_SIZE,
+            0,
+            "output must be a whole number of TS packets"
+        );
+
+        let pmt: Vec<&[u8]> = out
+            .chunks(TS_PACKET_SIZE)
+            .filter(|c| pkt_pid(c) == PMT_PID)
+            .collect();
+        assert!(
+            pmt.len() >= 4,
+            "64-entry PMT needs at least 4 TS packets, got {}",
+            pmt.len()
+        );
+        for (i, c) in pmt.iter().enumerate() {
+            assert_eq!(
+                c[3] & 0x0F,
+                (i as u8) & 0x0F,
+                "continuity_counter must increment by 1 per PMT packet"
+            );
+            assert_eq!(
+                c[1] & 0x40 != 0,
+                i == 0,
+                "PUSI must be set on the first PMT packet only"
+            );
+        }
+    }
+
+    #[test]
+    fn pmt_64_audio_pids_section_reassembles() {
+        let mut m = muxer_with_64_audio_pids();
+        m.push_pcm(&[0.5_f32; 4], 0.0);
+        let out = m.poll();
+
+        let sections = reassemble_pmt_sections(&out);
+        assert_eq!(sections.len(), 1, "expected exactly one PMT section");
+        let s = &sections[0];
+        let sl = ((s[1] as usize & 0x0F) << 8) | s[2] as usize;
+        assert_eq!(
+            s.len(),
+            3 + sl,
+            "section_length must match the reassembled byte count"
+        );
+        let crc = u32::from_be_bytes(s[s.len() - 4..].try_into().unwrap());
+        assert_eq!(
+            crc32(&s[..s.len() - 4]),
+            crc,
+            "reassembled section CRC32 must validate"
+        );
+        for pid in 0x101..=0x140u16 {
+            let entry = [0x06, (0xE0 | (pid >> 8)) as u8, (pid & 0xFF) as u8];
+            assert!(
+                s.windows(3).any(|w| w == entry),
+                "PID 0x{:X} ES entry missing from PMT",
+                pid
+            );
+        }
+    }
+
+    #[test]
+    fn pmt_multi_packet_demuxer_roundtrip() {
+        use mpeg2ts_wasm::TsDemuxer;
+
+        let mut m = muxer_with_64_audio_pids();
+        m.push_pcm(&[0.5_f32; 4], 0.0);
+        let out = m.poll();
+
+        let mut demux = TsDemuxer::new();
+        let events = demux.feed(&out);
+        let pmt_events: Vec<&mpeg2ts_wasm::TsEvent> =
+            events.iter().filter(|e| e.kind() == 1).collect();
+        assert!(!pmt_events.is_empty(), "demuxer should emit a pmt event");
+        let flat = pmt_events[0].pmt_entries();
+        let pids: Vec<u16> = flat.chunks(2).map(|c| c[0]).collect();
+        assert_eq!(pids.len(), 64, "PMT should list all 64 audio PIDs");
+        for pid in 0x101..=0x140u16 {
+            assert!(
+                pids.contains(&pid),
+                "PID 0x{:X} missing from demuxed PMT",
+                pid
+            );
+        }
     }
 }
