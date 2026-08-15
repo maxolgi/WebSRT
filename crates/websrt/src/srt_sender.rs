@@ -18,15 +18,10 @@ use srt_protocol::statistics::SocketStatistics;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
-/// SRT payload size: 1128 bytes (6 × 188-byte TS packets per SRT packet,
-/// TS-aligned). The HSv5 handshake negotiates `min(gateway, browser)`, so
-/// this must match the wasm-side constant (`crates/srt-wasm/src/lib.rs`).
-/// The resulting 1128 + 16 = 1144-byte datagrams fit under Chrome's
-/// ~1200-byte browser→gateway WebTransport datagram cap, where the old
-/// 1316 (7 × 188 → 1332-byte datagrams) was silently dropped with no write
-/// error. 1316 dated from a 128-channel throughput experiment since
-/// superseded by adaptive buffer sizing.
-pub const PAYLOAD_SIZE: u64 = 1128;
+/// SRT payload size: standard MPEG-TS value of 1316 bytes (7 × 188-byte TS
+/// packets per SRT packet). Must match the wasm-side constant. The HSv5
+/// handshake negotiates `min(gateway, browser)`, so both sides must use this.
+pub const PAYLOAD_SIZE: u64 = 1316;
 
 /// Configurable SRT protocol parameters.
 #[derive(Debug, Clone)]
