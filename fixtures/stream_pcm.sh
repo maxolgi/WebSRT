@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash 
 # Phase 0 PCM spike source — pushes SMPTE 302M (AES3) audio over SRT to the
 # running WebSRT gateway. Audio-only MPEG-2 TS, no video.
 #
