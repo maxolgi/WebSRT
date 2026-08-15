@@ -5,6 +5,8 @@
 //! chunks via `push_video` / `push_audio` / `push_pcm` and draining finished
 //! packets via `poll`.
 
+use mpeg2ts::crc::Crc32;
+use mpeg2ts::time::{ClockReference, Timestamp};
 use mpeg2ts_wasm::aes3;
 use wasm_bindgen::prelude::*;
 
@@ -366,8 +368,9 @@ impl TsMuxer {
         let mut section: Vec<u8> = vec![
             0x00, 0xB0, 0x0D, 0x00, 0x01, 0xC1, 0x00, 0x00, 0x00, 0x01, 0xF0, 0x00,
         ];
-        let crc = crc32(&section);
-        section.extend_from_slice(&crc.to_be_bytes());
+        let mut crc = Crc32::new();
+        crc.update(&section);
+        section.extend_from_slice(&crc.value().to_be_bytes());
         packetize_psi(&mut self.output, PAT_PID, &mut self.pat_cc, &section);
     }
 
@@ -421,8 +424,9 @@ impl TsMuxer {
             s.extend_from_slice(desc);
         }
 
-        let crc = crc32(&s);
-        s.extend_from_slice(&crc.to_be_bytes());
+        let mut crc = Crc32::new();
+        crc.update(&s);
+        s.extend_from_slice(&crc.value().to_be_bytes());
         packetize_psi(&mut self.output, self.pmt_pid, &mut self.pmt_cc, &s);
     }
 }
@@ -521,7 +525,9 @@ fn packetize(
                 pos += 1;
 
                 if pcr_overhead > 0 {
-                    write_pcr(&mut pkt[pos..pos + 6], pcr_base.unwrap(), 0);
+                    let pcr =
+                        ClockReference::new((pcr_base.unwrap() & Timestamp::MAX) * 300).unwrap();
+                    pkt[pos..pos + 6].copy_from_slice(&pcr.pcr_to_bytes());
                     pos += 6;
                 }
                 for byte in &mut pkt[pos..TS_PACKET_SIZE - chunk] {
@@ -557,9 +563,11 @@ fn build_pes_video(data: &[u8], pts_90k: u64, dts_90k: u64) -> Vec<u8> {
     pes.push(0x80);
     pes.push(flags2);
     pes.push(header_len);
-    pes.extend_from_slice(&encode_pts(pts_90k, pts_prefix));
+    let pts = Timestamp::new(pts_90k & Timestamp::MAX).unwrap();
+    pes.extend_from_slice(&pts.to_bytes(pts_prefix));
     if has_dts {
-        pes.extend_from_slice(&encode_pts(dts_90k, 0b0001));
+        let dts = Timestamp::new(dts_90k & Timestamp::MAX).unwrap();
+        pes.extend_from_slice(&dts.to_bytes(0b0001));
     }
     pes.extend_from_slice(data);
     pes
@@ -573,43 +581,10 @@ fn build_pes_audio(data: &[u8], pts_90k: u64) -> Vec<u8> {
     pes.push(0x80);
     pes.push(0x80);
     pes.push(0x05);
-    pes.extend_from_slice(&encode_pts(pts_90k, 0b0010));
+    let pts = Timestamp::new(pts_90k & Timestamp::MAX).unwrap();
+    pes.extend_from_slice(&pts.to_bytes(0b0010));
     pes.extend_from_slice(data);
     pes
-}
-
-fn encode_pts(value: u64, prefix: u8) -> [u8; 5] {
-    let v = value & 0x1FFFFFFFF;
-    let b0 = (prefix << 4) | (((v >> 29) & 0x0E) as u8) | 0x01;
-    let b1 = ((v >> 22) & 0xFF) as u8;
-    let b2 = (((v >> 14) & 0xFE) as u8) | 0x01;
-    let b3 = ((v >> 7) & 0xFF) as u8;
-    let b4 = (((v << 1) & 0xFE) as u8) | 0x01;
-    [b0, b1, b2, b3, b4]
-}
-
-fn write_pcr(buf: &mut [u8], base: u64, ext: u16) {
-    buf[0] = ((base >> 25) & 0xFF) as u8;
-    buf[1] = ((base >> 17) & 0xFF) as u8;
-    buf[2] = ((base >> 9) & 0xFF) as u8;
-    buf[3] = ((base >> 1) & 0xFF) as u8;
-    buf[4] = (((base & 1) << 7) | 0x7E | ((ext >> 8) as u64 & 1)) as u8;
-    buf[5] = (ext & 0xFF) as u8;
-}
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFFFFFF;
-    for &byte in data {
-        crc ^= (byte as u32) << 24;
-        for _ in 0..8 {
-            if crc & 0x80000000 != 0 {
-                crc = (crc << 1) ^ 0x04C11DB7;
-            } else {
-                crc <<= 1;
-            }
-        }
-    }
-    crc
 }
 
 fn us_to_90k(us: f64) -> u64 {
@@ -1182,8 +1157,10 @@ mod tests {
             "section_length must match the reassembled byte count"
         );
         let crc = u32::from_be_bytes(s[s.len() - 4..].try_into().unwrap());
+        let mut check = Crc32::new();
+        check.update(&s[..s.len() - 4]);
         assert_eq!(
-            crc32(&s[..s.len() - 4]),
+            check.value(),
             crc,
             "reassembled section CRC32 must validate"
         );

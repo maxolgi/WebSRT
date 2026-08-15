@@ -1528,28 +1528,13 @@ impl TsDemuxer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mpeg2ts::crc::Crc32;
+    use mpeg2ts::time::Timestamp;
 
     const PAT_PID: u16 = 0x0000;
     const PMT_PID: u16 = 0x1000;
     const AUDIO_PID: u16 = 0x0101;
     const VIDEO_PID: u16 = 0x0100;
-
-    // MPEG-2 CRC32 (poly 0x04C11DB7, init 0xFFFFFFFF, no reflection) —
-    // same algorithm the ts-muxer-wasm writer uses; PSI parsing verifies it.
-    fn crc32_mpeg(data: &[u8]) -> u32 {
-        let mut crc: u32 = 0xFFFFFFFF;
-        for &byte in data {
-            crc ^= u32::from(byte) << 24;
-            for _ in 0..8 {
-                if crc & 0x8000_0000 != 0 {
-                    crc = (crc << 1) ^ 0x04C1_1DB7;
-                } else {
-                    crc <<= 1;
-                }
-            }
-        }
-        crc
-    }
 
     fn psi_packet(pid: u16, cc: u8, section: &[u8]) -> Vec<u8> {
         let mut pkt = vec![0u8; TS_PACKET_SIZE];
@@ -1569,8 +1554,9 @@ mod tests {
         let mut section: Vec<u8> = vec![
             0x00, 0xB0, 0x0D, 0x00, 0x01, 0xC1, 0x00, 0x00, 0x00, 0x01, 0xF0, 0x00,
         ];
-        let crc = crc32_mpeg(&section);
-        section.extend_from_slice(&crc.to_be_bytes());
+        let mut crc = Crc32::new();
+        crc.update(&section);
+        section.extend_from_slice(&crc.value().to_be_bytes());
         psi_packet(PAT_PID, 0, &section)
     }
 
@@ -1589,19 +1575,10 @@ mod tests {
             s.push((pid & 0xFF) as u8);
             s.extend_from_slice(&[0xF0, 0x00]); // no ES descriptors
         }
-        let crc = crc32_mpeg(&s);
-        s.extend_from_slice(&crc.to_be_bytes());
+        let mut crc = Crc32::new();
+        crc.update(&s);
+        s.extend_from_slice(&crc.value().to_be_bytes());
         psi_packet(PMT_PID, 0, &s)
-    }
-
-    fn encode_pts(value: u64, prefix: u8) -> [u8; 5] {
-        let v = value & 0x1FFFFFFFF;
-        let b0 = (prefix << 4) | (((v >> 29) & 0x0E) as u8) | 0x01;
-        let b1 = ((v >> 22) & 0xFF) as u8;
-        let b2 = (((v >> 14) & 0xFE) as u8) | 0x01;
-        let b3 = ((v >> 7) & 0xFF) as u8;
-        let b4 = (((v << 1) & 0xFE) as u8) | 0x01;
-        [b0, b1, b2, b3, b4]
     }
 
     // Exact-sized audio PES (same layout as ts-muxer-wasm build_pes_audio):
@@ -1612,7 +1589,11 @@ mod tests {
         pes.extend_from_slice(&[0x00, 0x00, 0x01, 0xC0]);
         pes.extend_from_slice(&pes_packet_len.to_be_bytes());
         pes.extend_from_slice(&[0x80, 0x80, 0x05]);
-        pes.extend_from_slice(&encode_pts(pts_90k, 0b0010));
+        pes.extend_from_slice(
+            &Timestamp::new(pts_90k & Timestamp::MAX)
+                .unwrap()
+                .to_bytes(0b0010),
+        );
         pes.extend_from_slice(data);
         pes
     }
@@ -1622,8 +1603,13 @@ mod tests {
         let mut pes = Vec::with_capacity(19 + data.len());
         pes.extend_from_slice(&[0x00, 0x00, 0x01, 0xE0, 0x00, 0x00]);
         pes.extend_from_slice(&[0x80, 0xC0, 0x0A]);
-        pes.extend_from_slice(&encode_pts(pts_90k, 0b0011));
-        pes.extend_from_slice(&encode_pts(dts_90k, 0b0001));
+        pes.extend_from_slice(
+            &Timestamp::new(pts_90k & Timestamp::MAX)
+                .unwrap()
+                .to_bytes(0b0011),
+        );
+        let dts = Timestamp::new(dts_90k & Timestamp::MAX).unwrap();
+        pes.extend_from_slice(&dts.to_bytes(0b0001));
         pes.extend_from_slice(data);
         pes
     }
@@ -1634,7 +1620,11 @@ mod tests {
         let mut pes = Vec::with_capacity(14 + data.len());
         pes.extend_from_slice(&[0x00, 0x00, 0x01, 0xC0, 0x00, 0x02]);
         pes.extend_from_slice(&[0x80, 0x80, 0x05]);
-        pes.extend_from_slice(&encode_pts(pts_90k, 0b0010));
+        pes.extend_from_slice(
+            &Timestamp::new(pts_90k & Timestamp::MAX)
+                .unwrap()
+                .to_bytes(0b0010),
+        );
         pes.extend_from_slice(data);
         pes
     }
