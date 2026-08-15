@@ -26,9 +26,10 @@ use std::str::FromStr;
 use std::time::Duration;
 use wasm_bindgen::prelude::*;
 
-/// SRT payload size: standard MPEG-TS value of 1316 bytes (7 × 188-byte TS
-/// packets per SRT packet). The gateway must match; HSv5 negotiates `min(both)`.
-pub const PAYLOAD_SIZE: u64 = 1316;
+/// SRT payload size: 1128 bytes (6 × 188-byte TS packets per SRT packet,
+/// TS-aligned). Must match `crates/websrt/src/srt_sender.rs`
+/// `PAYLOAD_SIZE`; HSv5 negotiates `min(both)`.
+pub const PAYLOAD_SIZE: u64 = 1128;
 
 /// Dummy peer address (we carry it vestigially; srt-protocol needs a SocketAddr
 /// for bookkeeping but it's never used on the WT path).
