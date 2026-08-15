@@ -15,6 +15,9 @@ import preact from '@preact/preset-vite';
 // simple.html (minimal viewer), stream.html (publisher).
 
 export default defineConfig({
+  // Relocatable dist: worker wasm URLs resolve relative to the worker script
+  // instead of an absolute /assets/ prefix baked in at the origin root.
+  base: './',
   server: {
     host: '0.0.0.0',
     port: 5173,
