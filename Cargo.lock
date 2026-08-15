@@ -2668,7 +2668,7 @@ dependencies = [
 [[package]]
 name = "mpeg2ts"
 version = "0.6.0"
-source = "git+https://github.com/maxolgi/mpeg2ts.git?branch=master#6958b62d19901e084ac1bd9d818f7dc38adcc179"
+source = "git+https://github.com/maxolgi/mpeg2ts.git?branch=master#9a1efaff7fd1eca2077edcb779c1ec681c340554"
 
 [[package]]
 name = "mpeg2ts-wasm"
@@ -4782,6 +4782,7 @@ dependencies = [
 name = "ts-muxer-wasm"
 version = "0.1.0"
 dependencies = [
+ "mpeg2ts",
  "mpeg2ts-wasm",
  "wasm-bindgen",
  "web-time",
@@ -5165,6 +5166,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
+ "mpeg2ts",
  "parking_lot",
  "percent-encoding",
  "proptest",
