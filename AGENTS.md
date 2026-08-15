@@ -97,6 +97,17 @@ in root `Cargo.toml`. Cargo.lock pins each to a specific commit hash — **new
 commits pushed to a fork are NOT pulled automatically**. You must run `cargo update`
 (see [Updating forked crates](#updating-forked-crates) below).
 
+**Local clones already exist — use them, don't re-clone:**
+
+- `~/srt-rs` — branch `main` (pushes to `maxolgi/srt-rs`)
+- `~/mpeg2ts` — branch `master` (pushes to `maxolgi/mpeg2ts`)
+
+**Where fixes go:** `mpeg2ts` is parse-side only (the muxer is WebSRT-native in
+`ts-muxer-wasm`). Any bug in TS/PES/PSI parsing semantics is fixed **in the fork**
+so every consumer benefits; wrappers must not re-implement fork logic — if a
+wrapper needs internal arithmetic, the fork exposes it publicly instead. Same
+rule for srt-protocol/srt-tokio.
+
 - **`maxolgi/srt-rs`** (branch: `main`) — forked from `russelltg/srt-rs` v0.4.4 (commit `d4c08ac`).
   Provides `srt-protocol` + `srt-tokio`. Twelve patches:
   1. `std::time::Instant` → `web_time::Instant` across all source files (WASM compat; no-op on native). Also adds `getrandom` with the `js` feature for `cfg(target_arch = "wasm32")`.
@@ -133,12 +144,12 @@ After updating `srt-protocol`, you must also rebuild srt-wasm (it depends on
 srt-protocol). Run `./build.sh srt-protocol` for the full gateway + WASM rebuild.
 
 **DO NOT edit files in `~/.cargo/git/checkouts/`** — cargo overwrites that
-directory on `cargo clean` or `cargo update`. To edit fork source:
+directory on `cargo clean` or `cargo update`. To edit fork source, use the
+existing local clones (`~/srt-rs`, `~/mpeg2ts` — see above):
 
-1. Clone the fork separately (e.g., `git clone git@github.com:maxolgi/srt-rs.git`)
-2. Make changes on the correct branch (`main` for srt-rs, `master` for mpeg2ts)
-3. Commit your changes, then ask the human to push to GitHub
-4. After the human pushes, run `cargo update -p <crate>` in WebSRT to pull the new commit
+1. Work in the clone, on the correct branch (`main` for srt-rs, `master` for mpeg2ts)
+2. Commit your changes, then ask the human to push to GitHub
+3. After the human pushes, run `cargo update -p <crate>` in WebSRT to pull the new commit
 
 ### Inherited QUIC features (via WebTransport)
 
