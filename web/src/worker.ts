@@ -573,15 +573,16 @@ async function runSrtLoop(myGen: number) {
 
     if (myGen !== gen || !rx || !inited) break;
 
-    const nowUs = (performance.now() - epoch) * 1000;
-
     if (winner.kind === 'dgram') {
       if (winner.res.done) break;
       const value = winner.res.value;
       if (!value) break;
       if (VERBOSE) console.debug('wt datagram', value.byteLength, 'bytes');
       let _t0 = performance.now();
-      processActions(rx.handle_datagram(value, nowUs));
+      // Fresh clock per datagram: a single per-iteration timestamp goes stale
+      // as the batch drains, so packets processed late in a batch see a clock
+      // lagging by the batch's own processing time.
+      processActions(rx.handle_datagram(value, nowRelUs()));
       wasmHandleTotalUs += (performance.now() - _t0) * 1000;
       wasmHandleCount++;
       readPromise = r.read();
@@ -611,7 +612,7 @@ async function runSrtLoop(myGen: number) {
         if (next.res.done || !next.res.value) break mainLoop;
         if (VERBOSE) console.debug('wt datagram', next.res.value.byteLength, 'bytes');
         _t0 = performance.now();
-        processActions(rx.handle_datagram(next.res.value, nowUs));
+        processActions(rx.handle_datagram(next.res.value, nowRelUs()));
         wasmHandleTotalUs += (performance.now() - _t0) * 1000;
         wasmHandleCount++;
         readPromise = r.read();
@@ -625,7 +626,8 @@ async function runSrtLoop(myGen: number) {
     }
 
     const _pollT0 = performance.now();
-    processActions(rx.poll(nowUs));
+    // Fresh clock for the poll too — the batch drain above may have taken time.
+    processActions(rx.poll(nowRelUs()));
     wasmPollTotalUs += (performance.now() - _pollT0) * 1000;
     wasmPollCount++;
     flushOutgoing();
