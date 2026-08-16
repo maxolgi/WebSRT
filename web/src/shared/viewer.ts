@@ -372,7 +372,15 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
     }
 
     worker.postMessage(
-      { cmd: 'init', url: wtUrl, certHash: hashBytes, latencyMs, decodeInWorker },
+      {
+        cmd: 'init',
+        url: wtUrl,
+        certHash: hashBytes,
+        latencyMs,
+        decodeInWorker,
+        // Workers cannot read localStorage — forward the debug flag.
+        verbose: typeof localStorage !== 'undefined' && localStorage.getItem('websrt-debug') === '1',
+      },
       hashBytes ? [hashBytes.buffer as ArrayBuffer] : [],
     );
     ui.onWorkerReady?.(worker);

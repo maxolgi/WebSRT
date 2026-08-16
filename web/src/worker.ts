@@ -47,7 +47,7 @@ export interface StatsMsg {
 export type DemuxStatsMsg = DemuxStats;
 
 export type WorkerCmd =
-  | { cmd: 'init'; url: string; certHash: Uint8Array | null; latencyMs: number; decodeInWorker?: boolean }
+  | { cmd: 'init'; url: string; certHash: Uint8Array | null; latencyMs: number; decodeInWorker?: boolean; verbose?: boolean }
   | { cmd: 'visibility'; visible: boolean }
   | { cmd: 'stop' }
   | { cmd: 'debug-rate'; ms: number }
@@ -69,7 +69,9 @@ export type WorkerMsg =
   | { type: 'close' }
   | { type: 'batch'; msgs: WorkerMsg[] };
 
-const VERBOSE = typeof localStorage !== 'undefined' && localStorage.getItem('websrt-debug') === '1';
+// Set from the `init` command (the main thread reads the 'websrt-debug'
+// localStorage key — workers have no localStorage access).
+let VERBOSE = false;
 
 let rx: SrtReceiver | null = null;
 let demux: Demuxer | null = null;
@@ -102,6 +104,66 @@ function nowRelUs(): number {
 
 let feedSchedUs: number | null = null;
 let feedRelUs: number | null = null;
+
+// --- Adaptive tick source ---------------------------------------------------
+// The protocol reports (kind-3 WaitForData actions) how long until the next
+// timed event. When that drops below what the receiver loop's own setTimeout
+// can honor (the HTML spec clamps nested timeout chains to ≥4 ms), a
+// dedicated timer worker provides finer ticks over postMessage. The nesting
+// clamp never accumulates there: each of its setTimeout calls is made from an
+// onmessage task (nesting level 0), because the chain is broken by the
+// message hop every round. No busy-polling, and the receiver loop's thread
+// stays available for datagrams.
+const TICK_MIN_MS = 1;
+const TICK_MAX_MS = 5;
+const TIMER_WORKER_THRESHOLD_MS = 4; // below this, the loop's own timers clamp
+let lastWaitMs: number | null = null;
+let lastWaitAtMs = 0;
+let timerWorker: Worker | null = null;
+let timerUrl: string | null = null;
+let tickSeq = 0;
+const pendingTicks = new Map<number, () => void>();
+
+const TIMER_WORKER_SRC = `
+onmessage = (e) => {
+  const { id, ms } = e.data;
+  setTimeout(() => postMessage(id), ms);
+};
+`;;
+
+function armTick(ms: number): { promise: Promise<{ kind: 'tick' }>; cancel(): void } {
+  if (ms < TIMER_WORKER_THRESHOLD_MS) {
+    if (!timerWorker) {
+      timerUrl = URL.createObjectURL(new Blob([TIMER_WORKER_SRC], { type: 'application/javascript' }));
+      timerWorker = new Worker(timerUrl);
+      timerWorker.onmessage = (e: MessageEvent) => {
+        const resolve = pendingTicks.get(e.data as number);
+        if (resolve) { pendingTicks.delete(e.data as number); resolve(); }
+      };
+    }
+    const id = ++tickSeq;
+    const promise = new Promise<{ kind: 'tick' }>((resolve) => {
+      pendingTicks.set(id, () => resolve({ kind: 'tick' }));
+      timerWorker!.postMessage({ id, ms });
+    });
+    return { promise, cancel: () => pendingTicks.delete(id) };
+  }
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const promise = new Promise<{ kind: 'tick' }>((resolve) => {
+    timeoutId = setTimeout(() => resolve({ kind: 'tick' }), ms);
+  });
+  return { promise, cancel: () => { if (timeoutId !== undefined) clearTimeout(timeoutId); } };
+}
+
+function disposeTimerWorker(): void {
+  if (timerWorker) { try { timerWorker.terminate(); } catch {} }
+  timerWorker = null;
+  pendingTicks.clear();
+  if (timerUrl) { try { URL.revokeObjectURL(timerUrl); } catch {} }
+  timerUrl = null;
+  lastWaitMs = null;
+  lastWaitAtMs = 0;
+}
 
 interface PcmWindow {
   count: number;
@@ -195,10 +257,12 @@ function maybeDumpPcmLog(): void {
     const gaps = samples.filter((s) => s.gapUs >= 0).map((s) => s.gapUs).sort((a, b) => a - b);
     const fmt = (arr: number[]) => arr.length === 0 ? 'n/a' :
       `p50=${(pct(arr, 50) / 1000).toFixed(2)}ms p95=${(pct(arr, 95) / 1000).toFixed(2)}ms p99=${(pct(arr, 99) / 1000).toFixed(2)}ms max=${(arr[arr.length - 1] / 1000).toFixed(2)}ms`;
-    console.log(
-      `[pcm-pacing] pid ${pid}: n=${samples.length}/${ring.length} (retx-excluded ${ring.length - samples.length})` +
-      ` |err-sched| ${fmt(errs)} · gap ${fmt(gaps)}`,
-    );
+    // Worker console output is invisible to some harnesses — also post to the
+    // event log so automated consumers can read it.
+    const line =
+      `[pcm-pacing] pid ${pid}: n=${samples.length}/${ring.length} (retx-excluded ${ring.length - samples.length}) |err-sched| ${fmt(errs)} · gap ${fmt(gaps)}`;
+    console.log(line);
+    queue({ type: 'log', msg: line, cls: 'err' });
   }
 }
 
@@ -221,6 +285,7 @@ self.onmessage = async (e: MessageEvent) => {
   const cmd = e.data as WorkerCmd;
   switch (cmd.cmd) {
     case 'init':
+      VERBOSE = cmd.verbose ?? false;
       await doInit(cmd.url, cmd.certHash, cmd.latencyMs, cmd.decodeInWorker);
       break;
     case 'visibility':
@@ -253,8 +318,8 @@ self.onmessage = async (e: MessageEvent) => {
           const s = rx.getStats();
           if (!s) return;
           emitLossEvents(s);
-          if (VERBOSE) console.debug('srt stats', serializeStats(s));
           const statsMsg = serializeStats(s);
+          if (VERBOSE) console.debug('srt stats', statsMsg);
           if (videoPipeline) statsMsg.videoStats = videoPipeline.getStats();
           if (audioPipeline) statsMsg.audioStats = audioPipeline.getStats();
           queue({ type: 'stats', stats: statsMsg, demux: getDemuxStats() });
@@ -452,8 +517,8 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
       const s = rx.getStats();
       if (!s) return;
       emitLossEvents(s);
-      if (VERBOSE) console.debug('srt stats', serializeStats(s));
       const statsMsg = serializeStats(s);
+      if (VERBOSE) console.debug('srt stats', statsMsg);
       if (videoPipeline) statsMsg.videoStats = videoPipeline.getStats();
       if (audioPipeline) statsMsg.audioStats = audioPipeline.getStats();
       queue({ type: 'stats', stats: statsMsg, demux: getDemuxStats() });
@@ -498,6 +563,7 @@ function doStop() {
   pcmLogLastRel.clear();
   pcmRetxSecs.clear();
   pcmLogDumpedAtSec = 0;
+  disposeTimerWorker();
   const w = wt;
   wt = null;
   reader = null;
@@ -558,18 +624,22 @@ async function runSrtLoop(myGen: number) {
   mainLoop: for (;;) {
     if (myGen !== gen || !rx || !inited) break;
 
-    const POLL_MS = 5;
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    // Adaptive tick: sleep until the protocol's next timed event, clamped to
+    // [TICK_MIN_MS, TICK_MAX_MS]. Without wait info yet (e.g. handshake),
+    // fall back to the historical 5 ms.
+    let tickMs = TICK_MAX_MS;
+    if (lastWaitMs !== null) {
+      const elapsedMs = nowRelUs() / 1000 - lastWaitAtMs;
+      tickMs = Math.min(TICK_MAX_MS, Math.max(TICK_MIN_MS, lastWaitMs - elapsedMs));
+    }
+    const tick = armTick(tickMs);
     const readWithLabel = readPromise.then(
       (res) => ({ kind: 'dgram' as const, res }),
       (err: unknown) => ({ kind: 'read_error' as const, err }),
     );
-    const tickPromise = new Promise<{ kind: 'tick' }>((resolve) => {
-      timeoutId = setTimeout(() => resolve({ kind: 'tick' }), POLL_MS);
-    });
 
-    const winner = await Promise.race([readWithLabel, tickPromise]);
-    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    const winner = await Promise.race([readWithLabel, tick.promise]);
+    tick.cancel();
 
     if (myGen !== gen || !rx || !inited) break;
 
@@ -663,8 +733,12 @@ function processActions(actions: SrtAction[]) {
           hsRelUs = nowRelUs();
           queue({ type: 'handshakeComplete' });
           break;
-        case 3:
-          break;
+    case 3:
+      // Protocol-provided time until the next timed event (TSBPD release,
+      // ACK/ACKAck, …) — drives the loop's adaptive tick.
+      lastWaitMs = a.wait_ms;
+      lastWaitAtMs = nowRelUs() / 1000;
+      break;
         case 4:
           queue({ type: 'close' });
           break;
