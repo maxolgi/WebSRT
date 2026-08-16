@@ -33,6 +33,12 @@ export interface PlayerOptions {
   workerUrl?: string;
   /** Full WebTransport endpoint URL. Overrides host/port/stream/token. */
   url?: string;
+  /** Direct pcm consumer port or factory — raw pcm messages flow straight
+   *  from the receiver worker to this port (control stays on the parent
+   *  channel). Pass a factory when autoReconnect is on; the worker is
+   *  recreated per connection and a transferred port dies with it.
+   *  Default: parent-post path (reference-viewer behavior). */
+  pcmPort?: MessagePort | (() => MessagePort);
 }
 
 export type PlayerState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
@@ -120,6 +126,7 @@ class Player extends EventTarget implements PlayerHandle {
       autoReconnect: opts.autoReconnect ?? true,
       workerUrl: opts.workerUrl,
       url: opts.url,
+      pcmPort: opts.pcmPort,
       ui: {
         log: (msg, cls) => this.onLog(msg, cls),
         setStatus: () => {},

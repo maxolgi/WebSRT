@@ -162,6 +162,49 @@ loadstart  connecting  open  canplay  playing  waiting
 resize  error  statechange  close  stats  drift
 ```
 
+### Direct PCM port (advanced)
+
+By default every worker message — including raw PCM — travels
+worker → embedder main thread → your consumer, adding a main-thread
+scheduler hop (and its jitter) between release and playout. Embedders
+that sink PCM into an `AudioWorklet` or a mixer of their own can bypass
+that hop:
+
+```ts
+const ch = new MessageChannel();
+myMixer.acceptPcmPort(ch.port2);          // your consumer end
+
+const handle = mountPlayer(canvas, {
+  host: 'gateway-a.example', certHash: null,
+  pcmPort: () => {
+    const ch = new MessageChannel();      // fresh channel per (re)connect
+    myMixer.acceptPcmPort(ch.port2);
+    return ch.port1;                      // handed to the worker
+  },
+});
+```
+
+With `pcmPort`, `{ type: 'pcm', … }` messages flow **directly** from the
+receiver worker over the port (batched as `{ type: 'batch', msgs: […] }`,
+sample buffers transferred, same copy semantics as the default path).
+Control, stats, logs, and everything else stay on the parent channel.
+Each pcm message carries release telemetry the embedder can use to pace
+or absorb drift:
+
+| Field | Meaning |
+|---|---|
+| `pid`, `channelCount`, `samples`, `pts` | payload (interleaved f32 PCM, SMPTE 302M) |
+| `schedUs` | TSBPD deadline the batch was held to (µs, worker clock) |
+| `relUs` | actual release time (µs, same clock) — `relUs − schedUs` is release error |
+
+The 1 Hz `stats` event also carries `stats.pcmRelease[]` per audio PID
+(`count`, `meanErrUs`, `maxErrUs`, `maxGapUs` over the stats window).
+
+**Lifecycle:** the player recreates its worker on every (re)connect and a
+transferred `MessagePort` dies with the worker that received it — so pass a
+**factory** (as above) whenever `autoReconnect` is on. A static port is
+single-shot and suits only `autoReconnect: false`.
+
 Minimal wiring:
 
 ```ts

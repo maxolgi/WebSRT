@@ -51,7 +51,8 @@ export type WorkerCmd =
   | { cmd: 'visibility'; visible: boolean }
   | { cmd: 'stop' }
   | { cmd: 'debug-rate'; ms: number }
-  | { cmd: 'meter-select'; pid: number; channel: number };
+  | { cmd: 'meter-select'; pid: number; channel: number }
+  | { cmd: 'pcm-port'; port: MessagePort | null };
 
 export type WorkerMsg =
   | { type: 'log'; msg: string; cls?: string }
@@ -277,6 +278,8 @@ let audioStreamType: number | null = null;
 const probePids: Set<number> = new Set();
 let inited = false;
 let outgoing: WorkerMsg[] = [];
+// Optional direct pcm consumer port (see the 'pcm-port' command).
+let pcmPort: MessagePort | null = null;
 let decodeInWorker = false;
 let videoPipeline: VideoPipeline | null = null;
 let audioPipeline: OpusAudioPipeline | AacAudioPipeline | null = null;
@@ -340,6 +343,15 @@ self.onmessage = async (e: MessageEvent) => {
       demux?.setMeterSelection(cmd.pid, cmd.channel);
       break;
     }
+    case 'pcm-port': {
+      // Direct-to-consumer pcm channel: raw pcm messages flow over this port
+      // (batched, transfer-listed) while every other message stays on the
+      // parent channel. Passing null closes the port and reverts to the
+      // default parent-post path. Survives reconnects — the worker is reused.
+      if (pcmPort) { try { pcmPort.close(); } catch {} }
+      pcmPort = cmd.port ?? null;
+      break;
+    }
   }
   flushOutgoing();
 };
@@ -350,6 +362,27 @@ function queue(msg: WorkerMsg) {
 
 function flushOutgoing() {
   if (outgoing.length === 0) return;
+  if (pcmPort) {
+    // Split: pcm messages flow directly to the consumer port (with their
+    // sample buffers transferred — same copy semantics as the parent path),
+    // everything else (control, stats, logs) stays on the parent channel.
+    const pcms: WorkerMsg[] = [];
+    const rest: WorkerMsg[] = [];
+    for (const m of outgoing) (m.type === 'pcm' ? pcms : rest).push(m);
+    outgoing = [];
+    if (pcms.length > 0) {
+      const transfer: ArrayBuffer[] = [];
+      for (const m of pcms) {
+        if (m.type === 'pcm' && m.samples?.buffer instanceof ArrayBuffer) {
+          transfer.push(m.samples.buffer);
+        }
+      }
+      pcmPort.postMessage({ type: 'batch', msgs: pcms }, transfer);
+    }
+    if (rest.length === 0) return;
+    outgoing = rest;
+    // fall through to the parent post with the remaining messages
+  }
   const transfer: ArrayBuffer[] = [];
   for (const m of outgoing) {
     if (

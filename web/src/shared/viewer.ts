@@ -92,6 +92,17 @@ export interface ViewerConfig {
    *  overrides host/port/stream/token construction. Stream name and token
    *  are appended as query params if not already present in the URL. */
   url?: string;
+  /** Direct pcm consumer port (or a factory for one). When provided, raw pcm
+   *  messages (with schedUs/relUs release telemetry) flow directly from the
+   *  receiver worker to this port instead of the parent postMessage channel;
+   *  control/stats messages keep using the parent channel. The viewer
+   *  terminates and recreates the worker on every (re)connect, and a
+   *  transferred port dies with its worker — so pass a FACTORY returning a
+   *  fresh port when autoReconnect is on. The factory is called each time the
+   *  worker is created, before the session starts. A static port works only
+   *  for single-shot connections (autoReconnect: false). Default: parent-post
+   *  path (unchanged reference-viewer behavior). */
+  pcmPort?: MessagePort | (() => MessagePort);
 }
 
 export interface ViewerHandle {
@@ -139,7 +150,23 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
     autoReconnect = true,
     workerUrl,
     url: configUrl,
+    pcmPort: configPcmPort,
   } = config;
+
+  // Direct pcm channel: normalized to a per-worker factory. A transferred
+  // MessagePort dies with the worker, so static ports are single-shot and
+  // reconnecting embedders pass a factory returning a fresh port.
+  let pcmPortSpent = false;
+  const nextPcmPort = (): MessagePort | null => {
+    if (!configPcmPort) return null;
+    if (typeof configPcmPort === 'function') return configPcmPort();
+    if (pcmPortSpent) {
+      log('pcmPort: static port already consumed by a previous worker — pass a factory when autoReconnect is on', 'err');
+      return null;
+    }
+    pcmPortSpent = true;
+    return configPcmPort;
+  };
 
   // --- closure state (was module-level `let` in the entrypoints) ---
   let worker: Worker | null = null;
@@ -369,6 +396,11 @@ export function createViewer(config: ViewerConfig): ViewerHandle {
         log(`worker error: ${e.message}`, 'err');
         if (!manualDisconnect && autoReconnect) scheduleReconnect();
       };
+      // Arm the direct pcm channel on every (re)created worker. A transferred
+      // port dies with the worker that received it, so reconnecting sessions
+      // must supply a factory; a static port is consumed once.
+      const directPort = nextPcmPort();
+      if (directPort) worker.postMessage({ cmd: 'pcm-port', port: directPort }, [directPort]);
     }
 
     worker.postMessage(

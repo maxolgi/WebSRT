@@ -215,6 +215,7 @@ Gateway runs under supervisord (must use `--no-gui` in the supervisord config):
 ## Testing
 
 - `web/smoke.mjs` — Node smoke test for both WASM modules (no browser needed)
+- `web/pcm-port-bench.mjs` — relay (worker→main→consumer) vs direct MessagePort PCM jitter comparison (Node worker_threads)
 - `cargo run -p websrt-gateway --bin wt_hs_probe` — SRT handshake + TS continuity-counter probe (tests NAK/retransmit under sim-loss)
 - `cargo run -p websrt-gateway --bin mock_obs` — Sends fixture over SRT to test ingester without real OBS
 - `cargo run -p websrt-gateway --bin wt_echo_client` — WT datagram round-trip test
