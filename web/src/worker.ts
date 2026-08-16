@@ -5,6 +5,17 @@ import type { DemuxStats, VideoStats, AudioStats, AudioMeterData } from './share
 import { summarizePmt, ST_PRIVATE, type PmtEntry } from './shared/pmt';
 import { VideoPipeline, OpusAudioPipeline, AacAudioPipeline } from './decode';
 
+export interface PcmReleaseStats {
+  pid: number;
+  count: number;
+  /** Mean |relUs − schedUs| over the stats window (µs). */
+  meanErrUs: number;
+  /** Max |relUs − schedUs| over the stats window (µs). */
+  maxErrUs: number;
+  /** Max inter-pcm release gap over the stats window (µs). */
+  maxGapUs: number;
+}
+
 export interface StatsMsg {
   elapsedMs: number;
   rttMs: number;
@@ -29,6 +40,8 @@ export interface StatsMsg {
   loopIterAvgMs: number;
   videoStats?: VideoStats;
   audioStats?: AudioStats;
+  /** PCM release pacing summary per audio PID over the stats window. */
+  pcmRelease?: PcmReleaseStats[];
 }
 
 export type DemuxStatsMsg = DemuxStats;
@@ -46,7 +59,7 @@ export type WorkerMsg =
   | { type: 'pmt'; videoPid: number; audioPid: number; audioStreamType: number; videoCodec: 'av1' | 'h264' | 'hevc' | null }
   | { type: 'videoPes'; data: Uint8Array; pts: number | null; dts: number | null; isKeyframe: boolean; nalOffsets: Uint32Array; nalTypes: Uint8Array }
   | { type: 'audioPes'; data: Uint8Array; pts: number | null }
-  | { type: 'pcm'; pid: number; channelCount: number; samples: Float32Array; pts: number | null }
+  | { type: 'pcm'; pid: number; channelCount: number; samples: Float32Array; pts: number | null; schedUs: number | null; relUs: number | null }
   | { type: 'meter'; meter: AudioMeterData }
   | { type: 'videoFrame'; frame: VideoFrame }
   | { type: 'audioData'; data: AudioData }
@@ -74,6 +87,121 @@ let loopIterTotalMs = 0;
 let loopIterCount = 0;
 let prevRxLoss = 0;
 let prevRxDropped = 0;
+let prevRxRetransmit = 0;
+let hsRelUs: number | null = null;
+
+// --- PCM release pacing telemetry -----------------------------------------
+// schedUs comes from the WASM deliver action (TSBPD deadline, epoch-relative
+// µs); relUs is the actual release time (performance.now()-based, same
+// timebase). demux.feed() fires onPcm synchronously, so a module-level
+// "current feed context" set immediately before each feed attaches per-batch
+// timing to every pcm message it produces.
+function nowRelUs(): number {
+  return (performance.now() - epoch) * 1000;
+}
+
+let feedSchedUs: number | null = null;
+let feedRelUs: number | null = null;
+
+interface PcmWindow {
+  count: number;
+  sumErrUs: number;
+  maxErrUs: number;
+  lastRelUs: number;
+  maxGapUs: number;
+}
+const pcmReleaseWindows = new Map<number, PcmWindow>();
+
+function recordPcmRelease(pid: number, relUs: number, schedUs: number | null): void {
+  const errUs = schedUs !== null && schedUs > 0 ? Math.abs(relUs - schedUs) : -1;
+  const validErr = errUs >= 0 && errUs < 10_000_000; // guard stale-clock artifacts
+
+  let w = pcmReleaseWindows.get(pid);
+  if (!w) {
+    w = { count: 0, sumErrUs: 0, maxErrUs: 0, lastRelUs: relUs, maxGapUs: 0 };
+    pcmReleaseWindows.set(pid, w);
+  }
+  if (validErr) {
+    w.count++;
+    w.sumErrUs += errUs;
+    if (errUs > w.maxErrUs) w.maxErrUs = errUs;
+  }
+  const gapUs = relUs - w.lastRelUs;
+  if (gapUs > 0 && gapUs < 1_000_000 && gapUs > w.maxGapUs) w.maxGapUs = gapUs;
+  w.lastRelUs = relUs;
+
+  if (VERBOSE) pcmLogSample(pid, relUs, validErr ? errUs : -1);
+}
+
+function drainPcmRelease(): PcmReleaseStats[] | undefined {
+  if (pcmReleaseWindows.size === 0) return undefined;
+  const out: PcmReleaseStats[] = [];
+  for (const [pid, w] of pcmReleaseWindows) {
+    if (w.count > 0) {
+      out.push({
+        pid,
+        count: w.count,
+        meanErrUs: w.sumErrUs / w.count,
+        maxErrUs: w.maxErrUs,
+        maxGapUs: w.maxGapUs,
+      });
+    }
+  }
+  pcmReleaseWindows.clear();
+  return out.length > 0 ? out : undefined;
+}
+
+// --- VERBOSE-only pacing fidelity logger (dev acceptance tooling) ----------
+// Keeps a ~60 s ring of (errUs, gapUs) per PID, marks seconds that had
+// retransmit arrivals (excluded from the gate per the acceptance criteria),
+// and dumps percentiles every 10 s to the console.
+interface PcmLogSample { sec: number; errUs: number; gapUs: number }
+const PCM_LOG_SPAN_SEC = 60;
+const PCM_LOG_DUMP_SEC = 10;
+const pcmLogs = new Map<number, PcmLogSample[]>();
+const pcmLogLastRel = new Map<number, number>();
+const pcmRetxSecs = new Set<number>();
+let pcmLogDumpedAtSec = 0;
+
+function pcmLogSample(pid: number, relUs: number, errUs: number): void {
+  if (hsRelUs !== null && relUs - hsRelUs < 1_000_000) return; // TSBPD fill second
+  const sec = Math.floor(relUs / 1_000_000);
+  const lastRel = pcmLogLastRel.get(pid);
+  const gapUs = lastRel !== undefined ? relUs - lastRel : -1;
+  pcmLogLastRel.set(pid, relUs);
+  let ring = pcmLogs.get(pid);
+  if (!ring) { ring = []; pcmLogs.set(pid, ring); }
+  ring.push({
+    sec,
+    errUs,
+    gapUs: gapUs > 0 && gapUs < 1_000_000 ? gapUs : -1,
+  });
+  while (ring.length > 0 && ring[0].sec < sec - PCM_LOG_SPAN_SEC) ring.shift();
+}
+
+function pct(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
+  return sorted[idx];
+}
+
+function maybeDumpPcmLog(): void {
+  const nowSec = Math.floor(nowRelUs() / 1_000_000);
+  if (nowSec - pcmLogDumpedAtSec < PCM_LOG_DUMP_SEC) return;
+  pcmLogDumpedAtSec = nowSec;
+  for (const [pid, ring] of pcmLogs) {
+    const samples = ring.filter((s) => !pcmRetxSecs.has(s.sec));
+    const errs = samples.filter((s) => s.errUs >= 0).map((s) => s.errUs).sort((a, b) => a - b);
+    const gaps = samples.filter((s) => s.gapUs >= 0).map((s) => s.gapUs).sort((a, b) => a - b);
+    const fmt = (arr: number[]) => arr.length === 0 ? 'n/a' :
+      `p50=${(pct(arr, 50) / 1000).toFixed(2)}ms p95=${(pct(arr, 95) / 1000).toFixed(2)}ms p99=${(pct(arr, 99) / 1000).toFixed(2)}ms max=${(arr[arr.length - 1] / 1000).toFixed(2)}ms`;
+    console.log(
+      `[pcm-pacing] pid ${pid}: n=${samples.length}/${ring.length} (retx-excluded ${ring.length - samples.length})` +
+      ` |err-sched| ${fmt(errs)} · gap ${fmt(gaps)}`,
+    );
+  }
+}
+
 let statsTimer: ReturnType<typeof setInterval> | null = null;
 let meterTimer: ReturnType<typeof setInterval> | null = null;
 let videoPid: number | null = null;
@@ -270,7 +398,10 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
         }
       },
       onPcm: (pid, pts, channelCount, samples) => {
-        queue({ type: 'pcm', pid, channelCount, samples, pts });
+        const schedUs = feedSchedUs;
+        const relUs = feedRelUs ?? nowRelUs();
+        queue({ type: 'pcm', pid, channelCount, samples, pts, schedUs, relUs });
+        recordPcmRelease(pid, relUs, schedUs);
       },
       onError: (msg_) => queue({ type: 'log', msg: `demux err: ${msg_}`, cls: 'err' }),
     });
@@ -358,6 +489,15 @@ function doStop() {
   loopIterCount = 0;
   prevRxLoss = 0;
   prevRxDropped = 0;
+  prevRxRetransmit = 0;
+  hsRelUs = null;
+  feedSchedUs = null;
+  feedRelUs = null;
+  pcmReleaseWindows.clear();
+  pcmLogs.clear();
+  pcmLogLastRel.clear();
+  pcmRetxSecs.clear();
+  pcmLogDumpedAtSec = 0;
   const w = wt;
   wt = null;
   reader = null;
@@ -506,10 +646,19 @@ function processActions(actions: SrtAction[]) {
         case 0:
           writeDatagram(a.takeData());
           break;
-        case 1:
+        case 1: {
+          // Stamp the release context the demuxer's synchronous onPcm callbacks
+          // read: schedUs = TSBPD deadline for this deliver action, relUs = the
+          // actual time we are feeding it downstream.
+          feedSchedUs = typeof a.schedUs === 'number' && a.schedUs > 0 ? a.schedUs : null;
+          feedRelUs = nowRelUs();
           demux?.feed(a.takeData());
+          feedSchedUs = null;
+          feedRelUs = null;
           break;
+        }
         case 2:
+          hsRelUs = nowRelUs();
           queue({ type: 'handshakeComplete' });
           break;
         case 3:
@@ -533,6 +682,11 @@ function processActions(actions: SrtAction[]) {
 function emitLossEvents(s: SrtStats) {
   const newLoss = s.rxLoss - prevRxLoss;
   const newDropped = s.rxDropped - prevRxDropped;
+  if (s.rxRetransmit > prevRxRetransmit) {
+    // Tag the second that just elapsed as retransmit-active for the pacing
+    // logger's exclusion rule.
+    pcmRetxSecs.add(Math.floor(nowRelUs() / 1_000_000));
+  }
   if (newLoss > 0) {
     queue({ type: 'log', msg: `SRT loss: ${newLoss} packets (total ${s.rxLoss})`, cls: 'err' });
   }
@@ -541,6 +695,7 @@ function emitLossEvents(s: SrtStats) {
   }
   prevRxLoss = s.rxLoss;
   prevRxDropped = s.rxDropped;
+  prevRxRetransmit = s.rxRetransmit;
 }
 
 function serializeStats(s: SrtStats): StatsMsg {
@@ -566,7 +721,9 @@ function serializeStats(s: SrtStats): StatsMsg {
     wasmHandleAvgUs: wasmHandleCount > 0 ? wasmHandleTotalUs / wasmHandleCount : 0,
     wasmPollAvgUs: wasmPollCount > 0 ? wasmPollTotalUs / wasmPollCount : 0,
     loopIterAvgMs: loopIterCount > 0 ? loopIterTotalMs / loopIterCount : 0,
+    pcmRelease: drainPcmRelease(),
   };
+  if (VERBOSE) maybeDumpPcmLog();
   pollMaxMs = 0;
   wasmHandleTotalUs = 0;
   wasmHandleCount = 0;
