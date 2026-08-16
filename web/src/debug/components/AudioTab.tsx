@@ -29,7 +29,7 @@ const lufsClass = (l: number): string => {
   return 'stat-bad';
 };
 
-type SubTab = 'overview' | 'peak' | 'lufs' | 'phase' | 'scope' | 'spectrum';
+type SubTab = 'overview' | 'peak' | 'lufs' | 'phase' | 'scope' | 'spectrum' | 'pacing';
 
 export function AudioTab({ store }: Props): JSX.Element {
   const [, forceRender] = useState(0);
@@ -179,6 +179,7 @@ export function AudioTab({ store }: Props): JSX.Element {
     { id: 'phase', label: 'Phase' },
     { id: 'scope', label: 'Scope' },
     { id: 'spectrum', label: 'Spectrum' },
+    { id: 'pacing', label: 'Pacing' },
   ];
 
   const channelSelector = (
@@ -413,6 +414,54 @@ export function AudioTab({ store }: Props): JSX.Element {
           />
           <div style={{ fontSize: '10px', color: '#888', marginTop: '2px' }}>
             {SPEC_BINS} log-spaced bins · range {SPEC_FLOOR}..0 dB · blue=low / red=high freq · white = peak hold
+          </div>
+        </div>
+      )}
+      {subTab === 'pacing' && (
+        <div class="debug-section">
+          <h3>PCM Release Pacing (per stats window)</h3>
+          {(() => {
+            const pcm = store.srtStats.value?.pcmRelease;
+            if (!pcm || pcm.length === 0) {
+              return <div style={{ color: '#999' }}>No PCM release samples in this window yet.</div>;
+            }
+            const errCls = (us: number) => (us <= 1000 ? 'stat-good' : us <= 2000 ? 'stat-warn' : 'stat-bad');
+            const gapCls = (us: number) => (us <= 13800 ? 'stat-good' : us <= 20000 ? 'stat-warn' : 'stat-bad');
+            return (
+              <table class="debug-table">
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: 'left', padding: '2px 6px' }}>PID</th>
+                    <th style={{ textAlign: 'right', padding: '2px 6px' }}>Count</th>
+                    <th style={{ textAlign: 'right', padding: '2px 6px' }}>Mean |rel−sched|</th>
+                    <th style={{ textAlign: 'right', padding: '2px 6px' }}>Max |rel−sched|</th>
+                    <th style={{ textAlign: 'right', padding: '2px 6px' }}>Max gap</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pcm.map((p) => (
+                    <tr key={p.pid}>
+                      <td style={{ textAlign: 'left', padding: '2px 6px' }}>{p.pid}</td>
+                      <td style={{ textAlign: 'right', padding: '2px 6px' }}>{p.count}</td>
+                      <td class={errCls(p.meanErrUs)} style={{ textAlign: 'right', padding: '2px 6px' }}>
+                        {(p.meanErrUs / 1000).toFixed(2)} ms
+                      </td>
+                      <td class={errCls(p.maxErrUs)} style={{ textAlign: 'right', padding: '2px 6px' }}>
+                        {(p.maxErrUs / 1000).toFixed(2)} ms
+                      </td>
+                      <td class={gapCls(p.maxGapUs)} style={{ textAlign: 'right', padding: '2px 6px' }}>
+                        {(p.maxGapUs / 1000).toFixed(2)} ms
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            );
+          })()}
+          <div style={{ fontSize: '10px', color: '#888', marginTop: '4px' }}>
+            Release error vs TSBPD deadline (schedUs) and inter-pcm release gaps, aggregated per PID over the
+            stats window by the worker. Gates (local): mean &lt; 1 ms · gap max ≤ 20 ms · p99 ≤ 2× nominal
+            interval (percentiles via the worker's VERBOSE logger). Message fields remain the source of truth.
           </div>
         </div>
       )}
