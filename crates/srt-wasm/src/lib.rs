@@ -42,6 +42,10 @@ pub struct SrtAction {
     data: Vec<u8>,
     text: String,
     wait_ms: f64,
+    /// Deliver actions only: TSBPD release deadline as µs since the receiver
+    /// epoch (same timebase JS passes as `now_us` to handle_datagram/poll).
+    /// 0.0 for every other action kind.
+    sched_us: f64,
 }
 
 #[wasm_bindgen]
@@ -73,20 +77,30 @@ impl SrtAction {
         self.wait_ms
     }
 
+    /// Deliver actions only: TSBPD release deadline in µs since the receiver
+    /// epoch — directly comparable to JS `performance.now()`-based `relUs`.
+    /// 0.0 for every other action kind.
+    #[wasm_bindgen(getter)]
+    pub fn schedUs(&self) -> f64 {
+        self.sched_us
+    }
+
     fn send(bytes: Vec<u8>) -> Self {
         Self {
             kind: 0,
             data: bytes,
             text: String::new(),
             wait_ms: 0.0,
+            sched_us: 0.0,
         }
     }
-    fn deliver(bytes: Vec<u8>) -> Self {
+    fn deliver(bytes: Vec<u8>, sched_us: f64) -> Self {
         Self {
             kind: 1,
             data: bytes,
             text: String::new(),
             wait_ms: 0.0,
+            sched_us,
         }
     }
     fn hs_done() -> Self {
@@ -95,6 +109,7 @@ impl SrtAction {
             data: Vec::new(),
             text: String::new(),
             wait_ms: 0.0,
+            sched_us: 0.0,
         }
     }
     fn wait(d: Duration) -> Self {
@@ -103,6 +118,7 @@ impl SrtAction {
             data: Vec::new(),
             text: String::new(),
             wait_ms: d.as_secs_f64() * 1000.0,
+            sched_us: 0.0,
         }
     }
     fn close() -> Self {
@@ -111,6 +127,7 @@ impl SrtAction {
             data: Vec::new(),
             text: String::new(),
             wait_ms: 0.0,
+            sched_us: 0.0,
         }
     }
     fn log(s: impl Into<String>) -> Self {
@@ -119,6 +136,7 @@ impl SrtAction {
             data: Vec::new(),
             text: s.into(),
             wait_ms: 0.0,
+            sched_us: 0.0,
         }
     }
 }
@@ -330,7 +348,7 @@ impl SrtReceiver {
                         let mut duplex = DuplexConnection::new(conn);
                         out.push(SrtAction::hs_done());
                         // drain any post-handshake actions (e.g., initial ACK)
-                        drain(&mut duplex, now, &mut out, &self.stats);
+                        drain(&mut duplex, now, self.epoch, &mut out, &self.stats);
                         *state = State::Connected(duplex);
                     }
                     ConnectionResult::NoAction => {}
@@ -357,7 +375,7 @@ impl SrtReceiver {
             }
             State::Connected(duplex) => {
                 duplex.handle_packet_input(now, Ok((packet, self.remote)));
-                drain(duplex, now, &mut out, &self.stats);
+                drain(duplex, now, self.epoch, &mut out, &self.stats);
                 if !duplex.is_open() {
                     *state = State::Closed;
                 }
@@ -377,7 +395,7 @@ impl SrtReceiver {
             State::Connected(duplex) => {
                 duplex.handle_data_input(now, Some((now, bytes::Bytes::copy_from_slice(bytes))));
                 let mut out: Vec<SrtAction> = Vec::new();
-                drain(duplex, now, &mut out, &self.stats);
+                drain(duplex, now, self.epoch, &mut out, &self.stats);
                 if !duplex.is_open() {
                     *state = State::Closed;
                 }
@@ -395,7 +413,7 @@ impl SrtReceiver {
         let mut state = self.state.borrow_mut();
         match &mut *state {
             State::Connected(duplex) => {
-                drain(duplex, now, &mut out, &self.stats);
+                drain(duplex, now, self.epoch, &mut out, &self.stats);
                 if !duplex.is_open() {
                     *state = State::Closed;
                 }
@@ -466,6 +484,7 @@ impl SrtReceiver {
 fn drain(
     conn: &mut DuplexConnection,
     now: web_time::Instant,
+    epoch: web_time::Instant,
     out: &mut Vec<SrtAction>,
     stats: &RefCell<SocketStatistics>,
 ) {
@@ -481,7 +500,18 @@ fn drain(
             Action::SendPacket((pkt, _addr)) => {
                 out.push(SrtAction::send(serialize_packet(&pkt)));
             }
-            Action::ReleaseData((_ts, bytes)) => out.push(SrtAction::deliver(bytes.to_vec())),
+            Action::ReleaseData((ts, bytes)) => {
+                // TSBPD deadline the receiver gate held this message to:
+                // mapped peer send time + negotiated recv latency, expressed
+                // as µs since the receiver epoch (the JS `now_us` timebase).
+                let deadline = ts + conn.settings().recv_tsbpd_latency;
+                let sched_us = if deadline > epoch {
+                    (deadline - epoch).as_micros() as f64
+                } else {
+                    0.0
+                };
+                out.push(SrtAction::deliver(bytes.to_vec(), sched_us));
+            }
             Action::UpdateStatistics(s) => {
                 *stats.borrow_mut() = s.clone();
                 continue;
