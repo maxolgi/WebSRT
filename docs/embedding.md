@@ -171,14 +171,11 @@ that sink PCM into an `AudioWorklet` or a mixer of their own can bypass
 that hop:
 
 ```ts
-const ch = new MessageChannel();
-myMixer.acceptPcmPort(ch.port2);          // your consumer end
-
 const handle = mountPlayer(canvas, {
   host: 'gateway-a.example', certHash: null,
   pcmPort: () => {
     const ch = new MessageChannel();      // fresh channel per (re)connect
-    myMixer.acceptPcmPort(ch.port2);
+    myMixer.acceptPcmPort(ch.port2);      // your consumer end
     return ch.port1;                      // handed to the worker
   },
 });

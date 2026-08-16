@@ -263,7 +263,7 @@ function maybeDumpPcmLog(): void {
     const line =
       `[pcm-pacing] pid ${pid}: n=${samples.length}/${ring.length} (retx-excluded ${ring.length - samples.length}) |err-sched| ${fmt(errs)} · gap ${fmt(gaps)}`;
     console.log(line);
-    queue({ type: 'log', msg: line, cls: 'err' });
+    queue({ type: 'log', msg: line, cls: 'info' });
   }
 }
 
