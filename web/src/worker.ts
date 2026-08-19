@@ -108,62 +108,22 @@ let feedRelUs: number | null = null;
 
 // --- Adaptive tick source ---------------------------------------------------
 // The protocol reports (kind-3 WaitForData actions) how long until the next
-// timed event. When that drops below what the receiver loop's own setTimeout
-// can honor (the HTML spec clamps nested timeout chains to ≥4 ms), a
-// dedicated timer worker provides finer ticks over postMessage. The nesting
-// clamp never accumulates there: each of its setTimeout calls is made from an
-// onmessage task (nesting level 0), because the chain is broken by the
-// message hop every round. No busy-polling, and the receiver loop's thread
-// stays available for datagrams.
-const TICK_MIN_MS = 1;
+// timed event; the tick target is clamped to [TICK_MIN_MS, TICK_MAX_MS].
+// The floor is the HTML nesting clamp for setTimeout chains (≥4 ms) — a
+// timer-worker hop once tried to beat it for sub-4 ms ticks, but its
+// postMessage hops delivered ticks 5–10 ms late on loaded clients, which is
+// worse than the floor itself.
+const TICK_MIN_MS = 4;
 const TICK_MAX_MS = 5;
-const TIMER_WORKER_THRESHOLD_MS = 4; // below this, the loop's own timers clamp
 let lastWaitMs: number | null = null;
 let lastWaitAtMs = 0;
-let timerWorker: Worker | null = null;
-let timerUrl: string | null = null;
-let tickSeq = 0;
-const pendingTicks = new Map<number, () => void>();
-
-const TIMER_WORKER_SRC = `
-onmessage = (e) => {
-  const { id, ms } = e.data;
-  setTimeout(() => postMessage(id), ms);
-};
-`;;
 
 function armTick(ms: number): { promise: Promise<{ kind: 'tick' }>; cancel(): void } {
-  if (ms < TIMER_WORKER_THRESHOLD_MS) {
-    if (!timerWorker) {
-      timerUrl = URL.createObjectURL(new Blob([TIMER_WORKER_SRC], { type: 'application/javascript' }));
-      timerWorker = new Worker(timerUrl);
-      timerWorker.onmessage = (e: MessageEvent) => {
-        const resolve = pendingTicks.get(e.data as number);
-        if (resolve) { pendingTicks.delete(e.data as number); resolve(); }
-      };
-    }
-    const id = ++tickSeq;
-    const promise = new Promise<{ kind: 'tick' }>((resolve) => {
-      pendingTicks.set(id, () => resolve({ kind: 'tick' }));
-      timerWorker!.postMessage({ id, ms });
-    });
-    return { promise, cancel: () => pendingTicks.delete(id) };
-  }
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   const promise = new Promise<{ kind: 'tick' }>((resolve) => {
     timeoutId = setTimeout(() => resolve({ kind: 'tick' }), ms);
   });
   return { promise, cancel: () => { if (timeoutId !== undefined) clearTimeout(timeoutId); } };
-}
-
-function disposeTimerWorker(): void {
-  if (timerWorker) { try { timerWorker.terminate(); } catch {} }
-  timerWorker = null;
-  pendingTicks.clear();
-  if (timerUrl) { try { URL.revokeObjectURL(timerUrl); } catch {} }
-  timerUrl = null;
-  lastWaitMs = null;
-  lastWaitAtMs = 0;
 }
 
 interface PcmWindow {
@@ -596,7 +556,8 @@ function doStop() {
   pcmLogLastRel.clear();
   pcmRetxSecs.clear();
   pcmLogDumpedAtSec = 0;
-  disposeTimerWorker();
+  lastWaitMs = null;
+  lastWaitAtMs = 0;
   const w = wt;
   wt = null;
   reader = null;
@@ -768,9 +729,12 @@ function processActions(actions: SrtAction[]) {
           break;
     case 3:
       // Protocol-provided time until the next timed event (TSBPD release,
-      // ACK/ACKAck, …) — drives the loop's adaptive tick.
-      lastWaitMs = a.wait_ms;
-      lastWaitAtMs = nowRelUs() / 1000;
+      // ACK/ACKAck, …) — drives the loop's adaptive tick. Min-wins: a later
+      // large wait in the same drain must not mask an earlier small one.
+      if (lastWaitMs === null || a.wait_ms < lastWaitMs) {
+        lastWaitMs = a.wait_ms;
+        lastWaitAtMs = nowRelUs() / 1000;
+      }
       break;
         case 4:
           queue({ type: 'close' });
