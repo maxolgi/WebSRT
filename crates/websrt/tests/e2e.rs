@@ -293,3 +293,38 @@ async fn gateway_delivers_published_data_over_wt() {
     drop(conn);
     shutdown_gateway(shutdown_tx, gateway_handle).await;
 }
+
+/// First-wins publish occupancy: a browser publisher cannot replace a live
+/// stream. `start_gateway` holds the `test` stream alive via the trusted
+/// source handle; a challenger session with `?publish=test` must be rejected
+/// before the WT handshake completes (403), and the incumbent stream must be
+/// unaffected (a viewer still connects).
+#[tokio::test]
+async fn gateway_rejects_publish_to_live_stream() {
+    init_tracing();
+    let port = ephemeral_port();
+    let (shutdown_tx, gateway_handle, publish_tx, hash) = start_gateway(port).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Challenger: publish the already-live stream name. The connect must
+    // fail — the gateway rejects the session with 403 before the handshake.
+    let config = ClientConfig::builder()
+        .with_bind_default()
+        .with_server_certificate_hashes([Sha256Digest::new(hash)])
+        .build();
+    let challenger = Endpoint::client(config).expect("challenger endpoint");
+    let url = format!("https://localhost:{port}/wt?publish=test");
+    let result = challenger.connect(&url).await;
+    assert!(
+        result.is_err(),
+        "publishing session for a live stream name must be rejected"
+    );
+    drop(challenger);
+
+    // The incumbent stream is unaffected: a viewer still connects.
+    let conn = connect_client(port, hash, "/wt?stream=test").await;
+    drop(conn);
+
+    drop(publish_tx);
+    shutdown_gateway(shutdown_tx, gateway_handle).await;
+}

@@ -51,6 +51,9 @@ impl StreamRegistry {
     /// A previously registered stream under the same name is replaced. Any
     /// viewers still attached to the old broadcaster keep receiving until that
     /// broadcaster's source ends; new subscribers get the new stream.
+    ///
+    /// Trusted-embedder API (replace semantics). Untrusted paths (the
+    /// browser-publisher accept loop) must use [`Self::try_publish`].
     pub fn publish(&self, name: &str) -> mpsc::Sender<TsMessage> {
         let (tx, rx) = mpsc::channel(self.broadcast_capacity);
         let ingester = ChannelIngester::new(rx);
@@ -100,6 +103,28 @@ impl StreamRegistry {
         );
         streams.insert(name.to_string(), broadcaster);
         true
+    }
+
+    /// Channel-backed variant of [`Self::try_publish_ingester`]: publish a
+    /// stream only if no live broadcaster (of any source type) already holds
+    /// `name`. Returns the [`mpsc::Sender`] on success, `None` if the name is
+    /// taken (e.g. by a live OBS/SRT ingester or another browser publisher).
+    pub fn try_publish(&self, name: &str) -> Option<mpsc::Sender<TsMessage>> {
+        let mut streams = self.streams.lock();
+        if streams.get(name).map(|b| b.is_alive()).unwrap_or(false) {
+            return None;
+        }
+        let (tx, rx) = mpsc::channel(self.broadcast_capacity);
+        let ingester = ChannelIngester::new(rx);
+        let shutdown = Arc::new(Notify::new());
+        let broadcaster = Broadcaster::spawn(
+            ingester,
+            self.max_viewers,
+            self.broadcast_capacity,
+            shutdown,
+        );
+        streams.insert(name.to_string(), broadcaster);
+        Some(tx)
     }
 
     /// Subscribe to a stream by name. Returns `None` if the stream doesn't
@@ -385,5 +410,47 @@ pub(crate) mod tests {
         assert!(registry.try_publish_ingester("a", ingester2));
         assert!(registry.is_alive("a"));
         assert_eq!(registry.stream_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn try_publish_succeeds_first_time() {
+        let registry = StreamRegistry::new(4, 8);
+        assert!(registry.try_publish("a").is_some());
+        assert!(registry.is_alive("a"));
+        assert_eq!(registry.stream_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn try_publish_rejects_while_alive() {
+        let registry = StreamRegistry::new(4, 8);
+        let _tx = registry.try_publish("a").unwrap();
+        assert!(
+            registry.try_publish("a").is_none(),
+            "second claim must be rejected"
+        );
+        assert!(registry.is_alive("a"));
+        assert_eq!(registry.stream_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn try_publish_replaces_dead_entry() {
+        let registry = StreamRegistry::new(4, 8);
+        let tx = registry.try_publish("a").unwrap();
+        drop(tx);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!registry.is_alive("a"));
+        assert!(registry.try_publish("a").is_some());
+        assert!(registry.is_alive("a"));
+        assert_eq!(registry.stream_count(), 1);
+    }
+
+    // Unified occupancy invariant: the is_alive check is source-agnostic —
+    // a browser publisher cannot preempt a live ingester-backed stream.
+    #[tokio::test]
+    async fn try_publish_rejects_when_ingester_holds_name() {
+        let registry = StreamRegistry::new(4, 8);
+        registry.publish_ingester("obs", FiniteIngester::new(10));
+        assert!(registry.try_publish("obs").is_none());
+        assert!(registry.is_alive("obs"));
     }
 }

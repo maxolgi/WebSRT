@@ -329,15 +329,29 @@ impl Gateway {
                         .unwrap_or_else(|| "default".to_string());
                     let publish_name = crate::hooks::parse_query_param(query, "publish");
 
-                    // Pre-accept check: for viewer-only sessions, reject
-                    // up-front if the requested stream isn't available (no
-                    // source yet, or source ended). This avoids a wasted WT
-                    // handshake. Publishing sessions skip this — they create
-                    // the stream after accept.
-                    if publish_name.is_none() && !self.streams.is_alive(&stream_name) {
-                        tracing::warn!(stream = %stream_name, "session rejected: stream not available");
-                        session_request.not_found().await;
-                        continue;
+                    // Pre-accept checks, to avoid a wasted WT handshake:
+                    // - Viewer-only sessions: reject (404) if the requested
+                    //   stream isn't available (no source yet, or ended).
+                    // - Publishing sessions: reject (403) if the publish name
+                    //   is already held by a live broadcaster — first-wins;
+                    //   an incumbent stream (from any source type) cannot be
+                    //   replaced from the browser. Combined ?publish=X&stream=Y
+                    //   sessions are rejected entirely when X is taken.
+                    match &publish_name {
+                        None => {
+                            if !self.streams.is_alive(&stream_name) {
+                                tracing::warn!(stream = %stream_name, "session rejected: stream not available");
+                                session_request.not_found().await;
+                                continue;
+                            }
+                        }
+                        Some(pub_name) => {
+                            if self.streams.is_alive(pub_name) {
+                                tracing::warn!(stream = %pub_name, "session rejected: stream name in use");
+                                session_request.forbidden().await;
+                                continue;
+                            }
+                        }
                     }
 
                     let connection = match tokio::time::timeout(
@@ -389,8 +403,19 @@ impl Gateway {
                     // leaking it.
                     let (viewer, publish_tx) = match &publish_name {
                         Some(pub_name) => {
-                            // Publishing session: create the stream channel.
-                            let tx = self.streams.publish(pub_name);
+                            // Publishing session: claim the stream name.
+                            // `try_publish` re-checks occupancy atomically —
+                            // a challenger that raced past the pre-accept
+                            // check (another publisher claimed the name
+                            // during the handshake window) is closed here.
+                            let Some(tx) = self.streams.try_publish(pub_name) else {
+                                tracing::warn!(
+                                    stream = %pub_name,
+                                    "post-accept publish claim failed; closing session"
+                                );
+                                connection.close(1u32.into(), b"stream name in use");
+                                continue;
+                            };
                             // Optionally also view a different stream.
                             let view = if pub_name.as_str() != stream_name.as_str() {
                                 self.streams.subscribe(&stream_name)
