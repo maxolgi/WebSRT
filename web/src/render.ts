@@ -36,6 +36,18 @@ export class CanvasRenderer {
   // expected presentation time by more than this — indicates seek,
   // stream restart, or recovery from a backgrounded tab.
   private static readonly CLOCK_RESET_US = 1_000_000;
+  // Proportional slew of the PTS↔wall mapping toward the incoming PTS
+  // stream (per arriving frame, clamped). Source clocks drift vs wall
+  // time (measured 1.00094 on one encoder — +0.94 ms/s); a fixed mapping
+  // accumulates the drift until the ring pins full with every head frame
+  // still "in the future" — canvas frozen, tail overflow-dropped at the
+  // incoming rate — because CLOCK_RESET_US is never reached while the
+  // deficit stays under 1 s. The slew keeps the mapping phase-locked to
+  // the stream: gain 0.01/frame absorbs ~1.2 ms/s of drift at <2 ms
+  // steady-state error, and the 3 ms/frame clamp heals a pin (up to
+  // RING_CAP of deficit) in ~1 s without visible cadence wobble.
+  private static readonly CLOCK_SLEW_GAIN = 0.01;
+  private static readonly CLOCK_SLEW_MAX_US = 3_000;
 
   private ctx: CanvasRenderingContext2D;
   private canvas: HTMLCanvasElement;
@@ -136,10 +148,17 @@ export class CanvasRenderer {
       return;
     }
     const nowPtsUs = this.ptsOriginUs + (performance.now() - this.wallOriginMs) * 1000;
-    if (Math.abs(ptsUs - nowPtsUs) > CanvasRenderer.CLOCK_RESET_US) {
+    const errUs = ptsUs - nowPtsUs;
+    if (Math.abs(errUs) > CanvasRenderer.CLOCK_RESET_US) {
       this.ptsOriginUs = ptsUs;
       this.wallOriginMs = performance.now();
+      return;
     }
+    const slewUs = Math.max(
+      -CanvasRenderer.CLOCK_SLEW_MAX_US,
+      Math.min(CanvasRenderer.CLOCK_SLEW_MAX_US, errUs * CanvasRenderer.CLOCK_SLEW_GAIN),
+    );
+    this.ptsOriginUs += slewUs;
   }
 
   private startRafLoop() {
