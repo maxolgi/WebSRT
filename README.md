@@ -1,6 +1,6 @@
 # WebSRT
 
-[What is WebSRT?](#what-is-websrt) | [The Library](#the-library) | [Features](#features) | [Getting Started](#getting-started) | [Build Instructions](#build-instructions) | [Reference Applications](#reference-applications) | [Architecture](#architecture) | [License](#license)
+[What is WebSRT?](#what-is-websrt) | [The Library](#the-library) | [Features](#features) | [Getting Started](#getting-started) | [Build Instructions](#build-instructions) | [Applications](#applications) | [Architecture](#architecture) | [License](#license)
 
 > **NOTE: NOT PRODUCTION READY.** Experimental: the protocol works, streams
 > play, and NAK/retransmit recovers from packet loss — but it has not been
@@ -40,9 +40,9 @@ while publishing another.
                   └────────────────────────────────────┘
 ```
 
-This repository also ships **reference applications** built on the library — a
+This repository also ships **applications** built on the library — a
 native gateway binary (desktop GUI or headless CLI) and web viewer/publisher
-pages. See [Reference applications](#reference-applications).
+pages. See [Applications](#applications).
 
 ## The Library
 
@@ -258,7 +258,7 @@ websrt = { git = "https://github.com/maxolgi/WebSRT.git", branch = "master", fea
 
 | | | |
 |:---:|:---:|:---:|
-| [The Library](#the-library) | [Reference gateway quickstart](#reference-applications) | [Embedding the player](docs/embedding.md) |
+| [The Library](#the-library) | [Applications quickstart](#applications) | [Embedding the player](docs/embedding.md) |
 | Crate overview + Rust and JS examples | Run the gateway app with OBS or the test fixture | `mountPlayer()` SDK: options, events, `pcmPort` |
 | [Build Instructions](#build-instructions) | [Architecture](#architecture) | [SRT-over-QUIC draft](https://haivision.github.io/srt-rfc/draft-sharabayko-srt-over-quic.html) |
 | Toolchain setup, `./build.sh` menu | Data flow, browser pipeline | The IETF draft WebSRT implements |
@@ -431,9 +431,9 @@ cd web && npx tsc --noEmit
 5. Changing `crates/websrt/` (library) → `./build.sh gateway` +
    `./build.sh restart` (production only; dev just reruns the binary).
 
-## Reference Applications
+## Applications
 
-The repo ships two reference applications built **entirely** on the library.
+The repo ships two applications built **entirely** on the library.
 Like SRT's `srt-live-transmit`, they are provided for instructional purposes —
 demonstrations of the crate surfaces, not ends in themselves.
 
@@ -741,7 +741,7 @@ WebSRT/
           srt_listener.rs     # SrtListenerService: multi-publisher SRT accept loop
           file.rs             # FileIngester: fixture loop with real-time pacing
           continuity.rs       # TsContinuityChecker: read-only MPEG-TS CC gap probe
-    websrt-gateway/           # reference application: native GUI + CLI wrapper around the library
+    websrt-gateway/           # application: native GUI + CLI wrapper around the library
       src/
         main.rs               # CLI parsing, cert persistence, cert-hash.js writing, Gateway::run()
         gui.rs                # eframe/egui app: config form (persisted), Start/Stop, stats, logs

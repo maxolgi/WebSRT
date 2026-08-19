@@ -1,9 +1,9 @@
 # Reference Gateway (`websrt-gateway`)
 
-Operations manual for the **reference application** binary built on the
+Operations manual for the **`websrt-gateway`** application built on the
 [`websrt`](../crates/websrt) library — CLI options, certificate modes, and
 production deployment. The binary is a demonstration of the library's surface,
-not the product itself; see the [README](../README.md#reference-applications)
+not the product itself; see the [README](../README.md#applications)
 for the library positioning.
 
 - [CLI reference](#cli-reference)

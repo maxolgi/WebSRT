@@ -3,7 +3,7 @@
 //! By default launches a GUI (eframe/egui) with a config form and Start/Stop
 //! buttons. Use `--no-gui` for the original headless CLI behavior.
 //!
-//! This is the reference application built on the `websrt` library.
+//! This is the application built on the `websrt` library.
 //! For embedding, use the library crate directly.
 
 // Use the Windows GUI subsystem for release builds so no background console
