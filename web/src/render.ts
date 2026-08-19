@@ -58,6 +58,18 @@ export class CanvasRenderer {
 
   private rafId: number | null = null;
   private frameCount = 0;
+
+  // Arrivals-per-rAF-interval histogram (rolling). Each rAF tick records how
+  // many frames arrived since the previous tick (capped at 4+). With the
+  // cap-1 baseline ring, 1 arrival per interval is the only lossless case:
+  // 0-arrival intervals are stalls, ≥2-arrival intervals force drops. The
+  // share of 0/≥2 slots quantifies arrival clustering (TSBPD release
+  // quantization, B-frame reorder bursts, postMessage batching) vs rAF.
+  private static readonly ARRIVAL_RING = 512; // ~8.5 s of intervals at 60 Hz
+  private static readonly ARRIVAL_MAX_BUCKET = 4;
+  private arrivalRing = new Uint8Array(CanvasRenderer.ARRIVAL_RING);
+  private arrivalIdx = 0;
+  private arrivalsSinceRaf = 0;
   private droppedOld = 0;
   private droppedLate = 0;
   private lastFpsTime = performance.now();
@@ -99,6 +111,7 @@ export class CanvasRenderer {
 
   draw(frame: VideoFrame) {
     this.lastPtsUs = frame.timestamp;
+    this.arrivalsSinceRaf++;
     if (!this.renderPacing) {
       // Baseline: keep only the latest frame; drop any undrawn
       // predecessor. The frame is drawn on the next RAF and consumed.
@@ -167,6 +180,12 @@ export class CanvasRenderer {
       const now = performance.now();
       this.lastRafDeltaMs = now - lastRaf;
       lastRaf = now;
+      this.arrivalRing[this.arrivalIdx] = Math.min(
+        this.arrivalsSinceRaf,
+        CanvasRenderer.ARRIVAL_MAX_BUCKET,
+      );
+      this.arrivalIdx = (this.arrivalIdx + 1) % CanvasRenderer.ARRIVAL_RING;
+      this.arrivalsSinceRaf = 0;
       this.present();
       this.rafId = requestAnimationFrame(loop);
     };
@@ -226,6 +245,10 @@ export class CanvasRenderer {
   }
 
   getStats(): import('./shared/types').RenderStats {
+    const buckets = new Array<number>(CanvasRenderer.ARRIVAL_MAX_BUCKET + 1).fill(0);
+    for (let i = 0; i < this.arrivalRing.length; i++) {
+      buckets[this.arrivalRing[i]]++;
+    }
     return {
       frameCount: this.frameCount,
       droppedLate: this.droppedLate,
@@ -235,6 +258,7 @@ export class CanvasRenderer {
       currentPtsUs: this.lastPtsUs,
       fps: this.lastFps,
       rafDeltaMs: this.lastRafDeltaMs,
+      arrivalHistogram: buckets,
     };
   }
 

@@ -89,7 +89,50 @@ export function GpuTab({ store }: Props): JSX.Element {
             <tr><td>FPS</td><td>{render?.fps ?? '—'}</td></tr>
           </tbody>
         </table>
+        <ArrivalHistogram histo={render?.arrivalHistogram ?? null} />
       </div>
     </>
+  )
+}
+
+// Share of rAF intervals that saw 0 / 1 / 2 / 3 / 4+ decoded-frame
+// arrivals (rolling ~8.5 s). With the cap-1 baseline ring only the "1"
+// slots present losslessly; "0" slots stall, "≥2" slots force drops.
+const ARRIVAL_COLORS = ['#c77700', '#3fb950', '#f85149', '#f85149', '#f85149']
+
+function ArrivalHistogram({ histo }: { histo: number[] | null }): JSX.Element | null {
+  if (!histo || histo.length === 0 || histo.every((n) => n === 0)) return null
+  const total = histo.reduce((a, b) => a + b, 1)
+  const labels = ['0', '1', '2', '3', '4+']
+  return (
+    <div style={{ marginTop: '10px' }}>
+      <div style={{ color: '#999', fontSize: '11px', marginBottom: '4px' }}>
+        Arrivals per rAF interval (last ~8.5 s)
+      </div>
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: '6px', height: '44px' }}>
+        {histo.map((n, i) => {
+          const pct = (n / total) * 100
+          return (
+            <div
+              key={i}
+              title={`${pct.toFixed(1)}% of intervals had ${labels[i]} arrival${i === 1 ? '' : 's'}`}
+              style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2px' }}
+            >
+              <div style={{ fontSize: '9px', color: '#aaa' }}>{pct >= 0.5 ? `${pct.toFixed(0)}%` : ''}</div>
+              <div
+                style={{
+                  width: '100%',
+                  height: `${Math.max(2, pct)}%`,
+                  minHeight: '2px',
+                  background: ARRIVAL_COLORS[i] ?? '#888',
+                  borderRadius: '2px 2px 0 0',
+                }}
+              />
+              <div style={{ fontSize: '10px', color: '#ccc' }}>{labels[i]}</div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
   )
 }

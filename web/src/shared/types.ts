@@ -55,6 +55,13 @@ export interface RenderStats {
   currentPtsUs: number | null;
   fps: number;
   rafDeltaMs: number;
+  /**
+   * Rolling (~8.5 s at 60 Hz) histogram of decoded-frame arrivals per rAF
+   * interval: index = arrivals (capped at 4+), value = number of intervals.
+   * With the cap-1 baseline ring, index 1 is the only lossless slot; 0 =
+   * stall slot, ≥2 = burst slot (forces a drop).
+   */
+  arrivalHistogram: number[];
 }
 
 // Mirrors the WASM `DebugSnapshot` (crates/mpeg2ts-wasm/src/lib.rs).
