@@ -1,24 +1,29 @@
 # WebSRT
 
-> **NOTE: THIS IS NOT PRODUCTION READY.** This is an experimental project that
-> implements SRT over WebTransport datagrams. The protocol works, streams play,
-> and NAK/retransmit recovers from packet loss, but it has not been hardened,
-> audited, or tested at scale.
+[What is WebSRT?](#what-is-websrt) | [The Library](#the-library) | [Features](#features) | [Getting Started](#getting-started) | [Build Instructions](#build-instructions) | [Reference Applications](#reference-applications) | [Architecture](#architecture) | [License](#license)
 
-Pure-Rust application that bridges native SRT (from OBS or any SRT sender) to
-browsers running **the real SRT protocol over WebTransport datagrams** — same
-wire format, same NAK/ACK/retransmit semantics.
+> **NOTE: NOT PRODUCTION READY.** Experimental: the protocol works, streams
+> play, and NAK/retransmit recovers from packet loss — but it has not been
+> hardened, audited, or tested at scale.
 
-The gateway is a native app: a desktop GUI (eframe/egui) by default, `--no-gui`
-for headless operation, with the viewer UI served by a built-in HTTPS server.
-The web UI is embedded into the binary at compile time — one executable, no
-external file server.
+## What is WebSRT?
 
-The browser runs `srt-protocol` and `mpeg2ts` compiled to WASM; JS is glue only.
+**WebSRT is a Rust + WebAssembly library that implements SRT over WebTransport
+datagrams** — the same wire format, HSv5 handshake, NAK/ACK/retransmit
+semantics, and TSBPD latency management as SRT/UDP, running natively on the
+server and inside the browser via WASM. JS is glue only: the browser runs the
+*same* `srt-protocol` and `mpeg2ts` Rust crates the gateway does, compiled to
+WASM.
 
-The gateway supports **both directions**: OBS → viewers and browser → viewers
-(browser publishes via WebTransport, gateway re-originates to other browsers).
-A browser can even do both simultaneously.
+It bridges native SRT sources (OBS or any SRT sender) to browsers — and both
+directions: browsers can publish too, and a browser can even view one stream
+while publishing another.
+
+|                |                                                        |
+| -------------- | ------------------------------------------------------ |
+| **S**RT        | The real protocol: same wire format, HSv5 handshake, NAK/ACK retransmit, TSBPD |
+| **R**ust       | Native server and browser WASM run the same `srt-protocol` state machines |
+| **T**ransport  | WebTransport (HTTP/3) datagrams carry the SRT packets — TLS and connection migration included |
 
 ```
                   ┌─────── Rust gateway ───────────────┐
@@ -35,9 +40,180 @@ A browser can even do both simultaneously.
                   └────────────────────────────────────┘
 ```
 
-## Key design points
+This repository also ships **reference applications** built on the library — a
+native gateway binary (desktop GUI or headless CLI) and web viewer/publisher
+pages. They exercise every part of the library end-to-end and receive many
+updates as the library matures, but they are examples, not the product: the
+product is the crates. See [Reference applications](#reference-applications).
 
-- **Gateway is a dumb SRT repeater.** It terminates OBS's SRT connection, takes
+## The Library
+
+Five artifacts: one native crate, three WASM crates, and a TypeScript player
+SDK.
+
+| Crate / package | Target | What it provides |
+| --- | --- | --- |
+| [`websrt`](crates/websrt) | native (tokio) | `Gateway` builder + run loop, `Broadcaster` fanout, `SrtInitiator`, `Ingester` trait (SRT / file / channel), `StreamRegistry`, `SessionPolicy` hooks, `GatewayLimits`, `Cert` / `CertSource` |
+| [`srt-wasm`](crates/srt-wasm) | wasm32 | `SrtReceiver` — the browser-side SRT listener (recv **and** send), driven by `handle_datagram()` / `poll()` / `sendMessage()` |
+| [`mpeg2ts-wasm`](crates/mpeg2ts-wasm) | wasm32 | `TsDemuxer` — TS demux emitting PES / PCM / PMT events, plus `DebugSnapshot` stream analysis (CC errors, PCR jitter, NAL breakdown) |
+| [`ts-muxer-wasm`](crates/ts-muxer-wasm) | wasm32 | `TsMuxer` — publisher-side TS muxing (H.264/HEVC/AV1 video, Opus audio, raw PCM) |
+| [`web/` player SDK](web/src/player) | TypeScript | `mountPlayer()` — framework-agnostic viewer SDK; see [docs/embedding.md](docs/embedding.md) |
+
+### Using `websrt` (native side)
+
+```toml
+[dependencies]
+websrt = { git = "https://github.com/maxolgi/WebSRT.git", branch = "master" }
+```
+
+`websrt` builds on two patched forks, wired via `[patch.crates-io]`:
+[`maxolgi/srt-rs`](https://github.com/maxolgi/srt-rs) (12 patches: WASM
+compat, skip-induction handshake, stats population, buffer-underflow fixes,
+RTT seeding, CC-aware retransmit — all documented in `AGENTS.md`, drafted for
+upstream in `PR.md`) and [`maxolgi/mpeg2ts`](https://github.com/maxolgi/mpeg2ts)
+(1 patch: unknown-PID tolerance for mid-stream joins).
+
+**Note:** cargo only honors `[patch]` sections from the *workspace root*, so a
+git dependency does not carry WebSRT's patches with it — mirror them in your
+own root `Cargo.toml`:
+
+```toml
+[patch.crates-io]
+srt-protocol = { git = "https://github.com/maxolgi/srt-rs.git", branch = "main" }
+srt-tokio = { git = "https://github.com/maxolgi/srt-rs.git", branch = "main" }
+mpeg2ts = { git = "https://github.com/maxolgi/mpeg2ts.git", branch = "master" }
+```
+
+Embeddable gateway in ~30 lines:
+
+```rust
+use websrt::cert::{Cert, CertSource};
+use websrt::hooks::{auth_token_policy, chain, path_policy};
+use websrt::ingest::srt::SrtIngester;
+use websrt::limits::GatewayLimits;
+use websrt::Gateway;
+
+# async fn run() -> anyhow::Result<()> {
+let cert = Cert::build(CertSource::SelfSigned {
+    sans: vec!["localhost".into()],
+}).await?;
+
+let gateway = Gateway::builder()
+    .bind_addr("127.0.0.1:4433".parse::<std::net::SocketAddr>()?)
+    .identity(cert.identity.clone_identity())
+    .latency_ms(1000)
+    .max_viewers(16)
+    // Pluggable accept policy: chain built-ins (path / origin allowlist /
+    // auth token) or implement SessionPolicy for per-stream tokens, JWTs,
+    // rate limits… Replaces the built-in checks when set.
+    .session_policy(chain(
+        path_policy("/wt".into()),
+        auth_token_policy("s3cret".into()),
+    ))
+    // Per-IP (IPv6 collapsed to /64) + global session caps, timeouts.
+    .limits(GatewayLimits::builder().max_sessions_per_ip(5).build()?)
+    .build()?;
+
+// Live stats for your own metrics endpoint (cheap, no I/O):
+let _stats = gateway.stats_handle();
+
+// Deferred ingester: connect OBS in the background
+let source = gateway.source_handle();
+tokio::spawn(async move {
+    let ingester = SrtIngester::bind(
+        "0.0.0.0:9000",
+        None,
+        std::time::Duration::from_millis(120),
+        None,
+    ).await.unwrap();
+    source.publish_stream("default", ingester);
+});
+
+gateway.run(async {
+    let _ = tokio::signal::ctrl_c().await;
+}).await?;
+# Ok(())
+# }
+```
+
+`Ingester` is the input abstraction: implement `next_message()` returning
+`(Instant, Bytes)` TS messages and the library handles fanout, per-viewer SRT
+senders, retransmit, and backpressure. Built-in: `SrtIngester` (OBS, listener
+or caller, with reconnect), `SrtListenerService` (multi-publisher SRT accept
+loop), `FileIngester` (fixture loop with real-time pacing), `ChannelIngester`
+(mpsc-backed — this is what browser publishers feed).
+
+### Browser side (WASM)
+
+The WASM crates are not published; consume them by cloning this repo and
+running `wasm-pack build --target web` (see
+[Build Instructions](#build-instructions)), then importing the generated
+`pkg` output. The browser is the SRT **listener**: it feeds raw WebTransport
+datagrams into the state machine and executes the returned actions.
+
+```js
+import init, { SrtReceiver } from './wasm/srt-wasm/srt_wasm.js';
+
+await init();                                   // wasm-pack --target web output
+const epoch = performance.now();
+const nowUs = () => (performance.now() - epoch) * 1000;
+
+// TSBPD latency 120 ms; RTT seeded from QUIC's smoothed RTT
+// (await wt.getStats()).smoothedRtt — accurate cold-start retransmit timing.
+const rx = SrtReceiver.newWithLatencyAndRtt(120, quicSmoothedRttMs);
+
+// Incoming WebTransport datagram → SRT state machine → actions
+function onDatagram(bytes) {
+  for (const a of rx.handle_datagram(bytes, nowUs())) dispatch(a);
+}
+// ~5 ms tick advances timers (TSBPD release, ACK, keepalive)
+setInterval(() => { for (const a of rx.poll(nowUs())) dispatch(a); }, 5);
+
+function dispatch(a) {
+  switch (a.kind) {
+    case 0: wtDatagramWriter.write(a.takeData()); break;   // ACK / NAK / handshake
+    case 1: onTsMessage(a.takeData(), a.schedUs); break;   // TSBPD-released TS message
+    case 2: onHandshakeComplete(); break;                  // data plane is live
+    case 4: onClose(); break;
+  }
+  a.free();  // wasm-bindgen structs are freed manually
+}
+```
+
+Demux and mux are equally small surfaces:
+
+```js
+import { TsDemuxer } from './wasm/mpeg2ts-wasm/mpeg2ts_wasm.js';
+const demux = new TsDemuxer();
+for (const ev of demux.feed(tsBytes)) { /* PES / PCM / PMT / RA events */ }
+
+import { TsMuxer } from './wasm/ts-muxer-wasm/ts_muxer_wasm.js';
+const muxer = new TsMuxer();                    // publisher side
+muxer.push_video(nalBytes, ptsUs, dtsUs, isKeyframe);
+muxer.push_pcm(f32Samples, ptsUs);              // SMPTE 302M audio
+```
+
+### Player SDK (TypeScript)
+
+For embedding the **browser-side player** (canvas + WebCodecs SDK, including
+the direct `pcmPort` PCM delivery API), see
+[`docs/embedding.md`](docs/embedding.md) — a guide covering the `mountPlayer()`
+SDK, config options, and event surface.
+
+### Feature flags
+
+The `sim-loss` feature enables a probabilistic datagram dropper for testing
+NAK/retransmit (data packets only; control packets always pass). Without the
+feature, the `rand` dependency is excluded.
+
+```toml
+[dependencies]
+websrt = { git = "https://github.com/maxolgi/WebSRT.git", branch = "master", features = ["sim-loss"] }
+```
+
+## Features
+
+- **Dumb SRT repeater.** The gateway terminates OBS's SRT connection, takes
   the resulting `(Instant, Bytes)` messages, and re-originates them as a new
   SRT sender to each browser. TS bytes are never modified server-side.
 - **Browser publishing.** A browser can publish upstream via WebTransport.
@@ -48,6 +224,8 @@ A browser can even do both simultaneously.
   independent retransmit buffer) via `tokio::sync::broadcast` fanout.
 - **Browser runs the same Rust state machines** the gateway does, compiled to
   WASM.
+- **First-wins stream occupancy.** A live stream name cannot be replaced by
+  another publisher (browser or SRT); challengers are rejected with 403.
 - **SRT crypto disabled** between gateway and browser. WebTransport TLS
   replaces it. The OBS-to-gateway link supports optional AES encryption via
   `--srt-passphrase`.
@@ -68,15 +246,6 @@ A browser can even do both simultaneously.
   protocol's next timed event (SRT `WaitForData`), clamped to sane bounds,
   with a dedicated timer worker for fine-grained ticks. Only WebCodecs decode
   and canvas rendering happen on the main thread.
-- **Desktop GUI.** The gateway launches an eframe/egui config window by
-  default with Start/Stop, live stats, and a scrolling log panel. Settings
-  persist to `~/.config/websrt/gateway-config.json`. Pass `--no-gui` for
-  headless CLI mode (required under supervisord). On headless servers with
-  no display, the GUI auto-falls-back to CLI.
-- **Single-binary deployment.** The built-in HTTPS web server embeds the
-  web UI at compile time (`rust-embed`), so the release binary serves the
-  viewer UI with no external file server. Debug builds serve `web/dist/`
-  from disk so UI iterations don't require recompiling.
 - **PTS-paced video presentation.** Decoded frames are queued in a small
   bounded ring and drawn on `requestAnimationFrame` when their PTS is due,
   measured against a wall-clock ↔ PTS mapping that resets on large gaps
@@ -87,7 +256,16 @@ A browser can even do both simultaneously.
 - **Bounded audio buffering.** The AudioWorklet paths use fixed-size ring
   buffers with drop-oldest and skip-ahead to prevent latency accumulation.
 
-## Quick start
+## Getting Started
+
+| | | |
+|:---:|:---:|:---:|
+| [The Library](#the-library) | [Reference gateway quickstart](#reference-applications) | [Embedding the player](docs/embedding.md) |
+| Crate overview + Rust and JS examples | Run the gateway app with OBS or the test fixture | `mountPlayer()` SDK: options, events, `pcmPort` |
+| [Build Instructions](#build-instructions) | [Architecture](#architecture) | [SRT-over-QUIC draft](https://haivision.github.io/srt-rfc/draft-sharabayko-srt-over-quic.html) |
+| Toolchain setup, `./build.sh` menu | Data flow, browser pipeline | The IETF draft WebSRT implements |
+
+## Build Instructions
 
 ### Prerequisites
 
@@ -195,6 +373,85 @@ to the repo — no generation step needed. `fixtures/stream.sh` is a live ffmpeg
 publisher (NVENC/VAAPI) that streams to the gateway's SRT listener instead of
 writing a file.
 
+### `./build.sh` menu
+
+```bash
+./build.sh setup                # one-time: WASM + web-UI deps (run after fresh clone)
+./build.sh wasm                 # rebuild all 3 WASM crates + copy to web/wasm/
+./build.sh wasm srt             # rebuild just srt-wasm + copy
+./build.sh gateway              # cargo build --release -p websrt-gateway
+./build.sh gateway --sim-loss   # add the sim-loss feature
+./build.sh lib                  # cargo build --release -p websrt (the library)
+./build.sh web build            # bundle the web UI → web/dist/
+./build.sh check                # cargo check + tsc --noEmit
+./build.sh test                 # cargo test --workspace + node web/smoke.mjs
+./build.sh srt-protocol         # rule 1: rebuild gateway + srt-wasm after editing forked srt-rs
+./build.sh restart              # sudo supervisorctl restart websrt (production only)
+./build.sh clean                # rm -rf web/wasm web/dist target
+./build.sh all                  # full clean rebuild: clean → setup → gateway → web build
+```
+
+Raw form (what the script runs):
+
+```bash
+# Demo gateway binary (release, with sim-loss feature)
+cargo build --release -p websrt-gateway --features sim-loss
+
+# Library only (for use as a dependency)
+cargo build --release -p websrt
+
+# WASM crates — must rebuild + copy to web/ after changes
+(cd crates/srt-wasm && wasm-pack build --target web --release)
+cp crates/srt-wasm/pkg/* web/wasm/srt-wasm/
+(cd crates/mpeg2ts-wasm && wasm-pack build --target web --release)
+cp crates/mpeg2ts-wasm/pkg/* web/wasm/mpeg2ts-wasm/
+(cd crates/ts-muxer-wasm && wasm-pack build --target web --release)
+cp crates/ts-muxer-wasm/pkg/* web/wasm/ts-muxer-wasm/
+
+# Web UI bundle (debug builds of the gateway serve dist/ from disk;
+# release builds embed it at compile time)
+(cd web && npm run build)
+
+# TypeScript typecheck (no emit)
+cd web && npx tsc --noEmit
+
+# Live publishers (need ffmpeg; h264 uses NVENC, av1 uses VAAPI)
+./fixtures/stream.sh h264|av1
+./fixtures/stream_pcm.sh [mono|stereo|surround|<channel_count>]
+```
+
+### Critical build order
+
+1. Forked `srt-protocol` (`maxolgi/srt-rs`) change → run `./build.sh srt-protocol`
+   (rebuilds BOTH the gateway binary AND srt-wasm + copies pkg to `web/wasm/`).
+2. Changing only `web/src/*.ts` / `*.tsx` → rebuild the bundle
+   (`./build.sh web build`). Debug `cargo run` picks it up on page reload;
+   release builds re-embed at compile time, so rebuild the binary too.
+3. Changing `crates/srt-wasm/src/lib.rs` → `./build.sh wasm srt` + browser reload.
+4. Changing `crates/mpeg2ts-wasm/` or `crates/ts-muxer-wasm/` →
+   `./build.sh wasm mpeg2ts` (or `ts-muxer`) + browser reload.
+5. Changing `crates/websrt/` (library) → `./build.sh gateway` +
+   `./build.sh restart` (production only; dev just reruns the binary).
+
+## Reference Applications
+
+The repo ships two reference applications built **entirely** on the library.
+Like SRT's `srt-live-transmit`, they are provided for instructional purposes —
+demonstrations of the crate surfaces, not ends in themselves.
+
+- **`websrt-gateway`** — native binary wrapping `Gateway`: CLI parse, cert
+  setup, ingester wiring, health endpoint. Launches a desktop GUI (eframe/egui)
+  by default — config form (persisted to `~/.config/websrt/gateway-config.json`),
+  Start/Stop, live stats, scrolling log panel. `--no-gui` for headless CLI mode
+  (required under supervisord); auto-falls-back to CLI on headless servers.
+  Single-binary deployment: the built-in HTTPS web server embeds the web UI at
+  compile time (`rust-embed`), so the release binary serves the viewer UI with
+  no external file server. Debug builds serve `web/dist/` from disk so UI
+  iterations don't require recompiling.
+- **`web/` pages** — viewer page (player SDK + optional debug overlay with
+  8 analysis tabs), publisher page (screen capture → WebCodecs encode →
+  `ts-muxer-wasm` → SRT over WT), and a stripped-down simple viewer.
+
 ### Run with the test fixture (no OBS required)
 
 ```bash
@@ -246,6 +503,8 @@ Viewers connect to `?stream=<name>` as usual.
 
 The publish URL pattern is `?publish=<name>` — the gateway creates a
 broadcaster for that stream name, and viewers subscribe via `?stream=<name>`.
+A live stream name cannot be taken over by another publisher (first-wins);
+challengers are rejected with 403.
 
 ```bash
 cargo run -p websrt-gateway  # listener mode, any SRT source
@@ -300,63 +559,7 @@ always pass through so the SRT reliability machinery stays functional.
 Open more browser tabs — each gets its own independent SRT sender. Viewer cap
 defaults to 16 (enforced in `Broadcaster::subscribe`).
 
-## Library usage
-
-The `websrt` crate is the reusable core. The reference binary (`websrt-gateway`) is
-a thin wrapper around it. To embed in your own application:
-
-For embedding the **browser-side player** (canvas + WebCodecs SDK, including
-the direct `pcmPort` PCM delivery API), see
-[`docs/embedding.md`](docs/embedding.md) — a guide covering the `mountPlayer()`
-SDK, config options, and event surface.
-
-```rust
-use websrt::Gateway;
-use websrt::cert::{Cert, CertSource};
-use websrt::ingest::srt::SrtIngester;
-
-# async fn run() -> anyhow::Result<()> {
-let cert = Cert::build(CertSource::SelfSigned {
-    sans: vec!["localhost".into()],
-}).await?;
-
-let gateway = Gateway::builder()
-    .bind_addr("127.0.0.1:4433".parse::<std::net::SocketAddr>()?)
-    .identity(cert.identity.clone_identity())
-    .latency_ms(1000)
-    .max_viewers(16)
-    .build()?;
-
-// Deferred ingester: connect OBS in background
-let source = gateway.source_handle();
-tokio::spawn(async move {
-    let ingester = SrtIngester::bind(
-        "0.0.0.0:9000",
-        None,
-        std::time::Duration::from_millis(120),
-        None,
-    ).await.unwrap();
-    source.publish_stream("default", ingester);
-});
-
-gateway.run(async {
-    let _ = tokio::signal::ctrl_c().await;
-}).await?;
-# Ok(())
-# }
-```
-
-### Simulated packet loss (feature-gated)
-
-The `sim-loss` feature enables a probabilistic datagram dropper for testing
-NAK/retransmit. Without the feature, the `rand` dependency is excluded.
-
-```toml
-[dependencies]
-websrt = { path = "...", features = ["sim-loss"] }
-```
-
-## CLI reference
+### CLI reference
 
 ```
 websrt-gateway [OPTIONS]
@@ -365,7 +568,7 @@ Options:
       --no-gui                   Skip the GUI and run in headless CLI mode (original behavior)
       --no-web                   Disable the built-in HTTPS web server
       --web-port <WEB_PORT>      HTTPS port for the built-in web server (0 to disable) [default: 5173]
-      --web-bind <WEB_BIND>      Bind address for the HTTPS web server [default: 127.0.0.1]
+      --web-bind <WEB_BIND>      Bind address for the built-in HTTPS web server [default: 127.0.0.1]
       --web-root <WEB_ROOT>      Root directory for web files (auto-detected: web/dist → web if unset)
       --input <INPUT>            Input source [default: file] [possible values: file, srt]
       --fixture <FIXTURE>        Path to .ts fixture (when --input file) [default: fixtures/test.ts]
@@ -396,9 +599,9 @@ Only with the `sim-loss` feature:
       --sim-seed <SIM_SEED>      RNG seed for sim-loss (deterministic by default) [default: 42]
 ```
 
-## Certificate modes
+### Certificate modes
 
-### Self-signed (default, `--cert-mode self`)
+#### Self-signed (default, `--cert-mode self`)
 
 Self-signed ECDSA P-256 certificate with SANs `localhost`, `127.0.0.1`, `::1`.
 Generated once, then persisted to `~/.config/websrt/gateway-cert.pem` +
@@ -411,7 +614,7 @@ the normal PKI validation. Chrome/Edge only (Firefox does not support
 
 Delete the persisted cert files and restart to rotate the hash.
 
-### mkcert (`--cert-mode mkcert`)
+#### mkcert (`--cert-mode mkcert`)
 
 Uses PEM files generated by [mkcert](https://github.com/FiloSibille/mkcert).
 The browser validates via normal PKI (mkcert installs a local CA). Works with
@@ -420,7 +623,7 @@ Firefox. `cert-hash.js` is set to `null`.
 ```bash
 mkcert -install
 mkcert -cert-file certs/cert.pem -key-file certs/key.pem localhost 127.0.0.1 ::1
-cargo run -p websrt-gateway -- --cert-mode mkcert --cert-pem certs/cert.pem --key-file certs/key.pem
+cargo run -p websrt-gateway -- --cert-mode mkcert --cert-pem certs/cert.pem --key-pem certs/key.pem
 ```
 
 See `certs/README.md` for details.
@@ -430,20 +633,20 @@ See `certs/README.md` for details.
 ### Data flow
 
 ```
-OBS ──SRT/UDP──► SrtIngester ──► Broadcaster (broadcast channel, depth 4096)
+OBS ──SRT/UDP──► SrtIngester ──► Broadcaster (broadcast channel, depth 32768)
                                       ▲
 Browser ──WT──► SrtInitiator ────────┘  (publish path: WT dgrams → SRT receiver → ReleaseData)
 (publisher)     (recv_pump + ticker)
 
-                                       │
-                           ┌───────────┴───────────────┐
-                           ▼                           ▼
-                    BrowserSession A             BrowserSession B
-                    ├── recv_pump                ├── recv_pump
-                    │   (WT dgram → SrtInitiator)│   (WT dgram → SrtInitiator)
-                    └── ticker (shared)          └── ticker (shared)
-                        (viewer.recv →               (viewer.recv →
-                         SrtInitiator → WT dgram)     SrtInitiator → WT dgram)
+                                        │
+                            ┌───────────┴───────────────┐
+                            ▼                           ▼
+                     BrowserSession A             BrowserSession B
+                     ├── recv_pump                ├── recv_pump
+                     │   (WT dgram → SrtInitiator)│   (WT dgram → SrtInitiator)
+                     └── ticker (shared)          └── ticker (shared)
+                         (viewer.recv →               (viewer.recv →
+                          SrtInitiator → WT dgram)     SrtInitiator → WT dgram)
 ```
 
 The gateway is a **dumb SRT repeater**: it terminates OBS's SRT/UDP connection
@@ -524,69 +727,6 @@ WebSRT implements [draft-sharabayko-srt-over-quic](https://haivision.github.io/s
 - **§4.5 Congestion control** — transport-aware retransmit decisions. SRT's RTT is seeded from QUIC's smoothed RTT (`wtransport::Connection::rtt()` on the gateway, `WebTransport.getStats().smoothedRtt` on the browser). The SRT sender skips NAK-triggered retransmits whose predicted arrival time exceeds the TSBPD deadline, preventing wasted bandwidth on packets the receiver will drop as too-late.
 - **§4.7 Connection migration** — inherited from QUIC via WebTransport. Mobile viewers can hand off between networks (cellular → WiFi) without rejoining the stream.
 - **§4.8 Datagram vs H3 Datagram** — WebTransport uses H3 Datagram semantics, the load-balancer-compatible choice the draft recommends.
-
-## Build commands
-
-`./build.sh` wraps every common build step. Run `./build.sh --help` for the
-full list; the most-used subcommands:
-
-```bash
-./build.sh setup                # one-time: WASM + web-UI deps (run after fresh clone)
-./build.sh wasm                 # rebuild all 3 WASM crates + copy to web/wasm/
-./build.sh wasm srt             # rebuild just srt-wasm + copy
-./build.sh gateway              # cargo build --release -p websrt-gateway
-./build.sh gateway --sim-loss   # add the sim-loss feature
-./build.sh lib                  # cargo build --release -p websrt (the library)
-./build.sh web build            # bundle the web UI → web/dist/
-./build.sh check                # cargo check + tsc --noEmit
-./build.sh test                 # cargo test --workspace + node web/smoke.mjs
-./build.sh srt-protocol         # rule 1: rebuild gateway + srt-wasm after editing forked srt-rs
-./build.sh restart              # sudo supervisorctl restart websrt (production only)
-./build.sh clean                # rm -rf web/wasm web/dist target
-./build.sh all                  # full clean rebuild: clean → setup → gateway → web build
-```
-
-Raw form (what the script runs):
-
-```bash
-# Demo gateway binary (release, with sim-loss feature)
-cargo build --release -p websrt-gateway --features sim-loss
-
-# Library only (for use as a dependency)
-cargo build --release -p websrt
-
-# WASM crates — must rebuild + copy to web/ after changes
-(cd crates/srt-wasm && wasm-pack build --target web --release)
-cp crates/srt-wasm/pkg/* web/wasm/srt-wasm/
-(cd crates/mpeg2ts-wasm && wasm-pack build --target web --release)
-cp crates/mpeg2ts-wasm/pkg/* web/wasm/mpeg2ts-wasm/
-(cd crates/ts-muxer-wasm && wasm-pack build --target web --release)
-cp crates/ts-muxer-wasm/pkg/* web/wasm/ts-muxer-wasm/
-
-# Web UI bundle (debug builds of the gateway serve dist/ from disk;
-# release builds embed it at compile time)
-(cd web && npm run build)
-
-# TypeScript typecheck (no emit)
-cd web && npx tsc --noEmit
-
-# Live publishers (need ffmpeg; h264 uses NVENC, av1 uses VAAPI)
-./fixtures/stream.sh h264|av1
-./fixtures/stream_pcm.sh [mono|stereo|surround|<channel_count>]
-```
-
-### Critical build order
-
-1. Forked `srt-protocol` (`maxolgi/srt-rs`) change → run `./build.sh srt-protocol`
-   (rebuilds BOTH the gateway binary AND srt-wasm + copies pkg to `web/wasm/`).
-2. Changing only `web/src/*.ts` / `*.tsx` → rebuild the bundle
-   (`./build.sh web build`). Debug `cargo run` picks it up on page reload;
-   release builds re-embed at compile time, so rebuild the binary too.
-3. Changing `crates/srt-wasm/src/lib.rs` → `./build.sh wasm srt` + browser reload.
-4. Changing `crates/mpeg2ts-wasm/` or `crates/ts-muxer-wasm/` →
-   `./build.sh wasm mpeg2ts` (or `ts-muxer`) + browser reload.
-5. Changing `crates/websrt/` (library) → `./build.sh gateway` +
-   `./build.sh restart` (production only; dev just reruns the binary).
 
 ## Production deployment
 
@@ -802,7 +942,7 @@ latency buffer.
 - `web/public/cert-hash.js` is **runtime-generated** (gitignored). Don't commit
   it. The gateway writes it on boot.
 - `web/wasm/` and `web/dist/` contents are **gitignored**. Fresh clones must
-  run the build steps from Quick Start before the page will work.
+  run the build steps from Build Instructions before the page will work.
 - WASM camelCase warnings in `srt-wasm` are **required** by wasm-bindgen —
   don't "fix" them.
 - `performance.now()` epoch mismatch: browser uses `web_time::Instant`
@@ -824,9 +964,10 @@ Anyone with the cert hash can connect. Default `--cert-mode self` binds to
 unless you add an auth layer. Use mkcert mode for LAN access (Firefox
 compatible, PKI-validated).
 
-## License
-
-[MPL-2.0](LICENSE)
+Stream-name occupancy is first-wins (a live stream cannot be replaced by
+another publisher), but there is no per-publisher authentication beyond the
+optional `?token=` gate — any session that passes the policy can claim a free
+name.
 
 ## Known limitations
 
@@ -844,3 +985,7 @@ compatible, PKI-validated).
 - **No SRT encryption** between gateway and browser (WebTransport TLS replaces
   it). The OBS-to-gateway link supports optional AES encryption via
   `--srt-passphrase` (10–79 chars); disabled by default.
+
+## License
+
+[MPL-2.0](LICENSE)
