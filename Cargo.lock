@@ -4779,6 +4779,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ts-muxer"
+version = "0.1.0"
+dependencies = [
+ "mpeg2ts",
+]
+
+[[package]]
 name = "ts-muxer-wasm"
 version = "0.1.0"
 dependencies = [

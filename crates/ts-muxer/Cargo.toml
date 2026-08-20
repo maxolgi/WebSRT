@@ -1,0 +1,11 @@
+[package]
+name = "ts-muxer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+mpeg2ts.workspace = true
