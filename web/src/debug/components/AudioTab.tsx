@@ -43,6 +43,11 @@ export function AudioTab({ store }: Props): JSX.Element {
   const peakTimeRef = useRef(0);
   const specPeakRef = useRef<Float32Array | null>(null);
   const scopeSizeRef = useRef<{ w: number; h: number } | null>(null);
+  // Smoothed vectorscope auto-gain: program audio sits well below 0 dBFS, so a
+  // fixed ±1.0 scale renders normal levels as a tiny dot. Track recent ring
+  // amplitude and normalize it to ~85% of the canvas radius (clamped 1..60x,
+  // EMA-smoothed so transients don't pump the display).
+  const scopeGainRef = useRef(1);
 
   useEffect(() => {
     const id = setInterval(() => forceRender((n) => n + 1), RENDER_TICK_MS);
@@ -79,7 +84,16 @@ export function AudioTab({ store }: Props): JSX.Element {
     if (n === 0) return;
     const cx = w / 2;
     const cy = h / 2;
-    const scale = (Math.min(w, h) / 2) / 2;
+    let peak = 0;
+    for (let i = 0; i < n; i++) {
+      const a = Math.abs(m.scopeL[i]);
+      const b = Math.abs(m.scopeR[i]);
+      if (a > peak) peak = a;
+      if (b > peak) peak = b;
+    }
+    const target = Math.min(60, Math.max(1, 0.85 / (peak + 1e-6)));
+    scopeGainRef.current = scopeGainRef.current * 0.85 + target * 0.15;
+    const scale = ((Math.min(w, h) / 2) / 2) * scopeGainRef.current;
     ctx.strokeStyle = '#3f3';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -396,6 +410,7 @@ export function AudioTab({ store }: Props): JSX.Element {
               <div>Mono (in-phase) draws a <span style={{ color: '#3f3' }}>vertical</span> line; out-of-phase spreads horizontally.</div>
               <div style={{ marginTop: '6px', color: '#666' }}>
                 Showing PID {meter.selectedPid} channel {meter.selectedChannel}.
+                Auto-gain ×{scopeGainRef.current.toFixed(1)} (85% radius, smoothed).
               </div>
             </div>
           </div>
