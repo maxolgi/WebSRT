@@ -403,6 +403,9 @@ async function startCapture(): Promise<void> {
     stream = await navigator.mediaDevices.getUserMedia({
       video: {
         ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        aspectRatio: { ideal: 16 / 9 },
         frameRate: { ideal: +framerateSelect.value },
       },
       audio: true,
