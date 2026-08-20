@@ -66,8 +66,16 @@ export function AudioTab({ store }: Props): JSX.Element {
     const dpr = window.devicePixelRatio || 1;
     const w = SCOPE_SIZE;
     const h = SCOPE_SIZE;
+    // Validate the canvas itself, not just the remembered logical size: the
+    // <canvas> is conditionally rendered, so switching subtabs away and back
+    // mounts a FRESH element (default 300x150 store, identity transform) while
+    // this ref survives. Skipping the resize would draw unscaled and leave a
+    // never-faded strip beyond x=200 where traces accumulate forever.
     const prev = scopeSizeRef.current;
-    if (!prev || prev.w !== w || prev.h !== h) {
+    if (
+      !prev || prev.w !== w || prev.h !== h ||
+      canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)
+    ) {
       canvas.width = w * dpr;
       canvas.height = h * dpr;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
