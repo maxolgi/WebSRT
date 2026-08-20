@@ -102,8 +102,18 @@ export function mountDebug(
     const ch = (e as CustomEvent).detail as number;
     const w = handle.getWorker();
     const meter = store.audioMeter.value;
-    if (w && meter) {
-      w.postMessage({ cmd: 'meter-select', pid: meter.selectedPid, channel: ch });
+    if (!w || !meter) return;
+    // The AudioTab dropdown indexes GLOBAL channels (peaks is flat across
+    // all PIDs), but the WASM meter's selected_channel is per-PID. Translate
+    // the global index to its owning PID + local channel.
+    let acc = 0;
+    for (let i = 0; i < meter.pids.length; i++) {
+      const cc = meter.channelCounts[i] ?? 0;
+      if (ch >= acc && ch < acc + cc) {
+        w.postMessage({ cmd: 'meter-select', pid: meter.pids[i], channel: ch - acc });
+        return;
+      }
+      acc += cc;
     }
   };
   window.addEventListener('websrt:audio-select-channel', onAudioChannel);
