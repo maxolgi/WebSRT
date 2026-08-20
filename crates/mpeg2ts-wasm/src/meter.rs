@@ -10,6 +10,8 @@ const SAMPLE_RATE: usize = 48000;
 const LUFS_BLOCK_SAMPLES: usize = SAMPLE_RATE / 10;
 const LUFS_BLOCKS: usize = 4;
 const PHASE_SLOTS: usize = 12;
+/// Consecutive full-scale samples that constitute a clip (flat-top run).
+const CLIP_RUN: u32 = 3;
 const FFT_SIZE: usize = 1024;
 const SCOPE_SIZE: usize = 256;
 
@@ -30,6 +32,11 @@ pub struct ChannelMeter {
     pub sum_sq: f64,
     pub sample_count: u64,
     pub clip_count: u32,
+    /// Consecutive full-scale samples (flat-top run). A single sample at
+    /// 0 dBFS is normal in normalized digital audio — only a sustained run
+    /// is evidence of clipping, so a clip is counted when the run reaches
+    /// CLIP_RUN samples (once per run).
+    clip_run: u32,
     /// Peak/RMS latched at the end of the last window that had samples.
     /// Demux-side PES arrival is bursty vs the ~50ms snapshot poll, so empty
     /// windows re-emit these instead of 0 (the old worklet meter never saw
@@ -61,6 +68,7 @@ impl Default for ChannelMeter {
             sum_sq: 0.0,
             sample_count: 0,
             clip_count: 0,
+            clip_run: 0,
             kw1_x1: 0.0,
             kw1_x2: 0.0,
             kw1_y1: 0.0,
@@ -89,7 +97,12 @@ impl ChannelMeter {
         self.sum_sq += (sample as f64) * (sample as f64);
         self.sample_count += 1;
         if abs_s >= 0.999 {
-            self.clip_count += 1;
+            self.clip_run = self.clip_run.saturating_add(1);
+            if self.clip_run == CLIP_RUN {
+                self.clip_count += 1;
+            }
+        } else {
+            self.clip_run = 0;
         }
 
         let x = sample as f64;
@@ -550,11 +563,32 @@ mod tests {
     #[test]
     fn test_clip_count() {
         let mut m = ChannelMeter::default();
+        // Scattered full-scale samples (normalized digital audio): NOT clips.
         m.update(1.0);
+        m.update(0.5);
         m.update(0.999);
         m.update(-1.0);
         m.update(0.5);
-        assert_eq!(m.clip_count, 3);
+        assert_eq!(m.clip_count, 0, "isolated full-scale samples are not clips");
+
+        // A flat-top run of CLIP_RUN consecutive full-scale samples: one clip.
+        for _ in 0..CLIP_RUN {
+            m.update(1.0);
+        }
+        assert_eq!(m.clip_count, 1);
+
+        // A longer contiguous run still counts as one clip event.
+        for _ in 0..CLIP_RUN + 5 {
+            m.update(-1.0);
+        }
+        assert_eq!(m.clip_count, 1);
+
+        // A separate run after a gap counts as another clip event.
+        m.update(0.5);
+        for _ in 0..CLIP_RUN {
+            m.update(1.0);
+        }
+        assert_eq!(m.clip_count, 2);
     }
 
     #[test]
