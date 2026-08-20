@@ -579,6 +579,11 @@ fn build_pes_video(data: &[u8], pts_90k: u64, dts_90k: u64) -> Vec<u8> {
 }
 
 fn build_pes_audio(data: &[u8], pts_90k: u64) -> Vec<u8> {
+    // PES_packet_length is a 16-bit field (unspecified above 65535, which
+    // audio PES must never be). Largest supported audio frame is 8-channel
+    // s302m: 960 samples × 4 pairs × 7 B + 4 B AES3 header = 26 884 B, far
+    // below the wrap point — guard so a future format can't silently wrap.
+    debug_assert!(3 + 5 + data.len() <= u16::MAX as usize);
     let pes_packet_length = (3 + 5 + data.len()) as u16;
     let mut pes = Vec::with_capacity(9 + 5 + data.len());
     pes.extend_from_slice(&[0x00, 0x00, 0x01, 0xC0]);
