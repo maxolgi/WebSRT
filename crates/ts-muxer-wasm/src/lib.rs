@@ -85,6 +85,9 @@ pub struct TsMuxer {
     sparse_threshold_ms: f64,
     pmt_dirty: bool,
     pmt_resend_count: u32,
+    /// Increments (5 bits, ISO 13818-1 §2.4.4.9) whenever the PMT content
+    /// changes (sparse PID drop/re-add) so receivers pick up the new table.
+    pmt_version: u8,
 }
 
 #[wasm_bindgen]
@@ -116,6 +119,7 @@ impl TsMuxer {
             sparse_threshold_ms: 300.0,
             pmt_dirty: false,
             pmt_resend_count: 0,
+            pmt_version: 0,
         }
     }
 
@@ -314,11 +318,12 @@ impl TsMuxer {
                 stream.suppressed = true;
                 self.pmt_dirty = true;
                 self.pmt_resend_count = PMT_RESEND_COUNT;
+                self.pmt_version = (self.pmt_version + 1) & 0x1F;
             } else if !silent && stream.suppressed {
                 stream.suppressed = false;
-                stream.cc = 0;
                 self.pmt_dirty = true;
                 self.pmt_resend_count = PMT_RESEND_COUNT;
+                self.pmt_version = (self.pmt_version + 1) & 0x1F;
             }
         }
 
@@ -408,7 +413,7 @@ impl TsMuxer {
         s.push(0xB0 | ((section_length >> 8) as u8 & 0x0F));
         s.push((section_length & 0xFF) as u8);
         s.extend_from_slice(&[0x00, 0x01]);
-        s.push(0xC1);
+        s.push(0xC1 | (self.pmt_version << 1));
         s.extend_from_slice(&[0x00, 0x00]);
         s.push(((pcr_pid >> 8) as u8) | 0xE0);
         s.push((pcr_pid & 0xFF) as u8);
@@ -908,6 +913,69 @@ mod tests {
             "expected multiple PMT re-emissions after suppression, got {}",
             pmt_count
         );
+    }
+
+    #[test]
+    fn sparse_resume_keeps_cc_continuous() {
+        let mut m = TsMuxer::new();
+        m.set_video_enabled(false);
+        m.set_audio_codec("s302m", 2);
+        m.set_sparse_enabled(true);
+        // Threshold below one 5 ms frame: the first silent push suppresses
+        // immediately, so resume CC must be exactly last_cc + 1 (mod 16).
+        m.set_sparse_threshold(0.1);
+
+        m.push_pcm(&[0.5_f32; 480], 0.0);
+        let first = m.poll();
+        let last_cc = first
+            .chunks(TS_PACKET_SIZE)
+            .filter(|c| pkt_pid(c) == 0x101)
+            .map(|c| c[3] & 0x0F)
+            .last()
+            .expect("first push emits audio PES");
+
+        for _ in 0..3 {
+            m.push_pcm(&[0.0_f32; 480], 0.0); // suppress past threshold
+        }
+        m.poll();
+        m.push_pcm(&[0.5_f32; 480], 0.0); // resume
+        let out = m.poll();
+
+        let ccs: Vec<u8> = out
+            .chunks(TS_PACKET_SIZE)
+            .filter(|c| pkt_pid(c) == 0x101)
+            .map(|c| c[3] & 0x0F)
+            .collect();
+        assert!(!ccs.is_empty(), "resume must emit audio PES");
+        for (i, &cc) in ccs.iter().enumerate() {
+            assert_eq!(
+                cc,
+                (last_cc + 1 + i as u8) & 0x0F,
+                "CC must continue from pre-suppression value mod 16 (got {ccs:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn sparse_pmt_version_bumps_on_transition() {
+        let mut m = TsMuxer::new();
+        m.set_video_enabled(false);
+        m.set_audio_codec("s302m", 2);
+        m.set_sparse_enabled(true);
+        m.set_sparse_threshold(10.0);
+
+        m.push_pcm(&[0.5_f32; 480], 0.0);
+        let v0 = (last_pmt_section(&m.poll())[5] >> 1) & 0x1F;
+        for _ in 0..3 {
+            m.push_pcm(&[0.0_f32; 480], 0.0);
+        }
+        let v1 = (last_pmt_section(&m.poll())[5] >> 1) & 0x1F;
+        m.push_pcm(&[0.5_f32; 480], 0.0);
+        let v2 = (last_pmt_section(&m.poll())[5] >> 1) & 0x1F;
+
+        assert_eq!(v0, 0, "initial version is 0");
+        assert_eq!(v1, 1, "version must bump when a PID is dropped");
+        assert_eq!(v2, 2, "version must bump when a PID is re-added");
     }
 
     #[test]
