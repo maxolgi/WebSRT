@@ -29,6 +29,11 @@ pub struct ChannelMeter {
     pub sum_sq: f64,
     pub sample_count: u64,
     pub clip_count: u32,
+    /// Values latched at the end of the last window that had samples.
+    /// Snapshot windows with no new audio (bursty PES arrival vs the fixed
+    /// ~50ms poll) re-emit these instead of 0, so meters hold rather than flash.
+    held_peak: f32,
+    held_rms: f32,
     kw1_x1: f64,
     kw1_x2: f64,
     kw1_y1: f64,
@@ -50,6 +55,8 @@ impl Default for ChannelMeter {
             sum_sq: 0.0,
             sample_count: 0,
             clip_count: 0,
+            held_peak: 0.0,
+            held_rms: 0.0,
             kw1_x1: 0.0,
             kw1_x2: 0.0,
             kw1_y1: 0.0,
@@ -135,6 +142,8 @@ pub struct PhaseState {
     sum_ll: f64,
     sum_rr: f64,
     count: u64,
+    /// Correlation latched at the end of the last window that had samples.
+    held: f32,
 }
 
 impl Default for PhaseState {
@@ -144,6 +153,7 @@ impl Default for PhaseState {
             sum_ll: 0.0,
             sum_rr: 0.0,
             count: 0,
+            held: 0.0,
         }
     }
 }
@@ -358,15 +368,22 @@ impl MeterState {
             if let Some(meter) = self.pids.get_mut(&pid) {
                 channel_counts.push(meter.channel_count);
                 for ch in &mut meter.channels {
-                    peaks.push(ch.peak);
-                    rms.push(ch.rms());
+                    if ch.sample_count > 0 {
+                        ch.held_peak = ch.peak;
+                        ch.held_rms = ch.rms();
+                        ch.reset_window();
+                    }
+                    peaks.push(ch.held_peak);
+                    rms.push(ch.held_rms);
                     clips.push(ch.clip_count);
                     lufs.push(ch.lufs());
-                    ch.reset_window();
                 }
                 for pair in &mut meter.phase_pairs {
-                    phase.push(pair.correlation());
-                    pair.reset();
+                    if pair.count > 0 {
+                        pair.held = pair.correlation();
+                        pair.reset();
+                    }
+                    phase.push(pair.held);
                 }
             }
         }
@@ -572,6 +589,33 @@ mod tests {
             (state.pids[&0x100].channels[0].peak - 0.0).abs() < 1e-6,
             "peak should reset after snapshot"
         );
+    }
+
+    #[test]
+    fn test_snapshot_empty_window_holds_values() {
+        let mut state = MeterState::default();
+        state.update(0x100, &[0.5, -0.5, 0.3, -0.3], 2, 0);
+        let first = state.snapshot();
+        assert!((first.peaks[0] - 0.5).abs() < 1e-6);
+
+        // No new PES since the last snapshot: values must hold, not drop to 0.
+        let second = state.snapshot();
+        assert!(
+            (second.peaks[0] - 0.5).abs() < 1e-6,
+            "empty window should hold peak, got {}",
+            second.peaks[0]
+        );
+        assert!(second.rms[0] > 0.0, "empty window should hold rms");
+        assert!(
+            (second.phase[0] + 1.0).abs() < 1e-3,
+            "empty window should hold phase correlation, got {}",
+            second.phase[0]
+        );
+
+        // Genuine silence (samples arrive, all zero) must still read as 0.
+        state.update(0x100, &[0.0, 0.0, 0.0, 0.0], 2, 0);
+        let third = state.snapshot();
+        assert!(third.peaks[0] == 0.0, "real silence should read 0 peak");
     }
 
     #[test]
