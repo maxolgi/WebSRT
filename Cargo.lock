@@ -4789,10 +4789,9 @@ dependencies = [
 name = "ts-muxer-wasm"
 version = "0.1.0"
 dependencies = [
- "mpeg2ts",
  "mpeg2ts-wasm",
+ "ts-muxer",
  "wasm-bindgen",
- "web-time",
 ]
 
 [[package]]
