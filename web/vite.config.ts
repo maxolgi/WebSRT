@@ -12,7 +12,7 @@ import preact from '@preact/preset-vite';
 // Chrome's "not private" warning to proceed.
 //
 // Multi-page entries: index.html (unified viewer; debug panel lazy-loaded),
-// simple.html (minimal viewer), stream.html (publisher).
+// simple.html (minimal viewer), stream.html (publisher), call.html (1:1 call).
 
 export default defineConfig({
   // Relocatable dist: worker wasm URLs resolve relative to the worker script
@@ -29,6 +29,7 @@ export default defineConfig({
         main: resolve(__dirname, 'index.html'),
         simple: resolve(__dirname, 'simple.html'),
         stream: resolve(__dirname, 'stream.html'),
+        call: resolve(__dirname, 'call.html'),
       },
     },
   },
