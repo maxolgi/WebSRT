@@ -9,6 +9,7 @@ use std::collections::HashMap;
 const SAMPLE_RATE: usize = 48000;
 const LUFS_BLOCK_SAMPLES: usize = SAMPLE_RATE / 10;
 const LUFS_BLOCKS: usize = 4;
+const PHASE_SLOTS: usize = 12;
 const FFT_SIZE: usize = 1024;
 const SCOPE_SIZE: usize = 256;
 
@@ -154,7 +155,15 @@ pub struct PhaseState {
     sum_ll: f64,
     sum_rr: f64,
     count: u64,
-    /// Correlation latched at the end of the last window that had samples.
+    /// Correlation over the last PHASE_SLOTS audio windows (~350-400ms at
+    /// typical PES cadence), like the LUFS block ring — a single window's
+    /// correlation swings widely with program dynamics. Display reads the
+    /// ring totals; empty windows neither age nor change it.
+    ring_lr: [f64; PHASE_SLOTS],
+    ring_ll: [f64; PHASE_SLOTS],
+    ring_rr: [f64; PHASE_SLOTS],
+    ring_idx: usize,
+    ring_filled: usize,
     held: f32,
 }
 
@@ -165,6 +174,11 @@ impl Default for PhaseState {
             sum_ll: 0.0,
             sum_rr: 0.0,
             count: 0,
+            ring_lr: [0.0; PHASE_SLOTS],
+            ring_ll: [0.0; PHASE_SLOTS],
+            ring_rr: [0.0; PHASE_SLOTS],
+            ring_idx: 0,
+            ring_filled: 0,
             held: 0.0,
         }
     }
@@ -189,11 +203,31 @@ impl PhaseState {
         c.clamp(-1.0, 1.0) as f32
     }
 
-    fn reset(&mut self) {
+    /// Close the current window into the ring and reset its accumulators.
+    fn push_window(&mut self) {
+        self.ring_lr[self.ring_idx] = self.sum_lr;
+        self.ring_ll[self.ring_idx] = self.sum_ll;
+        self.ring_rr[self.ring_idx] = self.sum_rr;
+        self.ring_idx = (self.ring_idx + 1) % PHASE_SLOTS;
+        if self.ring_filled < PHASE_SLOTS {
+            self.ring_filled += 1;
+        }
         self.sum_lr = 0.0;
         self.sum_ll = 0.0;
         self.sum_rr = 0.0;
         self.count = 0;
+    }
+
+    /// Display correlation: ring totals over the last few windows.
+    fn display_correlation(&self) -> f32 {
+        let lr: f64 = self.ring_lr.iter().sum();
+        let ll: f64 = self.ring_ll.iter().sum();
+        let rr: f64 = self.ring_rr.iter().sum();
+        if self.ring_filled == 0 || ll <= 0.0 || rr <= 0.0 {
+            return self.held;
+        }
+        let c = lr / ((ll * rr).sqrt() + 1e-12);
+        c.clamp(-1.0, 1.0) as f32
     }
 }
 
@@ -396,10 +430,11 @@ impl MeterState {
                 }
                 for pair in &mut meter.phase_pairs {
                     if pair.count > 0 {
-                        pair.held = pair.correlation();
-                        pair.reset();
+                        pair.push_window();
                     }
-                    phase.push(pair.held);
+                    let c = pair.display_correlation();
+                    pair.held = c;
+                    phase.push(c);
                 }
             }
         }
@@ -604,6 +639,40 @@ mod tests {
         assert!(
             (state.pids[&0x100].channels[0].peak - 0.0).abs() < 1e-6,
             "peak should reset after snapshot"
+        );
+    }
+
+    #[test]
+    fn test_phase_ring_averages_windows() {
+        // Alternating mono (+1) and anti-phase (-1) windows: a single-window
+        // phase display swings ±1 every window; the ring average settles ~0.
+        let mut state = MeterState::default();
+        let mono: Vec<f32> = (0..480)
+            .flat_map(|i| {
+                let s = (i as f32 * 0.03).sin() * 0.5;
+                [s, s]
+            })
+            .collect();
+        let anti: Vec<f32> = (0..480)
+            .flat_map(|i| {
+                let s = (i as f32 * 0.03).sin() * 0.5;
+                [s, -s]
+            })
+            .collect();
+        let mut singles = Vec::new();
+        for w in 0..8 {
+            let samples = if w % 2 == 0 { &mono } else { &anti };
+            state.update(0x100, samples, 2, 0);
+            let snap = state.snapshot();
+            singles.push(snap.phase[0]);
+        }
+        // After the ring fills (4 windows), the display must be near 0 and
+        // NOT keep swinging ±1 like a single-window meter.
+        let tail: Vec<f32> = singles[4..].to_vec();
+        let max_abs = tail.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(
+            max_abs < 0.35,
+            "ring-averaged phase should sit near 0, tail max {max_abs} ({tail:?})"
         );
     }
 
