@@ -29,6 +29,12 @@ pub struct ChannelMeter {
     pub sum_sq: f64,
     pub sample_count: u64,
     pub clip_count: u32,
+    /// Peak/RMS latched at the end of the last window that had samples.
+    /// Demux-side PES arrival is bursty vs the ~50ms snapshot poll, so empty
+    /// windows re-emit these instead of 0 (the old worklet meter never saw
+    /// empty windows because it metered consumed playback audio).
+    held_peak: f32,
+    held_rms: f32,
     kw1_x1: f64,
     kw1_x2: f64,
     kw1_y1: f64,
@@ -41,6 +47,10 @@ pub struct ChannelMeter {
     lufs_block_idx: usize,
     lufs_block_samples: usize,
     lufs_block_sum: f64,
+    /// Completed blocks in the ring (saturates at LUFS_BLOCKS). LUFS must
+    /// divide by *filled* samples, not the full window, or it under-reads
+    /// until the ring has wrapped once (same semantics as the worklet meter).
+    lufs_filled_blocks: usize,
 }
 
 impl Default for ChannelMeter {
@@ -62,6 +72,9 @@ impl Default for ChannelMeter {
             lufs_block_idx: 0,
             lufs_block_samples: 0,
             lufs_block_sum: 0.0,
+            lufs_filled_blocks: 0,
+            held_peak: 0.0,
+            held_rms: 0.0,
         }
     }
 }
@@ -103,13 +116,19 @@ impl ChannelMeter {
             self.lufs_block_idx = (self.lufs_block_idx + 1) % LUFS_BLOCKS;
             self.lufs_block_sum = 0.0;
             self.lufs_block_samples = 0;
+            if self.lufs_filled_blocks < LUFS_BLOCKS {
+                self.lufs_filled_blocks += 1;
+            }
         }
     }
 
     fn lufs(&self) -> f32 {
-        let total: f64 = self.lufs_blocks.iter().sum();
-        let window = (LUFS_BLOCKS * LUFS_BLOCK_SAMPLES) as f64;
-        let mean_sq = total / window;
+        let total: f64 = self.lufs_blocks.iter().sum::<f64>() + self.lufs_block_sum;
+        let filled = self.lufs_filled_blocks * LUFS_BLOCK_SAMPLES + self.lufs_block_samples;
+        if filled == 0 {
+            return -70.0;
+        }
+        let mean_sq = total / filled as f64;
         if mean_sq < 1e-12 {
             return -70.0;
         }
@@ -135,6 +154,8 @@ pub struct PhaseState {
     sum_ll: f64,
     sum_rr: f64,
     count: u64,
+    /// Correlation latched at the end of the last window that had samples.
+    held: f32,
 }
 
 impl Default for PhaseState {
@@ -144,6 +165,7 @@ impl Default for PhaseState {
             sum_ll: 0.0,
             sum_rr: 0.0,
             count: 0,
+            held: 0.0,
         }
     }
 }
@@ -181,7 +203,8 @@ pub struct PidMeter {
     pub pes_count: u64,
     pub last_pts: i64,
     phase_pairs: Vec<PhaseState>,
-    scope_ring: Vec<f32>,
+    scope_ring_l: Vec<f32>,
+    scope_ring_r: Vec<f32>,
     scope_idx: usize,
     fft_ring: Vec<f32>,
     fft_idx: usize,
@@ -198,7 +221,8 @@ impl PidMeter {
             pes_count: 0,
             last_pts: -1,
             phase_pairs: (0..pairs).map(|_| PhaseState::default()).collect(),
-            scope_ring: vec![0.0; SCOPE_SIZE],
+            scope_ring_l: vec![0.0; SCOPE_SIZE],
+            scope_ring_r: vec![0.0; SCOPE_SIZE],
             scope_idx: 0,
             fft_ring: vec![0.0; FFT_SIZE],
             fft_idx: 0,
@@ -229,11 +253,16 @@ impl PidMeter {
         }
 
         if selected && (sel_ch as usize) < ch {
+            // Stereo pair partner: L=0/R=1, L=2/R=3, ... The vectorscope needs
+            // both channels of the pair (same as the old worklet meter, which
+            // kept separate L and R rings).
+            let partner = if ch > 1 { sel_ch ^ 1 } else { sel_ch } as usize;
             for i in 0..frames {
-                let s = samples[i * ch + sel_ch as usize];
-                self.scope_ring[self.scope_idx] = s;
+                let base = i * ch;
+                self.scope_ring_l[self.scope_idx] = samples[base + sel_ch as usize];
+                self.scope_ring_r[self.scope_idx] = samples[base + partner];
                 self.scope_idx = (self.scope_idx + 1) % SCOPE_SIZE;
-                self.fft_ring[self.fft_idx] = s;
+                self.fft_ring[self.fft_idx] = samples[base + sel_ch as usize];
                 self.fft_idx = (self.fft_idx + 1) % FFT_SIZE;
             }
         }
@@ -242,13 +271,10 @@ impl PidMeter {
     fn scope(&self) -> (Vec<f32>, Vec<f32>) {
         let mut l = Vec::with_capacity(SCOPE_SIZE);
         let mut r = Vec::with_capacity(SCOPE_SIZE);
-        let ch = self.channel_count as usize;
         for i in 0..SCOPE_SIZE {
             let idx = (self.scope_idx + i) % SCOPE_SIZE;
-            l.push(self.scope_ring[idx]);
-            let partner = if ch > 1 { 1 } else { 0 };
-            r.push(self.scope_ring[idx]);
-            let _ = partner;
+            l.push(self.scope_ring_l[idx]);
+            r.push(self.scope_ring_r[idx]);
         }
         (l, r)
     }
@@ -358,15 +384,22 @@ impl MeterState {
             if let Some(meter) = self.pids.get_mut(&pid) {
                 channel_counts.push(meter.channel_count);
                 for ch in &mut meter.channels {
-                    peaks.push(ch.peak);
-                    rms.push(ch.rms());
+                    if ch.sample_count > 0 {
+                        ch.held_peak = ch.peak;
+                        ch.held_rms = ch.rms();
+                        ch.reset_window();
+                    }
+                    peaks.push(ch.held_peak);
+                    rms.push(ch.held_rms);
                     clips.push(ch.clip_count);
                     lufs.push(ch.lufs());
-                    ch.reset_window();
                 }
                 for pair in &mut meter.phase_pairs {
-                    phase.push(pair.correlation());
-                    pair.reset();
+                    if pair.count > 0 {
+                        pair.held = pair.correlation();
+                        pair.reset();
+                    }
+                    phase.push(pair.held);
                 }
             }
         }
@@ -571,6 +604,89 @@ mod tests {
         assert!(
             (state.pids[&0x100].channels[0].peak - 0.0).abs() < 1e-6,
             "peak should reset after snapshot"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_empty_window_holds_values() {
+        let mut state = MeterState::default();
+        state.update(0x100, &[0.5, -0.5, 0.3, -0.3], 2, 0);
+        let first = state.snapshot();
+        assert!((first.peaks[0] - 0.5).abs() < 1e-6);
+
+        // No new PES since the last snapshot: values must hold, not drop to 0.
+        let second = state.snapshot();
+        assert!(
+            (second.peaks[0] - 0.5).abs() < 1e-6,
+            "empty window should hold peak, got {}",
+            second.peaks[0]
+        );
+        assert!(second.rms[0] > 0.0, "empty window should hold rms");
+        assert!(
+            (second.phase[0] + 1.0).abs() < 1e-3,
+            "empty window should hold phase correlation, got {}",
+            second.phase[0]
+        );
+
+        // Genuine silence (samples arrive, all zero) must still read as 0.
+        state.update(0x100, &[0.0, 0.0, 0.0, 0.0], 2, 0);
+        let third = state.snapshot();
+        assert!(third.peaks[0] == 0.0, "real silence should read 0 peak");
+    }
+
+    #[test]
+    fn test_scope_l_r_are_pair_channels() {
+        let mut m = PidMeter::new(2);
+        // L ramp, R constant — the two rings must carry different channels.
+        let samples: Vec<f32> = (0..SCOPE_SIZE)
+            .flat_map(|i| [i as f32 * 0.01, -0.5])
+            .collect();
+        m.update(&samples, 0, true, 0);
+        let (l, r) = m.scope();
+        let l_max = l.iter().cloned().fold(0.0f32, f32::max);
+        assert!(
+            (l_max - 2.55).abs() < 1e-3,
+            "L ring should hold ch0 ramp, max {l_max}"
+        );
+        assert!(
+            r.iter().all(|&v| (v + 0.5).abs() < 1e-6),
+            "R ring should hold ch1 constant -0.5"
+        );
+
+        // Selecting ch1 swaps the roles.
+        let mut m2 = PidMeter::new(2);
+        m2.update(&samples, 0, true, 1);
+        let (l2, r2) = m2.scope();
+        assert!(l2.iter().all(|&v| (v + 0.5).abs() < 1e-6));
+        let r2_max = r2.iter().cloned().fold(0.0f32, f32::max);
+        assert!((r2_max - 2.55).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_lufs_uses_filled_window() {
+        // 100ms of a 0.5 sine (~-23 LUFS). With the fill-divisor, LUFS after
+        // just 100ms must match the converged value within ~1 dB; dividing by
+        // the full 400ms window would read 6 dB low.
+        let mut state = MeterState::default();
+        let mut samples = Vec::new();
+        for i in 0..4800 {
+            let s = (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / 48000.0).sin() * 0.5;
+            samples.push(s);
+            samples.push(s);
+        }
+        state.update(0x100, &samples, 2, 0);
+        let short = state.snapshot();
+
+        // Converge the ring: 3 more windows of the same signal.
+        for _ in 0..3 {
+            state.update(0x100, &samples, 2, 0);
+        }
+        let converged = state.snapshot();
+        assert!(
+            (short.lufs[0] - converged.lufs[0]).abs() < 1.0,
+            "partial-window LUFS {} should match converged {} within 1dB",
+            short.lufs[0],
+            converged.lufs[0]
         );
     }
 
