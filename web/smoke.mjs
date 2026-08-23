@@ -15,6 +15,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MPEG2TS_PKG = path.join(__dirname, '..', 'crates', 'mpeg2ts-wasm', 'pkg');
 const SRT_PKG = path.join(__dirname, '..', 'crates', 'srt-wasm', 'pkg');
 const FIXTURE = path.join(__dirname, '..', 'fixtures', 'test.ts');
+if (!fs.existsSync(FIXTURE)) {
+  console.error(`FAIL: fixture missing: ${FIXTURE}`);
+  console.error('Generate it with: ./fixtures/make-fixture.sh');
+  process.exit(1);
+}
 
 async function loadPkg(pkgDir, name) {
   // wasm-pack -t web produces ESM that imports the .wasm file via fetch + URL.
