@@ -449,7 +449,7 @@ demonstrations of the crate surfaces, not ends in themselves.
   iterations don't require recompiling.
 - **`web/` pages** — viewer page (player SDK + optional debug overlay with
   8 analysis tabs), publisher page (screen capture → WebCodecs encode →
-  `ts-muxer-wasm` → SRT over WT), and a stripped-down simple viewer.
+  `ts-muxer-wasm` → SRT over WT).
 
 ### Run with the test fixture (no OBS required)
 
@@ -760,7 +760,6 @@ WebSRT/
     ts-muxer-wasm/            # wasm-bindgen wrapper around the publisher-side TS muxer (video, Opus/AAC, PCM push)
   web/
     index.html                # default page — loads pages/viewer.ts (player SDK + lazy debug panel)
-    simple.html               # stripped-down page — loads main.ts (no debug panel)
     stream.html               # publisher page — loads stream.tsx
     package.json              # web-UI toolchain (TypeScript, Preact, Chart.js)
     vite.config.ts            # multi-page HTTPS build config
@@ -769,7 +768,6 @@ WebSRT/
     pcm-roundtrip.mjs         # PCM round-trip + MessagePort semantics test
     pcm-port-bench.mjs        # PCM relay vs direct-MessagePort jitter benchmark
     src/
-      main.ts                 # simple-page entry: thin UI wrapper around mountPlayer()
       pages/
         viewer.ts             # default-page entry: mountPlayer + opt-in debug panel (lazy-loaded)
       player/

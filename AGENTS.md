@@ -176,7 +176,6 @@ Browser runs the **same** `srt-protocol` + `mpeg2ts` Rust crates compiled to WAS
 - `crates/srt-wasm/src/lib.rs` — `SrtReceiver` wraps `Listen` → `DuplexConnection`. State in `RefCell`. `handle_datagram(bytes, now_us)` + `poll(now_us)` return `Vec<SrtAction>`.
 - `web/src/decode.ts` — H.264 SPS parser (exp-Golomb, High profile), avcC builder, `VideoPipeline`, `OpusAudioPipeline`, `AacAudioPipeline`. AudioWorklet fallback when `MediaStreamTrackGenerator` unavailable.
 - `web/src/worker.ts` — Web Worker: runs SrtReceiver + Demuxer off main thread. Datagrams batched (up to 16) before processing. Polls SRT state machine every 10ms.
-- `web/src/main.ts` — WT connect, PMT codec detection (AAC 0x0F vs Opus 0x06), connect/stop button state, auto-reconnect with backoff.
 - `crates/mpeg2ts-wasm/src/lib.rs` — browser-side TS demuxer (WASM). `TsDemuxer.feed(bytes)` emits `TsEvent`s (PAT/PMT/PES/RA/error). `debug_snapshot()` returns aggregated per-PID analysis: CC errors, TS header flags, PCR interval/jitter, NAL frame-type counts (I/P/B via exp-Golomb slice header parse), packet ring (500 events), error ring. All analysis in Rust; JS renders.
 - `crates/mpeg2ts-wasm/src/nal.rs` — NAL parser: start-code scanner, H.264/HEVC nal_unit_type classification, exp-Golomb slice_type → I/P/B.
 - `web/src/debug/components/DemuxTab.tsx` — 8th debug panel tab: program table, elementary streams, PTS/DTS, CC errors, TS header flags, PCR, NAL frame-type breakdown, error log. Driven by `store.demuxStats` (mirrors `DebugSnapshot`).
