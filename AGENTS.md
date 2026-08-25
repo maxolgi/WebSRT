@@ -170,12 +170,14 @@ Browser runs the **same** `srt-protocol` + `mpeg2ts` Rust crates compiled to WAS
 - `crates/websrt/src/gateway.rs` — high-level `Gateway` builder: WT accept loop, session spawn, viewer cap, graceful drain.
 - `crates/websrt/src/session.rs` — per-browser session: dual-task split (recv_pump + sender_pump) sharing `SrtInitiator` via `Arc<Mutex<_>>`. LossInjector (sim-loss feature) lives here.
 - `crates/websrt/src/srt_sender.rs` — wraps `srt_protocol::Connect` → `DuplexConnection`. `drain()` captures `Action::UpdateStatistics` into `last_stats`.
-- `crates/websrt-gateway/src/main.rs` — reference binary: CLI parse, `--no-gui` branching, `run_gateway()` (cert, cert-hash.js, ingester, health server, gateway run task).
-- `crates/websrt-gateway/src/gui.rs` — eframe (egui) GUI app: config form mirroring all CLI options, Start/Stop buttons, live stats from `GatewayStatsHandle`, scrolling log panel. Falls back to CLI if no display.
+- `crates/websrt-gateway/src/main.rs` — reference binary: CLI parse, `--no-gui` branching, `run_gateway()` (cert, cert-hash.js, ingester, axum health server, gateway run task).
+- `crates/websrt-gateway/src/gui.rs` — eframe (egui) GUI app: config form mirroring all CLI options, Start/Stop buttons, live stats from `GatewayStatsHandle`, scrolling log panel. Falls back to CLI if no display. Secrets (`srt_passphrase`, `auth_token`) are deliberately `#[serde(skip)]` — never persisted to the config file.
 - `crates/websrt-gateway/src/log_buffer.rs` — `LogBuffer` ring buffer + `MakeWriter` impl for capturing tracing output into the GUI log panel (second `fmt` layer alongside stdout).
 - `crates/srt-wasm/src/lib.rs` — `SrtReceiver` wraps `Listen` → `DuplexConnection`. State in `RefCell`. `handle_datagram(bytes, now_us)` + `poll(now_us)` return `Vec<SrtAction>`.
 - `web/src/decode.ts` — H.264 SPS parser (exp-Golomb, High profile), avcC builder, `VideoPipeline`, `OpusAudioPipeline`, `AacAudioPipeline`. AudioWorklet fallback when `MediaStreamTrackGenerator` unavailable.
 - `web/src/worker.ts` — Web Worker: runs SrtReceiver + Demuxer off main thread. Datagrams batched (up to 16) before processing. Polls SRT state machine every 10ms.
+- `web/src/shared/publish.ts` — logic shared by the publisher pages (`stream.tsx`, `call.tsx`): codec auto-detection, capture AudioWorklet graph, credit-based frame pump, debug-panel resizer, pub-stats formatting.
+- `web/src/shared/worklets.ts` — the two PCM player worklet sources. They have DIFFERENT message contracts (`{planes}` vs `{samples, channelCount}`) — do not merge without unifying the wire protocol.
 - `crates/mpeg2ts-wasm/src/lib.rs` — browser-side TS demuxer (WASM). `TsDemuxer.feed(bytes)` emits `TsEvent`s (PAT/PMT/PES/RA/error). `debug_snapshot()` returns aggregated per-PID analysis: CC errors, TS header flags, PCR interval/jitter, NAL frame-type counts (I/P/B via exp-Golomb slice header parse), packet ring (500 events), error ring. All analysis in Rust; JS renders.
 - `crates/mpeg2ts-wasm/src/nal.rs` — NAL parser: start-code scanner, H.264/HEVC nal_unit_type classification, exp-Golomb slice_type → I/P/B.
 - `web/src/debug/components/DemuxTab.tsx` — 8th debug panel tab: program table, elementary streams, PTS/DTS, CC errors, TS header flags, PCR, NAL frame-type breakdown, error log. Driven by `store.demuxStats` (mirrors `DebugSnapshot`).
@@ -196,6 +198,7 @@ Gateway runs under supervisord (must use `--no-gui` in the supervisord config):
 - `--cert-mode self` (default): self-signed ECDSA, browser connects with `serverCertificateHashes` (Chrome only)
 - `--cert-mode mkcert`: loads PEM files, browser uses normal PKI (Firefox compatible)
 - The cert hash changes on every restart — browser must reload page to pick up new hash
+- Persisted cert/key PEMs (`~/.config/websrt/gateway-{cert,key}.pem`) are chmod 0600 on unix at write time and best-effort at startup reuse.
 
 ## Gotchas
 
