@@ -309,6 +309,21 @@ fn config_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(format!("{home}/.config/websrt"))
 }
 
+/// Best-effort chmod 0600 on PEM files (cert + key contain private material).
+/// Never fails the caller; logs a warning per file on unix if chmod fails.
+#[cfg(unix)]
+fn restrict_pem_perms(paths: &[&std::path::Path]) {
+    use std::os::unix::fs::PermissionsExt;
+    for path in paths {
+        let perms = std::fs::Permissions::from_mode(0o600);
+        if let Err(e) = std::fs::set_permissions(path, perms) {
+            tracing::warn!(?e, path = %path.display(), "failed to restrict PEM file permissions to 0600");
+        }
+    }
+}
+#[cfg(not(unix))]
+fn restrict_pem_perms(_paths: &[&std::path::Path]) {}
+
 /// Build cert, write cert-hash.js, build gateway, spawn health server, wire
 /// ingester, then spawn `gateway.run()` as a background task.
 ///
@@ -329,6 +344,7 @@ pub(crate) async fn run_gateway(
             // browser's cert exception / cert-hash pinning stays stable.
             if cert_path.exists() && key_path.exists() {
                 tracing::info!("reusing persisted self-signed cert");
+                restrict_pem_perms(&[&cert_path, &key_path]);
                 CertSource::Mkcert {
                     cert: cert_path.clone(),
                     key: key_path.clone(),
@@ -386,6 +402,7 @@ pub(crate) async fn run_gateway(
                     "failed to persist self-signed cert; will regenerate next start"
                 );
             } else {
+                restrict_pem_perms(&[&cert_path, &key_path]);
                 tracing::info!(
                     "persisted self-signed cert to {} + {}",
                     cert_path.display(),

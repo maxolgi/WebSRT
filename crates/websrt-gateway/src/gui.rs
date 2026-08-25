@@ -52,9 +52,13 @@ struct GuiConfig {
     cert_pem: String,
     key_pem: String,
     latency: u64,
+    /// Skipped by serde: secrets must not be persisted in plaintext config.
+    #[serde(skip)]
     srt_passphrase: String,
     health_port: u16,
     health_bind: String,
+    /// Skipped by serde: secrets must not be persisted in plaintext config.
+    #[serde(skip)]
     auth_token: String,
     no_web: bool,
     web_port: u16,
