@@ -24,7 +24,7 @@ struct Cli {
 }
 
 const TS_PACKET: usize = 188;
-const PAYLOAD_BYTES: usize = 1100;
+const PAYLOAD_BYTES: usize = websrt::srt_sender::PAYLOAD_SIZE as usize;
 const PACKETS_PER_MESSAGE: usize = PAYLOAD_BYTES / TS_PACKET;
 
 #[tokio::main]
