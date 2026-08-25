@@ -213,7 +213,7 @@ export function AudioTab({ store }: Props): JSX.Element {
         style={{ font: 'inherit', fontSize: '11px', marginLeft: '4px' }}
       >
         {Array.from({ length: ch }, (_, i) => (
-          <option value={i}>{i}</option>
+          <option key={i} value={i}>{i}</option>
         ))}
       </select>
     </span>
@@ -227,6 +227,7 @@ export function AudioTab({ store }: Props): JSX.Element {
       >
         {SUB_TABS.map((t) => (
           <button
+            key={t.id}
             class={`debug-tab ${subTab === t.id ? 'active' : ''}`}
             onClick={() => setSubTab(t.id)}
           >

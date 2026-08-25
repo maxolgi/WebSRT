@@ -38,6 +38,7 @@ export function DebugPanel({ store }: Props) {
       <div class="debug-tabs">
         {TABS.map((t) => (
           <button
+            key={t.id}
             class={`debug-tab ${activeTab === t.id ? 'active' : ''}`}
             onClick={() => { store.activeTab.value = t.id }}
           >

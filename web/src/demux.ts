@@ -2,6 +2,7 @@
 // collect demux events, hand them to callbacks.
 
 import init, { TsDemuxer, type TsEvent, type DebugSnapshot } from '../wasm/mpeg2ts-wasm/mpeg2ts_wasm.js';
+import type { AudioMeterData } from './shared/types';
 
 let initPromise: Promise<unknown> | null = null;
 export async function ensureMpeg2tsWasm(): Promise<void> {
@@ -51,7 +52,7 @@ export class Demuxer {
     return this.demux.debugSnapshot();
   }
 
-  meterSnapshot(): any {
+  meterSnapshot(): AudioMeterData {
     const s = this.demux.meter_snapshot();
     const view = {
       pids: Array.from(s.pids),

@@ -144,7 +144,7 @@ export function PacketTimeline({ store }: Props): JSX.Element {
           onChange={(e) => setKindFilter(e.currentTarget.value)}
         >
           {KIND_OPTIONS.map((o) => (
-            <option value={o.value}>{o.label}</option>
+            <option key={o.value} value={o.value}>{o.label}</option>
           ))}
         </select>
         <input

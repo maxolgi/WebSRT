@@ -335,7 +335,7 @@ export function formatPubStats(srt: StatsMsg, enc: EncodeStats, targetFps: numbe
   const txMB = (srt.txBytes / 1e6).toFixed(1);
   return (
     `<span class="${enc.fps >= targetFps - 5 ? 'ok' : 'err'}">${enc.fps} fps</span>` +
-    ` | encode: ${enc.encodeMs.toFixed(1)}ms` +
+    ` | encode submit: ${enc.encodeMs.toFixed(1)}ms` +
     ` | queue: ${enc.queueDepth}` +
     ` | <span class="info">\u2191${txMbps} Mbps</span>` +
     ` | sent: ${txMB} MB` +

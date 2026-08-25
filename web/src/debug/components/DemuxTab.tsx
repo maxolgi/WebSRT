@@ -73,6 +73,7 @@ export function DemuxTab({ store }: Props): JSX.Element {
       >
         {SUB_TABS.map((t) => (
           <button
+            key={t.id}
             class={`debug-tab ${subTab === t.id ? 'active' : ''}`}
             onClick={() => setSubTab(t.id)}
           >
