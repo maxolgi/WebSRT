@@ -192,6 +192,7 @@ export function PacketTimeline({ store }: Props): JSX.Element {
                 <th style={{ width: W_SIZE }}>Size</th>
                 <th class="pkt-c-nal">NAL</th>
                 <th style={{ width: W_FLAGS }}>Flags</th>
+                <th></th>
               </tr>
             </thead>
             <tbody style={{ paddingTop: topSpacer, paddingBottom: botSpacer }}>
@@ -270,7 +271,8 @@ function Row({
         {tei && <span class="pkt-badge pkt-badge-bad">TEI</span>}
         {ra && <span class="pkt-badge pkt-badge-good">RA</span>}
       </td>
-      <span class="pkt-actions">
+      <td>
+        <span class="pkt-actions">
         <button
           class="pkt-mini"
           title="Copy packet JSON"
@@ -282,6 +284,7 @@ function Row({
           onClick={(e) => { e.stopPropagation(); onFilter(); }}
         >Filter</button>
       </span>
+      </td>
     </tr>
   );
 }
