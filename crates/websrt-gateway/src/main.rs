@@ -20,6 +20,9 @@ mod log_buffer;
 mod web_server;
 
 use anyhow::{Context, Result};
+use axum::extract::State;
+use axum::routing::get;
+use axum::{Json, Router};
 use clap::{Parser, ValueEnum};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -36,6 +39,7 @@ use websrt::ingest::{SrtListenerService, TsContinuityChecker, TsStatsHandle};
 use websrt::{Gateway, GatewayStatsHandle};
 
 use log_buffer::{BufferMaker, LogBuffer};
+use serde_json::json;
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CertMode {
@@ -524,9 +528,12 @@ pub(crate) async fn run_gateway(
             }
         }
         let stats_handle = gateway.stats_handle();
+        let ts_stats = ts_stats.clone();
+        let app = Router::new()
+            .route("/health", get(health_handler))
+            .with_state((Arc::new(stats_handle), ts_stats));
         let bind = cli.health_bind.clone();
         let port = cli.health_port;
-        let ts_stats = ts_stats.clone();
         let health_shutdown = shutdown.clone();
         tokio::spawn(async move {
             let listener = match tokio::net::TcpListener::bind((bind.as_str(), port)).await {
@@ -537,102 +544,14 @@ pub(crate) async fn run_gateway(
                 }
             };
             tracing::info!(port, "health server listening");
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = health_shutdown.notified() => {
-                        tracing::info!("health server shutting down");
-                        break;
-                    }
-                    accept_result = listener.accept() => {
-                        match accept_result {
-                            Ok((mut stream, _addr)) => {
-                        let stats = stats_handle.stats();
-                        let per_stream: String = stats
-                            .per_stream
-                            .iter()
-                            .map(|s| {
-                                format!(
-                                    r#"{{"name":"{}","alive":{},"viewers":{},"messages_sent":{},"send_failures":{}}}"#,
-                                    json_escape(&s.name),
-                                    s.alive,
-                                    s.viewers,
-                                    s.messages_sent,
-                                    s.send_failures,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        let per_session: String = stats
-                            .per_session
-                            .iter()
-                            .map(|s| {
-                                let srt = s.srt.as_ref();
-                                format!(
-                                    r#"{{"session_id":{},"stream":"{}","tx_data":{},"tx_buffered":{},"tx_retransmit":{},"tx_loss":{},"rtt_ms":{},"messages_pushed":{},"viewer_lag":{}}}"#,
-                                    s.session_id,
-                                    json_escape(&s.stream_name),
-                                    srt.map(|v| v.tx_data).unwrap_or(0),
-                                    srt.map(|v| v.tx_buffered).unwrap_or(0),
-                                    srt.map(|v| v.tx_retransmit).unwrap_or(0),
-                                    srt.map(|v| v.tx_loss).unwrap_or(0),
-                                    srt.and_then(|v| v.tx_rtt.map(|d| d.as_millis() as u64)).unwrap_or(0),
-                                    s.messages_pushed,
-                                    s.viewer_lag_count,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        let ingester_json = {
-                            let stats_map = ts_stats.lock().unwrap();
-                            if stats_map.is_empty() {
-                                "null".to_string()
-                            } else {
-                                let entries: Vec<String> = stats_map
-                                    .iter()
-                                    .map(|(name, h)| {
-                                        format!(
-                                            r#""{}":{{"cc_gaps":{},"cc_checks":{},"messages_seen":{}}}"#,
-                                            json_escape(name),
-                                            h.cc_gaps(),
-                                            h.cc_checks(),
-                                            h.messages_seen(),
-                                        )
-                                    })
-                                    .collect();
-                                format!("{{{}}}", entries.join(","))
-                            }
-                        };
-                        let json = format!(
-                            r#"{{"status":"{}","streams":{},"alive_streams":{},"viewers":{},"max_viewers":{},"per_stream":[{}],"per_session":[{}],"ticker":{{"count":{},"avg_us":{},"max_us":{}}},"ingester":{}}}"#,
-                            if stats.alive_streams > 0 { "ok" } else { "no_source" },
-                            stats.streams,
-                            stats.alive_streams,
-                            stats.total_viewers,
-                            stats.max_viewers,
-                            per_stream,
-                            per_session,
-                            stats.ticker_count,
-                            stats.ticker_avg_us,
-                            stats.ticker_max_us,
-                            ingester_json,
-                        );
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            json.len(),
-                            json,
-                        );
-                        use tokio::io::AsyncWriteExt;
-                        let _ = stream.write_all(response.as_bytes()).await;
-                        let _ = stream.flush().await;
-                    }
-                            Err(e) => {
-                                tracing::warn!(?e, "health accept error");
-                                continue;
-                            }
-                        }
-                    }
-                }
+            if let Err(e) = axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    health_shutdown.notified().await;
+                    tracing::info!("health server shutting down");
+                })
+                .await
+            {
+                tracing::warn!(?e, "health server failed");
             }
         });
     }
@@ -748,18 +667,82 @@ pub(crate) async fn run_gateway(
     Ok((stats_handle, task))
 }
 
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
+type HealthState = (
+    Arc<GatewayStatsHandle>,
+    Arc<Mutex<HashMap<String, TsStatsHandle>>>,
+);
+
+/// GET /health — gateway + ingester stats as JSON.
+async fn health_handler(
+    State((stats_handle, ts_stats)): State<HealthState>,
+) -> Json<serde_json::Value> {
+    let stats = stats_handle.stats();
+    let per_stream: Vec<serde_json::Value> = stats
+        .per_stream
+        .iter()
+        .map(|s| {
+            json!({
+                "name": s.name,
+                "alive": s.alive,
+                "viewers": s.viewers,
+                "messages_sent": s.messages_sent,
+                "send_failures": s.send_failures,
+            })
+        })
+        .collect();
+    let per_session: Vec<serde_json::Value> = stats
+        .per_session
+        .iter()
+        .map(|s| {
+            let srt = s.srt.as_ref();
+            json!({
+                "session_id": s.session_id,
+                "stream": s.stream_name,
+                "tx_data": srt.map(|v| v.tx_data).unwrap_or(0),
+                "tx_buffered": srt.map(|v| v.tx_buffered).unwrap_or(0),
+                "tx_retransmit": srt.map(|v| v.tx_retransmit).unwrap_or(0),
+                "tx_loss": srt.map(|v| v.tx_loss).unwrap_or(0),
+                "rtt_ms": srt.and_then(|v| v.tx_rtt).map(|d| d.as_millis() as u64).unwrap_or(0),
+                "messages_pushed": s.messages_pushed,
+                "viewer_lag": s.viewer_lag_count,
+            })
+        })
+        .collect();
+    // Short std::sync::Mutex lock, no await while held.
+    let ingester = {
+        let stats_map = ts_stats.lock().unwrap();
+        if stats_map.is_empty() {
+            serde_json::Value::Null
+        } else {
+            let entries: serde_json::Map<String, serde_json::Value> = stats_map
+                .iter()
+                .map(|(name, h)| {
+                    (
+                        name.clone(),
+                        json!({
+                            "cc_gaps": h.cc_gaps(),
+                            "cc_checks": h.cc_checks(),
+                            "messages_seen": h.messages_seen(),
+                        }),
+                    )
+                })
+                .collect();
+            serde_json::Value::Object(entries)
         }
-    }
-    out
+    };
+    Json(json!({
+        "status": if stats.alive_streams > 0 { "ok" } else { "no_source" },
+        "streams": stats.streams,
+        "alive_streams": stats.alive_streams,
+        "viewers": stats.total_viewers,
+        "max_viewers": stats.max_viewers,
+        "per_stream": per_stream,
+        "per_session": per_session,
+        "ticker": {
+            "count": stats.ticker_count,
+            "avg_us": stats.ticker_avg_us,
+            "max_us": stats.ticker_max_us,
+        },
+        "ingester": ingester,
+    }))
 }
