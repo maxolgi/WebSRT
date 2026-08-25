@@ -461,6 +461,7 @@ mod tests {
         assert!(c.validate().is_ok());
     }
 
+    #[test]
     fn send_buffer_boundary_100000_ok() {
         let mut c = SrtConfig::default();
         c.send_buffer_size = 100_000;
