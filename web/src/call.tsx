@@ -6,6 +6,14 @@ import { mountPlayer } from './player';
 import type { PlayerHandle, PlayerState, PlayerErrorDetail, PlayerResizeDetail } from './player';
 import type { PublishCmd, PublishMsg, EncodeStats } from './stream-worker';
 import type { StatsMsg } from './worker';
+import {
+  detectCodec,
+  AudioGraphManager,
+  FramePump,
+  attachDebugResizer,
+  formatPubStats,
+  hexToBytes,
+} from './shared/publish';
 
 // 1:1 video call page. Same building blocks as stream.html, re-targeted:
 //   - publishes webcam+mic via stream-worker.ts (unchanged)
@@ -46,52 +54,11 @@ const debugRoot = document.getElementById('debug-root') as HTMLDivElement;
 
 // ─── Debug panel (reused from viewer/stream) ──────────────────────
 
-const PANEL_MIN_W = 320;
-const PANEL_MAX_W_RATIO = 0.85;
-const resizer = document.createElement('div');
-resizer.className = 'debug-resizer visible';
-document.body.appendChild(resizer);
-
-function syncResizerPosition() {
-  const w = debugRoot.offsetWidth;
-  resizer.style.right = `${w}px`;
-  document.body.style.paddingRight = `${w + 16}px`;
+const debugResizer = attachDebugResizer({
+  debugRoot,
   // Fixed-position call view ignores body padding — inset it explicitly.
-  callEl.style.right = `${w}px`;
-}
-
-{
-  const savedW = localStorage.getItem('websrt-debug-width');
-  if (savedW) debugRoot.style.width = `${savedW}px`;
-
-  let dragging = false;
-  resizer.addEventListener('mousedown', (e) => {
-    e.preventDefault();
-    dragging = true;
-    resizer.classList.add('dragging');
-    document.body.classList.add('resizing');
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  });
-  window.addEventListener('mousemove', (e) => {
-    if (!dragging) return;
-    const maxW = window.innerWidth * PANEL_MAX_W_RATIO;
-    const w = Math.min(maxW, Math.max(PANEL_MIN_W, window.innerWidth - e.clientX));
-    debugRoot.style.width = `${w}px`;
-    resizer.style.right = `${w}px`;
-    document.body.style.paddingRight = `${w + 16}px`;
-    callEl.style.right = `${w}px`;
-  });
-  window.addEventListener('mouseup', () => {
-    if (!dragging) return;
-    dragging = false;
-    resizer.classList.remove('dragging');
-    document.body.classList.remove('resizing');
-    document.body.style.cursor = '';
-    document.body.style.userSelect = '';
-    localStorage.setItem('websrt-debug-width', String(debugRoot.offsetWidth));
-  });
-}
+  onResize: () => { callEl.style.right = `${debugRoot.offsetWidth}px`; },
+});
 
 const store = new DebugStore();
 let panelMounted = false;
@@ -106,7 +73,7 @@ function setPanelVisible(visible: boolean) {
   debugRoot.classList.toggle('visible', visible);
   document.body.classList.toggle('debug-open', visible);
   if (visible) {
-    syncResizerPosition();
+    debugResizer.sync();
     localStorage.setItem('websrt-debug-open', '1');
     if (!panelMounted) {
       render(<DebugPanel store={store} />, debugRoot);
@@ -126,9 +93,19 @@ let worker: Worker | null = null;
 let captureStream: MediaStream | null = null;
 let publishing = false;
 let capturing = false;
-let credits = 0;
-let rafId: number | null = null;
-let bgWorker: Worker | null = null;
+let detectedCodec: string | null = null;
+
+const audio = new AudioGraphManager((msg) => log(msg, 'err'));
+
+const framePump = new FramePump({
+  getPreviewEl: () => previewEl,
+  isPublishing: () => publishing && worker !== null,
+  postFrame: (frame) => {
+    const cmd: PublishCmd = { cmd: 'frame', frame };
+    worker!.postMessage(cmd, [frame]);
+  },
+  getFps: () => CALL_FPS,
+});
 
 // Seat-claim state
 let room = '';
@@ -142,56 +119,9 @@ let pbHandle: PlayerHandle | null = null;
 let pbStream = '';
 
 // Audio
-let audioCtx: AudioContext | null = null;
-let workletNode: AudioWorkletNode | null = null;
 let micMuted = false;
 let camOff = false;
-
-const TIMER_WORKER_SRC = `
-let id = null;
-onmessage = (e) => {
-  if (typeof e.data === 'number') {
-    if (id) clearInterval(id);
-    id = setInterval(() => postMessage('tick'), e.data);
-  } else if (e.data === 'stop') {
-    if (id) { clearInterval(id); id = null; }
-  }
-};
-`;
-let detectedCodec: string | null = null;
 let detectedCodecLabel = '';
-
-// ─── Codec auto-detection (from stream.tsx) ───────────────────────
-
-const CODEC_CANDIDATES = [
-  { label: 'AV1', codec: 'av01.0.08M.08' },
-  { label: 'H.264', codec: 'avc1.640028' },
-];
-
-async function detectCodec(width: number, height: number, framerate: number, bitrate: number): Promise<string | null> {
-  for (const c of CODEC_CANDIDATES) {
-    try {
-      const cfg: VideoEncoderConfig = {
-        codec: c.codec,
-        width,
-        height,
-        bitrate: bitrate * 1_000_000,
-        framerate,
-        hardwareAcceleration: 'prefer-hardware',
-      };
-      if (!c.codec.startsWith('av01')) {
-        (cfg as unknown as Record<string, unknown>).avc = { format: 'annexb' };
-      }
-      const probe = await VideoEncoder.isConfigSupported(cfg);
-      if (probe.supported) {
-        detectedCodec = c.codec;
-        detectedCodecLabel = c.label;
-        return c.codec;
-      }
-    } catch { /* try next */ }
-  }
-  return null;
-}
 
 // ─── Device enumeration ───────────────────────────────────────────
 
@@ -242,94 +172,6 @@ function populateCameraSelect() {
     cameraSelect.appendChild(opt.cloneNode(true) as HTMLOptionElement);
   }
   cameraSelect.value = current || cameraOptions[0]?.value || '';
-}
-
-// ─── AudioWorklet capture (from stream.tsx) ───────────────────────
-
-const CAPTURE_WORKLET = `
-class CaptureProcessor extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    this.frameSize = 960;
-    this.buffers = [];
-  }
-  process(inputs) {
-    const input = inputs[0];
-    if (!input || input.length === 0) return true;
-    const ch = input.length;
-    for (let c = 0; c < ch; c++) {
-      if (!this.buffers[c]) this.buffers[c] = [];
-      for (let i = 0; i < input[c].length; i++) {
-        this.buffers[c].push(input[c][i]);
-      }
-    }
-    while (this.buffers[0] && this.buffers[0].length >= this.frameSize) {
-      const numCh = this.buffers.length;
-      const out = new Float32Array(numCh * this.frameSize);
-      for (let c = 0; c < numCh; c++) {
-        const slice = this.buffers[c].splice(0, this.frameSize);
-        out.set(slice, c * this.frameSize);
-      }
-      this.port.postMessage(
-        { data: out, channels: numCh, time: currentTime },
-        [out.buffer]
-      );
-    }
-    return true;
-  }
-}
-registerProcessor('capture-processor', CaptureProcessor);
-`;
-
-async function setupAudioGraph(): Promise<void> {
-  if (audioCtx) return;
-
-  const Ctx = window.AudioContext || (window as unknown as Window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-  audioCtx = new Ctx({ sampleRate: 48000 });
-
-  const blob = new Blob([CAPTURE_WORKLET], { type: 'application/javascript' });
-  await audioCtx.audioWorklet.addModule(URL.createObjectURL(blob));
-
-  workletNode = new AudioWorkletNode(audioCtx, 'capture-processor', {
-    numberOfInputs: 1,
-    numberOfOutputs: 1,
-    outputChannelCount: [2],
-    channelCount: 2,
-    channelCountMode: 'explicit',
-  });
-  const silence = audioCtx.createGain();
-  silence.gain.value = 0;
-  workletNode.connect(silence);
-  silence.connect(audioCtx.destination);
-}
-
-let audioSourceNode: MediaStreamAudioSourceNode | null = null;
-let micStream: MediaStream | null = null;
-
-async function connectAudioSource() {
-  if (!audioCtx || !workletNode) return;
-  const src = audioSourceSelect.value;
-  if (!src) return;
-  try {
-    micStream = await navigator.mediaDevices.getUserMedia({
-      audio: { deviceId: { exact: src } },
-    });
-    // Apply pending mute state to the freshly acquired mic.
-    applyMicMute();
-    audioSourceNode = audioCtx.createMediaStreamSource(micStream);
-    audioSourceNode.connect(workletNode);
-  } catch (e) {
-    log(`Audio source failed: ${e}`, 'err');
-  }
-}
-
-function disconnectAudioSource() {
-  try { audioSourceNode?.disconnect(); } catch {}
-  audioSourceNode = null;
-  if (micStream) {
-    micStream.getTracks().forEach((t) => t.stop());
-    micStream = null;
-  }
 }
 
 // ─── Webcam capture ───────────────────────────────────────────────
@@ -389,9 +231,11 @@ async function startCapture(pairMic = true): Promise<void> {
   const h = settings?.height ?? 720;
   log(`Camera captured ${w}x${h}`, 'info');
 
-  const codec = await detectCodec(w, h, CALL_FPS, CALL_BITRATE_MBPS);
-  if (codec) {
-    log(`Codec auto-detected: ${detectedCodecLabel} (${codec})`, 'info');
+  const detected = await detectCodec(w, h, CALL_FPS, CALL_BITRATE_MBPS);
+  if (detected) {
+    detectedCodec = detected.codec;
+    detectedCodecLabel = detected.label;
+    log(`Codec auto-detected: ${detected.label} (${detected.codec})`, 'info');
   } else {
     log('No supported codec found!', 'err');
   }
@@ -415,58 +259,6 @@ cameraSelect.addEventListener('change', async () => {
     log(`Camera switch failed: ${e}`, 'err');
   }
 });
-
-// ─── Frame pump (from stream.tsx) ─────────────────────────────────
-
-function startFramePump() {
-  credits = 4;
-  pumpFrame();
-}
-
-function pumpFrame() {
-  if (!publishing || !worker) return;
-  if (credits > 0 && previewEl.readyState >= 2) {
-    const frame = new VideoFrame(previewEl);
-    if (frame.format === null) {
-      frame.close();
-    } else {
-      credits--;
-      const cmd: PublishCmd = { cmd: 'frame', frame };
-      worker.postMessage(cmd, [frame]);
-    }
-  }
-  schedulePump();
-}
-
-function schedulePump() {
-  if (!publishing) return;
-  if (document.hidden) {
-    if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
-    if (bgWorker === null) {
-      bgWorker = new Worker(URL.createObjectURL(new Blob([TIMER_WORKER_SRC], { type: 'application/javascript' })));
-      bgWorker.onmessage = () => pumpFrame();
-      bgWorker.postMessage(1000 / CALL_FPS);
-    }
-  } else {
-    if (bgWorker !== null) { bgWorker.terminate(); bgWorker = null; }
-    if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
-    rafId = 'requestVideoFrameCallback' in previewEl
-      ? (previewEl as unknown as { requestVideoFrameCallback: (cb: FrameRequestCallback) => number })
-        .requestVideoFrameCallback(pumpFrame as FrameRequestCallback)
-      : requestAnimationFrame(pumpFrame);
-  }
-}
-
-function stopFramePump() {
-  if (rafId !== null) {
-    cancelAnimationFrame(rafId);
-    rafId = null;
-  }
-  if (bgWorker !== null) {
-    bgWorker.terminate();
-    bgWorker = null;
-  }
-}
 
 // ─── Seat-claim publish loop ──────────────────────────────────────
 
@@ -518,10 +310,7 @@ async function trySeat(seat: number, attemptGen: number): Promise<void> {
   if (ch) transfer.push(ch.buffer as ArrayBuffer);
   worker.postMessage(cmd, transfer);
 
-  if (workletNode) {
-    const port = workletNode.port;
-    worker.postMessage({ cmd: 'audio-port', port } as PublishCmd, [port]);
-  }
+  audio.transferPort(worker);
 
   log(`Publishing to ${publishStream} (${chosenCodec.startsWith('av01') ? 'AV1' : 'H.264'} ${width}x${height} @${CALL_FPS}fps ${CALL_BITRATE_MBPS}Mbps)`, 'info');
 }
@@ -564,7 +353,7 @@ function handlePublishMsg(msg: PublishMsg, attemptGen: number) {
       log(msg.msg, msg.cls);
       break;
     case 'credit':
-      credits++;
+      framePump.credit();
       break;
     case 'wtReady':
       log('WT connected', 'ok');
@@ -575,14 +364,14 @@ function handlePublishMsg(msg: PublishMsg, attemptGen: number) {
       log(`SRT handshake complete — seat ${claimedSeat} claimed`, 'ok');
       setStatus('LIVE');
       callStatus(`seat ${claimedSeat} — waiting for peer…`);
-      startFramePump();
+      framePump.start();
       mountRemote(seatStreamName(claimedSeat === 1 ? 2 : 1));
       break;
     case 'close':
       log('SRT closed', 'err');
       setStatus('closed');
       callStatus('connection lost');
-      stopFramePump();
+      framePump.stop();
       break;
     case 'wtClosed':
       if (claimedSeat === 0) {
@@ -593,7 +382,7 @@ function handlePublishMsg(msg: PublishMsg, attemptGen: number) {
         else log('WT closed', 'info');
         setStatus('disconnected');
         callStatus('disconnected');
-        stopFramePump();
+        framePump.stop();
       }
       break;
     case 'stats':
@@ -646,7 +435,7 @@ speakerBtn.addEventListener('click', () => {
 // ─── Mic / camera toggles ─────────────────────────────────────────
 
 function applyMicMute() {
-  const tracks = micStream?.getAudioTracks() ?? [];
+  const tracks = audio.getMicStream()?.getAudioTracks() ?? [];
   for (const t of tracks) t.enabled = !micMuted;
   micBtn.textContent = micMuted ? 'mic off' : 'mic on';
   micBtn.classList.toggle('muted', micMuted);
@@ -739,9 +528,9 @@ joinBtn.addEventListener('click', async () => {
   callStatus('joining…');
 
   // Audio graph + mic (Join click = user gesture → AudioContext runs).
-  await setupAudioGraph();
-  await connectAudioSource();
-  if (audioCtx?.state === 'suspended') await audioCtx.resume();
+  await audio.setup();
+  await audio.connect(audioSourceSelect.value, { onMicAcquired: applyMicMute });
+  await audio.resumeIfSuspended();
 
   claimedSeat = 0;
   const attemptGen = ++claimGen;
@@ -752,7 +541,7 @@ hangupBtn.addEventListener('click', () => stopAll());
 
 function stopAll() {
   publishing = false;
-  stopFramePump();
+  framePump.stop();
   claimGen++;
   claimedSeat = 0;
   tryingSeat = 0;
@@ -768,13 +557,8 @@ function stopAll() {
   pbHandle?.destroy();
   pbHandle = null;
   pbStream = '';
-  disconnectAudioSource();
-  if (audioCtx) {
-    try { audioCtx.close(); } catch {}
-    audioCtx = null;
-  }
-  workletNode = null;
-  credits = 0;
+  audio.close();
+  framePump.resetCredits();
   // Reset device toggles for the next join.
   micMuted = false;
   micBtn.textContent = 'mic on';
@@ -797,27 +581,7 @@ function stopAll() {
 // ─── Stats line (from stream.tsx) ─────────────────────────────────
 
 function updateEncodeStats(srt: StatsMsg, enc: EncodeStats) {
-  const txMbps = (srt.bandwidthBps / 1e6).toFixed(1);
-  const txMB = (srt.txBytes / 1e6).toFixed(1);
-  pubStatsText.innerHTML =
-    `<span class="${enc.fps >= CALL_FPS - 5 ? 'ok' : 'err'}">${enc.fps} fps</span>` +
-    ` | encode: ${enc.encodeMs.toFixed(1)}ms` +
-    ` | queue: ${enc.queueDepth}` +
-    ` | <span class="info">\u2191${txMbps} Mbps</span>` +
-    ` | sent: ${txMB} MB` +
-    ` | RTT: ${srt.rttMs.toFixed(0)}ms` +
-    ` | loss: ${srt.txLoss}`;
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────
-
-function hexToBytes(hex: string): Uint8Array {
-  const clean = hex.replace(/[:\s]/g, '');
-  const out = new Uint8Array(clean.length / 2);
-  for (let i = 0; i < out.length; i++) {
-    out[i] = parseInt(clean.substring(i * 2, i * 2 + 2), 16);
-  }
-  return out;
+  pubStatsText.innerHTML = formatPubStats(srt, enc, CALL_FPS);
 }
 
 // ─── Misc handlers ────────────────────────────────────────────────
@@ -827,7 +591,7 @@ document.getElementById('debug-toggle')?.addEventListener('click', () => {
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (publishing) schedulePump();
+  if (publishing) framePump.schedule();
 });
 
 // ─── Init ─────────────────────────────────────────────────────────
