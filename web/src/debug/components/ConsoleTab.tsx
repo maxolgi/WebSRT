@@ -15,11 +15,14 @@ export function ConsoleTab({ store }: Props) {
   useEffect(() => {
     if (!erudaContainer || loaded) return
     let cancelled = false
+    let ownsInit = false
+    let eruda: (typeof import('eruda'))['default'] | null = null
     ;(async () => {
       try {
-        const eruda = (await import('eruda')).default
+        eruda = (await import('eruda')).default
         if (cancelled) return
         eruda.init({ container: erudaContainer })
+        ownsInit = true
         setLoaded(true)
       } catch (e) {
         console.error('Failed to load Eruda:', e)
@@ -27,9 +30,11 @@ export function ConsoleTab({ store }: Props) {
     })()
     return () => {
       cancelled = true
-      try {
-        import('eruda').then((m) => m.default.destroy()).catch(() => {})
-      } catch {}
+      if (ownsInit) {
+        try {
+          eruda?.destroy()
+        } catch {}
+      }
     }
   }, [erudaContainer, loaded])
 
