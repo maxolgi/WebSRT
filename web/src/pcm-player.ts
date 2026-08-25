@@ -12,92 +12,7 @@
 // the demuxer, not here.
 
 import type { AudioMeterData } from './shared/types';
-
-const PCM_PLAYER_WORKLET = `
-class PcmPlayerProcessor extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    this.CAP = 24000;
-    this.rings = [];
-    this.heads = [];
-    this.tails = [];
-    this.counts = [];
-    this.channelCount = 2;
-
-    this.port.onmessage = (e) => {
-      const msg = e.data;
-      const samples = msg.samples;
-      const ch = msg.channelCount || 2;
-      if (this.rings.length !== ch) {
-        this.channelCount = ch;
-        this.rings = [];
-        this.heads = [];
-        this.tails = [];
-        this.counts = [];
-        for (let i = 0; i < ch; i++) {
-          this.rings.push(new Float32Array(this.CAP));
-          this.heads.push(0);
-          this.tails.push(0);
-          this.counts.push(0);
-        }
-      }
-      const frames = (samples.length / ch) | 0;
-      for (let i = 0; i < frames; i++) {
-        for (let c = 0; c < ch; c++) {
-          const tail = this.tails[c];
-          const ring = this.rings[c];
-          if (this.counts[c] >= this.CAP) {
-            this.heads[c] = (this.heads[c] + 1) % this.CAP;
-            this.counts[c]--;
-          }
-          ring[tail] = samples[i * ch + c];
-          this.tails[c] = (tail + 1) % this.CAP;
-          this.counts[c]++;
-        }
-      }
-    };
-  }
-
-  process(inputs, outputs) {
-    const output = outputs[0];
-    const framesNeeded = output[0].length;
-    const ch = output.length;
-
-    // Defensive: rings not allocated yet (no audio received). Zero output
-    // until the first feed arrives and sizes the per-channel buffers.
-    if (this.rings.length !== ch) {
-      for (let c = 0; c < ch; c++) {
-        for (let i = 0; i < framesNeeded; i++) output[c][i] = 0;
-      }
-      return true;
-    }
-
-    for (let c = 0; c < ch; c++) {
-      const ring = this.rings[c];
-      let head = this.heads[c];
-      let count = this.counts[c];
-      // Skip ahead if the ring has drifted far past one quantum + slack,
-      // keeping latency bounded without dropping the whole buffer.
-      if (count > framesNeeded + 2400) {
-        const skip = count - framesNeeded - 2400;
-        head = (head + skip) % this.CAP;
-        count -= skip;
-      }
-      const toRead = Math.min(framesNeeded, count);
-      const out = output[c];
-      for (let i = 0; i < framesNeeded; i++) {
-        out[i] = i < toRead ? ring[head] : 0;
-        if (i < toRead) head = (head + 1) % this.CAP;
-      }
-      this.heads[c] = head;
-      this.counts[c] = count - toRead;
-    }
-
-    return true;
-  }
-}
-registerProcessor('pcm-player', PcmPlayerProcessor);
-`;
+import { PCM_PLAYER_WORKLET_FRAMES } from './shared/worklets';
 
 export class PcmPlayer {
   private audioCtx: AudioContext | null = null;
@@ -125,7 +40,7 @@ export class PcmPlayer {
     if (this.audioCtx.state === 'suspended') {
       await this.audioCtx.resume().catch(() => {});
     }
-    const blob = new Blob([PCM_PLAYER_WORKLET], { type: 'application/javascript' });
+    const blob = new Blob([PCM_PLAYER_WORKLET_FRAMES], { type: 'application/javascript' });
     await this.audioCtx.audioWorklet.addModule(URL.createObjectURL(blob));
     this.workletNode = new AudioWorkletNode(this.audioCtx, 'pcm-player', {
       numberOfInputs: 0,

@@ -12,6 +12,7 @@
 // payload length-prefixed (4-byte big-endian) instead of Annex B start codes.
 
 import { looksLikeAv1 } from './shared/av1';
+import { PCM_PLAYER_WORKLET_PLANES } from './shared/worklets';
 
 export interface DecoderCallbacks {
   onFrame: (frame: VideoFrame) => void;
@@ -1356,7 +1357,7 @@ abstract class AudioPipelineBase {
     const Ctx = (window.AudioContext || (window as unknown as Window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext);
     this.audioCtx = new Ctx({ sampleRate: this.sampleRate });
 
-    const blob = new Blob([PCM_PLAYER_WORKLET], { type: 'application/javascript' });
+    const blob = new Blob([PCM_PLAYER_WORKLET_PLANES], { type: 'application/javascript' });
     await this.audioCtx.audioWorklet.addModule(URL.createObjectURL(blob));
 
     this.workletNode = new AudioWorkletNode(this.audioCtx!, 'pcm-player', {
@@ -1456,77 +1457,6 @@ abstract class AudioPipelineBase {
     this.generator = null;
   }
 }
-
-/** AudioWorklet processor: receives Float32 planes via port, plays them out. */
-const PCM_PLAYER_WORKLET = `
-class PcmPlayerProcessor extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    this.queues = [];
-    this.heads = [];
-    this.tails = [];
-    this.counts = [];
-    this.CAP = 24000;
-    this.port.onmessage = (e) => {
-      const planes = e.data.planes;
-      for (let ch = 0; ch < planes.length; ch++) {
-        if (!this.queues[ch]) {
-          this.queues[ch] = new Float32Array(this.CAP);
-          this.heads[ch] = 0;
-          this.tails[ch] = 0;
-          this.counts[ch] = 0;
-        }
-        const incoming = planes[ch];
-        const q = this.queues[ch];
-        let tail = this.tails[ch];
-        let count = this.counts[ch];
-        for (let i = 0; i < incoming.length; i++) {
-          if (count >= this.CAP) {
-            this.heads[ch] = (this.heads[ch] + 1) % this.CAP;
-            count--;
-          }
-          q[tail] = incoming[i];
-          tail = (tail + 1) % this.CAP;
-          count++;
-        }
-        this.tails[ch] = tail;
-        this.counts[ch] = count;
-      }
-    };
-  }
-  process(inputs, outputs) {
-    const output = outputs[0];
-    const framesNeeded = output[0].length;
-    for (let ch = 0; ch < output.length; ch++) {
-      if (!this.queues[ch]) {
-        for (let i = 0; i < framesNeeded; i++) output[ch][i] = 0;
-        continue;
-      }
-      let head = this.heads[ch];
-      let count = this.counts[ch];
-      if (count > framesNeeded + 2400) {
-        const skip = count - framesNeeded - 2400;
-        head = (head + skip) % this.CAP;
-        count -= skip;
-      }
-      const q = this.queues[ch];
-      const toRead = Math.min(framesNeeded, count);
-      for (let i = 0; i < framesNeeded; i++) {
-        if (i < toRead) {
-          output[ch][i] = q[head];
-          head = (head + 1) % this.CAP;
-        } else {
-          output[ch][i] = 0;
-        }
-      }
-      this.heads[ch] = head;
-      this.counts[ch] = count - toRead;
-    }
-    return true;
-  }
-}
-registerProcessor('pcm-player', PcmPlayerProcessor);
-`;
 
 export class OpusAudioPipeline extends AudioPipelineBase {
 
