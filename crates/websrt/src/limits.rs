@@ -207,11 +207,15 @@ impl ConnectionTracker {
     /// Try to acquire a session slot. Returns `Some(guard)` if within limits,
     /// or `None` if the per-IP or global cap would be exceeded. IPv6 addresses
     /// are tracked by their /64 prefix.
+    ///
+    /// Concurrency guarantee: the per-IP and global caps are enforced
+    /// atomically. The entire acquire decision runs under the `per_ip` mutex,
+    /// which also serializes global-counter updates — concurrent callers can
+    /// never transiently overshoot either cap.
     pub fn try_acquire(self: &Arc<Self>, ip: IpAddr) -> Option<SessionGuard> {
         let key = limit_key(ip);
         let mut per_ip = self.per_ip.lock();
         let current_ip = per_ip.get(&key).copied().unwrap_or(0);
-        let current_total = self.total.load(Ordering::Relaxed);
 
         if let Some(max_per_ip) = self.limits.max_sessions_per_ip {
             if current_ip as usize >= max_per_ip {
@@ -219,13 +223,16 @@ impl ConnectionTracker {
             }
         }
         if let Some(max_total) = self.limits.max_sessions {
-            if current_total >= max_total {
+            let new_total = self.total.fetch_add(1, Ordering::Relaxed) + 1;
+            if new_total > max_total {
+                self.total.fetch_sub(1, Ordering::Relaxed);
                 return None;
             }
+        } else {
+            self.total.fetch_add(1, Ordering::Relaxed);
         }
 
         per_ip.insert(key, current_ip + 1);
-        self.total.fetch_add(1, Ordering::Relaxed);
 
         Some(SessionGuard {
             tracker: Arc::clone(self),
@@ -498,5 +505,42 @@ mod tests {
             .handshake_timeout(Duration::from_secs(60))
             .build();
         assert!(l.is_ok());
+    }
+
+    // Concurrent try_acquire calls must never overshoot the global cap: all
+    // decisions run under the per_ip mutex, so exactly `max_sessions` of N
+    // racing callers win.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_try_acquire_never_overshoots_global_cap() {
+        let limits = GatewayLimits::builder()
+            .max_sessions(10)
+            .max_sessions_per_ip(None)
+            .build()
+            .unwrap();
+        let tracker = Arc::new(ConnectionTracker::new(limits));
+
+        const N: usize = 50;
+        let mut handles = Vec::with_capacity(N);
+        for n in 0..N {
+            let tracker = Arc::clone(&tracker);
+            handles.push(tokio::spawn(async move {
+                let addr = IpAddr::V4(Ipv4Addr::new(10, 0, (n / 256) as u8, (n % 256) as u8));
+                tracker.try_acquire(addr)
+            }));
+        }
+
+        let mut guards = Vec::new();
+        for handle in handles {
+            if let Some(guard) = handle.await.unwrap() {
+                guards.push(guard);
+            }
+        }
+
+        assert_eq!(guards.len(), 10, "exactly max_sessions acquires succeed");
+        assert!(
+            tracker.total() <= 10,
+            "global cap must not be exceeded: {}",
+            tracker.total()
+        );
     }
 }
