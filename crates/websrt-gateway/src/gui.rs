@@ -761,3 +761,62 @@ fn web_host(web_bind: &str) -> String {
         other => other.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> GuiConfig {
+        GuiConfig {
+            srt_port: 9000,
+            srt_streamid: String::new(),
+            wt_port: 4433,
+            bind: "0.0.0.0".into(),
+            cert_mode: CertMode::Self_,
+            cert_pem: String::new(),
+            key_pem: String::new(),
+            latency: 120,
+            srt_passphrase: "super-secret-passphrase".into(),
+            health_port: 0,
+            health_bind: "127.0.0.1".into(),
+            auth_token: "super-secret-token".into(),
+            no_web: false,
+            web_port: 5173,
+            web_bind: "0.0.0.0".into(),
+            max_viewers: 16,
+            max_bandwidth: 0,
+        }
+    }
+
+    /// Regression guard for the serde(skip) fields: secrets must never reach
+    /// the plaintext config file, neither as values nor as keys.
+    #[test]
+    fn secrets_are_not_serialized() {
+        let json = serde_json::to_string(&test_config()).unwrap();
+        assert!(
+            !json.contains("super-secret-passphrase"),
+            "passphrase value leaked into serialized config"
+        );
+        assert!(
+            !json.contains("super-secret-token"),
+            "auth token value leaked into serialized config"
+        );
+        assert!(
+            !json.contains("srt_passphrase") && !json.contains("auth_token"),
+            "secret field names should be absent from serialized config"
+        );
+    }
+
+    /// Round-trip through the on-disk format: the saved JSON carries no secret
+    /// keys, so a reload must yield empty-string defaults while non-secret
+    /// fields survive.
+    #[test]
+    fn round_trip_yields_empty_secret_defaults() {
+        let json = serde_json::to_string(&test_config()).unwrap();
+        let parsed: GuiConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.srt_passphrase, "");
+        assert_eq!(parsed.auth_token, "");
+        assert_eq!(parsed.wt_port, 4433);
+        assert_eq!(parsed.latency, 120);
+    }
+}
