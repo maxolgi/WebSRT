@@ -47,6 +47,10 @@ async fn main() -> anyhow::Result<()> {
 
     let settings = ConnInitSettings::default();
     let mut listen = Listen::new(settings, false);
+    // The gateway always initiates with a Conclusion-first (skip-induction)
+    // handshake over WebTransport; without this flag the listener rejects it
+    // ("Expected Induction (1) packet") and the probe can never connect.
+    listen.allow_skip_induction(true);
     let mut duplex: Option<DuplexConnection> = None;
 
     let mut msgs: u64 = 0;
