@@ -308,26 +308,6 @@ fn run_gui(cli: Cli, log_buffer: Arc<LogBuffer>) -> Result<()> {
     }
 }
 
-fn config_dir() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(format!("{home}/.config/websrt"))
-}
-
-/// Best-effort chmod 0600 on PEM files (cert + key contain private material).
-/// Never fails the caller; logs a warning per file on unix if chmod fails.
-#[cfg(unix)]
-fn restrict_pem_perms(paths: &[&std::path::Path]) {
-    use std::os::unix::fs::PermissionsExt;
-    for path in paths {
-        let perms = std::fs::Permissions::from_mode(0o600);
-        if let Err(e) = std::fs::set_permissions(path, perms) {
-            tracing::warn!(?e, path = %path.display(), "failed to restrict PEM file permissions to 0600");
-        }
-    }
-}
-#[cfg(not(unix))]
-fn restrict_pem_perms(_paths: &[&std::path::Path]) {}
-
 /// Build cert, write cert-hash.js, build gateway, spawn health server, wire
 /// ingester, then spawn `gateway.run()` as a background task.
 ///
@@ -337,32 +317,20 @@ pub(crate) async fn run_gateway(
     cli: Cli,
     shutdown: Arc<Notify>,
 ) -> Result<(GatewayStatsHandle, JoinHandle<Result<()>>)> {
-    let cert_dir = config_dir();
-    let _ = std::fs::create_dir_all(&cert_dir);
-    let cert_path = cert_dir.join("gateway-cert.pem");
-    let key_path = cert_dir.join("gateway-key.pem");
-
+    // Self-signed mode ALWAYS generates a fresh cert on every boot — nothing
+    // is persisted to disk. wtransport's self-signed certs are only valid for
+    // 14 days, so reusing them across restarts eventually bricks every
+    // browser client with CERTIFICATE_VERIFY_FAILED once the pinned cert
+    // expires. The cost is that the cert hash changes per restart and
+    // viewers must reload the page (cert-hash.js is rewritten below).
     let cert_src = match cli.cert_mode {
-        CertMode::Self_ => {
-            // Try to reuse a previously-generated self-signed cert so the
-            // browser's cert exception / cert-hash pinning stays stable.
-            if cert_path.exists() && key_path.exists() {
-                tracing::info!("reusing persisted self-signed cert");
-                restrict_pem_perms(&[&cert_path, &key_path]);
-                CertSource::Mkcert {
-                    cert: cert_path.clone(),
-                    key: key_path.clone(),
-                }
-            } else {
-                CertSource::SelfSigned {
-                    sans: vec![
-                        "localhost".to_string(),
-                        "127.0.0.1".to_string(),
-                        "::1".to_string(),
-                    ],
-                }
-            }
-        }
+        CertMode::Self_ => CertSource::SelfSigned {
+            sans: vec![
+                "localhost".to_string(),
+                "127.0.0.1".to_string(),
+                "::1".to_string(),
+            ],
+        },
         CertMode::Mkcert => {
             let cert_pem = cli
                 .cert_pem
@@ -379,42 +347,7 @@ pub(crate) async fn run_gateway(
         }
     };
 
-    let mut cert = Cert::build(cert_src).await?;
-
-    // A persisted self-signed cert is loaded via the Mkcert code path
-    // (CertSource::Mkcert), so the builder doesn't set der_sha256. Recompute
-    // it so the browser can pin via serverCertificateHashes. Real mkcert /
-    // letsencrypt certs (CertMode::Mkcert) must NOT get a hash — the browser
-    // must use normal PKI validation, and serverCertificateHashes imposes a
-    // 2-week validity cap that public-CA certs exceed.
-    if cli.cert_mode == CertMode::Self_ && cert.der_sha256.is_none() {
-        if let Some(leaf) = cert.identity.certificate_chain().as_slice().first() {
-            cert.der_sha256 = Some(*leaf.hash().as_ref());
-        }
-    }
-
-    // Persist newly-generated self-signed cert for reuse across restarts.
-    if cli.cert_mode == CertMode::Self_ && !cert_path.exists() {
-        if let Some(leaf) = cert.identity.certificate_chain().as_slice().first() {
-            let cert_pem = leaf.to_pem();
-            let key_pem = cert.identity.private_key().to_secret_pem();
-            if let Err(e) = std::fs::write(&cert_path, &cert_pem)
-                .and_then(|()| std::fs::write(&key_path, &key_pem))
-            {
-                tracing::warn!(
-                    ?e,
-                    "failed to persist self-signed cert; will regenerate next start"
-                );
-            } else {
-                restrict_pem_perms(&[&cert_path, &key_path]);
-                tracing::info!(
-                    "persisted self-signed cert to {} + {}",
-                    cert_path.display(),
-                    key_path.display()
-                );
-            }
-        }
-    }
+    let cert = Cert::build(cert_src).await?;
 
     // Write cert-hash.js so the browser knows which mode we're in.
     let hash_file = {

@@ -195,10 +195,9 @@ Gateway runs under supervisord (must use `--no-gui` in the supervisord config):
 
 ## Cert modes
 
-- `--cert-mode self` (default): self-signed ECDSA, browser connects with `serverCertificateHashes` (Chrome only)
+- `--cert-mode self` (default): self-signed ECDSA, **regenerated on every boot — never persisted to disk** (wtransport self-signed certs expire after 14 days; persisting them bricks clients once expired)
 - `--cert-mode mkcert`: loads PEM files, browser uses normal PKI (Firefox compatible)
 - The cert hash changes on every restart — browser must reload page to pick up new hash
-- Persisted cert/key PEMs (`~/.config/websrt/gateway-{cert,key}.pem`) are chmod 0600 on unix at write time and best-effort at startup reuse.
 
 ## Gotchas
 
