@@ -291,10 +291,22 @@ the two-week rotation automatically:
 
 ```ts
 // server-side (Node/etc.): fetch the hash from the gateway, TLS unchecked
+// (closed-network target — see TLS policy below)
 const resp = await fetch('https://encoder.lan:5173/cert-hash.js'); // or read a shared file
 // inject <script>window.CERT_HASH = "..."</script> into the page, OR
 // render the hex string into the mountPlayer({ certHash }) call.
 ```
+
+**TLS policy for the server-side fetch.** Disabling certificate verification
+on the proxy hop is acceptable **only when the target is on a closed
+network** — a loopback/private/link-local IP, `localhost`, a dotless
+hostname, or a `.local`/`.lan`/`.internal` name. Public hostnames must be
+fetched with **strict PKI validation**: an internet-facing deployment has a
+real (CA-issued) certificate, so there is nothing to pin and no reason to
+accept an invalid one. An open `danger_accept_invalid_certs` on public
+targets turns the proxy into a TLS-unchecked fetch primitive. Reference
+implementations gate this with a `closed_network_host()` check on the target
+host (SlopShady `slopshady/src/server.rs`, CakeMix `cakemix-server/src/main.rs`).
 
 ### Where the backend gets the hash and WT port (no new endpoint needed)
 
@@ -305,7 +317,8 @@ The hash and the WebTransport port are both exposed server-side today:
 - **The `cert-hash.js` file** the gateway writes at boot
   (`web/public/cert-hash.js`), readable on a shared filesystem or fetchable
   from the encoder's existing web server with TLS verification disabled
-  server-side (e.g. `curl -k https://encoder.lan:5173/cert-hash.js`). It sets
+  server-side (e.g. `curl -k https://encoder.lan:5173/cert-hash.js` —
+  closed-network targets only, see the TLS policy above). It sets
   **two** globals: `window.CERT_HASH` (the DER SHA-256 hex, or `null` in
   mkcert mode) and `window.WT_PORT` (the gateway's actual `--wt-port`). A
   proxy that knows only the web origin can therefore discover the WT port

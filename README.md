@@ -744,7 +744,7 @@ WebSRT/
           continuity.rs       # TsContinuityChecker: read-only MPEG-TS CC gap probe
     websrt-gateway/           # application: native GUI + CLI wrapper around the library
       src/
-        main.rs               # CLI parsing, cert persistence, cert-hash.js writing, Gateway::run()
+        main.rs               # CLI parsing, cert setup, cert-hash.js writing, Gateway::run()
         gui.rs                # eframe/egui app: config form (persisted), Start/Stop, stats, logs
         log_buffer.rs         # LogBuffer ring buffer + tracing writer for the GUI log panel
         web_server.rs         # built-in HTTPS server, web/dist/ embedded via rust-embed
@@ -834,9 +834,9 @@ latency buffer.
 - `performance.now()` epoch mismatch: browser uses `web_time::Instant`
   (Performance API), gateway uses `std::time::Instant`. SRT protocol handles
   this via timestamp fields in packets + clock sync during handshake.
-- The self-signed cert is **persisted** (`~/.config/websrt/gateway-cert.pem` +
-  `gateway-key.pem`), so the cert hash is **stable across restarts**. Delete
-  both files and restart to rotate — then reload the browser page.
+- The self-signed cert is **regenerated on every boot — never persisted**,
+  so the cert hash **rotates on every restart**. Reload the browser page
+  after a gateway restart to pick up the fresh hash from `cert-hash.js`.
 - **Don't raise `PAYLOAD_SIZE` (1128 = 6×188, TS-aligned).** Chrome silently
   drops browser→gateway datagrams larger than ~1200 bytes — the write resolves
   with no error, so it fails invisibly. 1128 + SRT header stays under the cap.
@@ -866,8 +866,9 @@ name.
   payload is treated as one Opus packet (ffmpeg's default). AAC/ADTS is the
   default for OBS and is fully supported.
 - **2-week cert validity** (self-signed mode) — `serverCertificateHashes`
-  imposes a 14-day cap. The cert is persisted and reused across restarts;
-  delete `~/.config/websrt/gateway-cert.pem` + `gateway-key.pem` to regenerate.
+  imposes a 14-day cap. The cert is regenerated on every boot (never
+  persisted) and the hash rotates with it — reload the page after a gateway
+  restart. Use mkcert mode (or a real CA) for a stable identity.
 - **No SRT encryption** between gateway and browser (WebTransport TLS replaces
   it). The OBS-to-gateway link supports optional AES encryption via
   `--srt-passphrase` (10–79 chars); disabled by default.
