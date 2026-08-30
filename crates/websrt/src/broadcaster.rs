@@ -40,6 +40,18 @@ impl RateSampler {
     }
 }
 
+/// Error returned by [`ViewerRx::try_recv`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewerRxError {
+    /// The receiver lagged behind the broadcast ring by `n` messages (they
+    /// were overwritten). Receiving may continue; the missed messages are gone.
+    Lagged(u64),
+    /// The broadcast channel closed: the stream's source ended and all
+    /// buffered messages have been drained. No further messages will ever
+    /// arrive — the viewer session should tear down.
+    Closed,
+}
+
 /// One viewer's subscription. Holds a `broadcast::Receiver`. Each browser
 /// session owns one of these and polls it for messages to feed into its
 /// SRT sender.
@@ -143,7 +155,7 @@ impl Broadcaster {
             alive_task.store(false, Ordering::SeqCst);
             // Drop the task's Sender clone, then clear the Broadcaster's copy so
             // the broadcast channel closes and every ViewerRx::try_recv()
-            // returns Ok(None) instead of hanging until the SRT idle timeout.
+            // returns Err(Closed) instead of hanging until the SRT idle timeout.
             drop(tx2);
             *bc_clone.tx.lock() = None;
             tracing::info!(sent, "broadcaster task exited");
@@ -241,13 +253,14 @@ impl Broadcaster {
 
 impl ViewerRx {
     /// Non-async try-receive: returns Ok(Some) if a message was immediately
-    /// available, Ok(None) if empty, Err(n) if lagged `n` messages.
-    pub fn try_recv(&mut self) -> Result<Option<TsMessage>, u64> {
+    /// available, Ok(None) if empty, Err(Lagged(n)) if lagged `n` messages,
+    /// Err(Closed) if the stream's source has ended (and the buffer drained).
+    pub fn try_recv(&mut self) -> Result<Option<TsMessage>, ViewerRxError> {
         match self.rx.try_recv() {
             Ok(m) => Ok(Some(m)),
             Err(broadcast::error::TryRecvError::Empty) => Ok(None),
-            Err(broadcast::error::TryRecvError::Lagged(n)) => Err(n),
-            Err(broadcast::error::TryRecvError::Closed) => Ok(None),
+            Err(broadcast::error::TryRecvError::Lagged(n)) => Err(ViewerRxError::Lagged(n)),
+            Err(broadcast::error::TryRecvError::Closed) => Err(ViewerRxError::Closed),
         }
     }
 
@@ -259,8 +272,8 @@ impl ViewerRx {
     pub fn drop_backlog(&mut self) {
         loop {
             match self.try_recv() {
-                Ok(Some(_)) | Err(_) => continue,
-                Ok(None) => break,
+                Ok(Some(_)) | Err(ViewerRxError::Lagged(_)) => continue,
+                Ok(None) | Err(ViewerRxError::Closed) => break,
             }
         }
     }

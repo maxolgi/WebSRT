@@ -230,6 +230,7 @@ impl StreamRegistry {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::broadcaster::ViewerRxError;
     use crate::ingest::TsMessage;
     use bytes::Bytes;
     use std::time::Instant;
@@ -241,13 +242,14 @@ pub(crate) mod tests {
         loop {
             match viewer.try_recv() {
                 Ok(Some(m)) => return Some(m),
+                Err(ViewerRxError::Closed) => return None,
                 Ok(None) => {
                     if std::time::Instant::now() >= deadline {
                         return None;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                 }
-                Err(lag) => panic!("viewer lagged: {}", lag),
+                Err(ViewerRxError::Lagged(lag)) => panic!("viewer lagged: {}", lag),
             }
         }
     }

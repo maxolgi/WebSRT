@@ -16,7 +16,7 @@
 //!   `.await`. Both lockers always acquire them in the same order
 //!   (initiator → loss) so there is no deadlock cycle.
 
-use crate::broadcaster::ViewerRx;
+use crate::broadcaster::{ViewerRx, ViewerRxError};
 use crate::ingest::TsMessage;
 use crate::session::{route_release_data, send_action, LossInjector};
 use crate::srt_sender::SrtInitiator;
@@ -224,13 +224,28 @@ impl SessionRegistry {
                                 entry.messages_pushed.fetch_add(1, Ordering::Relaxed);
                             }
                             Some(Ok(None)) => break,
-                            Some(Err(lag)) => {
+                            Some(Err(ViewerRxError::Lagged(lag))) => {
                                 tracing::warn!(
                                     session_id = entry.session_id,
                                     lag,
                                     "viewer lagged; messages dropped"
                                 );
                                 entry.viewer_lag_count.fetch_add(1, Ordering::Relaxed);
+                                break;
+                            }
+                            Some(Err(ViewerRxError::Closed)) => {
+                                // Stream source ended. Tear down the viewer
+                                // session (same path as the SRT Close action
+                                // below): recv_pump closes the WT connection,
+                                // which the browser surfaces as `wtClosed` so
+                                // its auto-reconnect can resubscribe.
+                                tracing::info!(
+                                    session_id = entry.session_id,
+                                    stream = %entry.stream_name,
+                                    "stream ended; closing viewer session"
+                                );
+                                entry.finished.store(true, Ordering::Relaxed);
+                                entry.shutdown.notify_waiters();
                                 break;
                             }
                             None => break,
@@ -694,6 +709,46 @@ mod tests {
         );
 
         bc.shutdown();
+        server.close(0u32.into(), b"");
+    }
+
+    #[tokio::test]
+    #[ignore = "real QUIC loopback — run locally: cargo test -- --ignored"]
+    async fn tick_all_closes_viewer_session_when_stream_ends() {
+        use crate::broadcaster::Broadcaster;
+        use crate::ingest::ChannelIngester;
+
+        let (server, addr, hash) = make_test_server().await;
+        let conn = accept_one_conn(&server, hash, addr.port()).await;
+        let streams = StreamRegistry::new(4, 8);
+
+        let (bc_tx, bc_rx) = tokio::sync::mpsc::channel::<TsMessage>(16);
+        let ingester = ChannelIngester::new(bc_rx);
+        let bc = Broadcaster::spawn(ingester, 4, 16, Arc::new(Notify::new()));
+        let viewer_rx = bc.subscribe().expect("subscribe");
+        let _ = bc_tx.try_send((Instant::now(), Bytes::from_static(b"x")));
+        // Publisher dies: drop the feed so the ingester ends, the broadcaster
+        // task exits, and the broadcast channel closes.
+        drop(bc_tx);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let entry = make_connected_entry(conn, 1, Some(viewer_rx));
+        entry.viewer_primed.store(true, Ordering::Relaxed);
+        let reg = SessionRegistry::new();
+        reg.insert(entry.clone());
+
+        reg.tick_all(&streams).await;
+
+        assert!(
+            entry.finished.load(Ordering::Relaxed),
+            "viewer session must be marked finished when the stream ends"
+        );
+        assert_eq!(
+            reg.snapshot().len(),
+            0,
+            "tick_all must remove the finished viewer session"
+        );
+
         server.close(0u32.into(), b"");
     }
 

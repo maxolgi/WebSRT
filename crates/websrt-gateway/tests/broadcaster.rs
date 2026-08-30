@@ -3,17 +3,16 @@
 //! Covers: basic message delivery, viewer-cap enforcement, end-of-stream
 //! propagation, and slow-viewer lag handling.
 //!
-//! Note: `Broadcaster` retains a clone of the broadcast `Sender`, so the
-//! channel only closes once the `Broadcaster` itself is dropped. The
-//! background task flips `alive=false` when the ingester returns `Ok(None)`,
-//! but the underlying broadcast channel stays open until `Broadcaster` is
-//! dropped. These tests therefore drain with `try_recv` (non-blocking) after
-//! waiting for the task to exit.
+//! Note: on source end the background task flips `alive=false`, drops its
+//! `Sender` clone, and clears the `Broadcaster`'s copy — so the broadcast
+//! channel closes (viewers see `Err(Closed)` after draining the ring) even
+//! while the `Broadcaster` itself is still alive.
 
 use bytes::Bytes;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
+use websrt::broadcaster::ViewerRxError;
 use websrt::ingest::Ingester;
 use websrt::Broadcaster;
 
@@ -96,16 +95,50 @@ async fn basic_fanout_delivers_all_messages() {
         "broadcaster should exit after draining the ingester"
     );
 
-    // Drain the (still-open) ring buffer.
+    // Drain the ring buffer until the closed channel is exhausted.
     let mut received = 0;
     loop {
         match viewer.try_recv() {
             Ok(Some(_)) => received += 1,
-            Ok(None) => break,
-            Err(lag) => panic!("viewer unexpectedly lagged by {}", lag),
+            Ok(None) | Err(ViewerRxError::Closed) => break,
+            Err(ViewerRxError::Lagged(lag)) => panic!("viewer unexpectedly lagged by {}", lag),
         }
     }
     assert_eq!(received, n, "viewer should receive every emitted message");
+}
+
+/// 1b. End-of-stream visibility: once the broadcaster task has exited and the
+/// ring buffer is drained, `try_recv` reports `Err(Closed)` — stably, on every
+/// subsequent call — so viewers can distinguish a dead source from an
+/// momentarily-empty one.
+#[tokio::test]
+async fn viewer_sees_closed_after_source_ends() {
+    let bc = Broadcaster::spawn(
+        MockIngester::new(vec![ts_packet()]),
+        1,
+        16,
+        Arc::new(Notify::new()),
+    );
+    let mut viewer = bc.subscribe().expect("subscribe should succeed");
+
+    assert!(
+        wait_until_dead(&bc, Duration::from_secs(2)).await,
+        "broadcaster should exit after draining the ingester"
+    );
+
+    // Buffered message first…
+    assert!(
+        matches!(viewer.try_recv(), Ok(Some(_))),
+        "buffered message must precede Closed"
+    );
+    // …then Closed, forever.
+    for _ in 0..3 {
+        assert_eq!(
+            viewer.try_recv(),
+            Err(ViewerRxError::Closed),
+            "try_recv must report Closed after source end + drain"
+        );
+    }
 }
 
 /// 2. Viewer cap: `max_viewers == 2` admits two subscribers and rejects a
@@ -176,10 +209,10 @@ async fn slow_viewer_reports_lagged() {
 
     // Ring buffer holds only `capacity` of the `pushed` messages, so the
     // receiver is `pushed - capacity` behind.
-    let lag = viewer
-        .try_recv()
-        .err()
-        .expect("try_recv should report Lagged, not Ok");
+    let lag = match viewer.try_recv() {
+        Err(ViewerRxError::Lagged(n)) => n,
+        other => panic!("try_recv should report Lagged, not {:?}", other),
+    };
     assert_eq!(
         lag,
         (pushed - capacity) as u64,
