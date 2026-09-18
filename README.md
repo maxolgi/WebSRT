@@ -46,7 +46,7 @@ pages. See [Applications](#applications).
 
 ## The Library
 
-Five artifacts: one native crate, three WASM crates, and a TypeScript player
+Six artifacts: two native crates, three WASM crates, and a TypeScript player
 SDK.
 
 | Crate / package | Target | What it provides |
@@ -54,7 +54,8 @@ SDK.
 | [`websrt`](crates/websrt) | native (tokio) | `Gateway` builder + run loop, `Broadcaster` fanout, `SrtInitiator`, `Ingester` trait (SRT / file / channel), `StreamRegistry`, `SessionPolicy` hooks, `GatewayLimits`, `Cert` / `CertSource` |
 | [`srt-wasm`](crates/srt-wasm) | wasm32 | `SrtReceiver` — the browser-side SRT listener (recv **and** send), driven by `handle_datagram()` / `poll()` / `sendMessage()` |
 | [`mpeg2ts-wasm`](crates/mpeg2ts-wasm) | wasm32 | `TsDemuxer` — TS demux emitting PES / PCM / PMT events, plus `DebugSnapshot` stream analysis (CC errors, PCR jitter, NAL breakdown) |
-| [`ts-muxer-wasm`](crates/ts-muxer-wasm) | wasm32 | `TsMuxer` — publisher-side TS muxing (H.264/HEVC/AV1 video, Opus audio, raw PCM) |
+| [`ts-muxer`](crates/ts-muxer) | native + wasm32 (via the `ts-muxer-wasm` shim) | `TsMuxer` — MPEG-TS muxing logic (H.264/HEVC/AV1 video, Opus audio, raw PCM → 188-byte TS packets) |
+| [`ts-muxer-wasm`](crates/ts-muxer-wasm) | wasm32 | wasm-bindgen shim over the native `ts-muxer` crate — the browser binding for publisher-side TS muxing |
 | [`web/` player SDK](web/src/player) | TypeScript | `mountPlayer()` — framework-agnostic viewer SDK; see [docs/embedding.md](docs/embedding.md) |
 
 ### Using `websrt` (native side)
