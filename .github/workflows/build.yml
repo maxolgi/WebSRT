@@ -47,6 +47,11 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      # Real WebTransport over loopback — the only test that exercises the full
+      # handshake + data path (gated behind the `e2e` feature).
+      - name: cargo test (e2e, real WebTransport loopback)
+        run: cargo test -p websrt --features e2e --test e2e -- --test-threads=1
+
   # Note: tsc --noEmit is NOT in this job — the web TS imports WASM glue .js
   # files that are gitignored and only exist after ./build.sh wasm. Type-checking
   # happens in the build job (npm run build = tsc && vite build), which builds
