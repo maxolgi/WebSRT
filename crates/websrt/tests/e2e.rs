@@ -122,7 +122,8 @@ async fn connect_client(port: u16, hash: [u8; 32], path: &str) -> Connection {
         .with_server_certificate_hashes([Sha256Digest::new(hash)])
         .build();
     let client = Endpoint::client(config).expect("client endpoint");
-    let url = format!("https://localhost:{port}{path}");
+    // Dial 127.0.0.1 directly — `localhost` can resolve to ::1 first and wtransport dials only the first resolved address; the gateway binds IPv4 loopback only.
+    let url = format!("https://127.0.0.1:{port}{path}");
     client.connect(&url).await.expect("client connect")
 }
 
