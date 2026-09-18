@@ -23,7 +23,7 @@ use wtransport::ServerConfig;
 
 /// Default viewer cap.
 const DEFAULT_MAX_VIEWERS: usize = 16;
-/// Broadcast ring-buffer depth. At ~1700 msg/sec this is ~2.4s of buffer.
+/// Broadcast ring-buffer depth. At ~1700 msg/sec this is ~19.3s of buffer.
 const DEFAULT_BROADCAST_CAPACITY: usize = 32768;
 
 /// High-level SRT-over-WebTransport gateway.
