@@ -104,6 +104,10 @@ pub struct Cli {
     #[arg(long, default_value_t = 9000u16)]
     pub srt_port: u16,
 
+    /// Bind address for the SRT listen port. Must be loopback unless --srt-passphrase is set.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub srt_bind: String,
+
     /// SRT connection mode.
     #[arg(long, value_enum, default_value_t = SrtMode::Listener)]
     pub srt_mode: SrtMode,
@@ -173,6 +177,11 @@ pub struct Cli {
     /// If not set, authentication is disabled.
     #[arg(long)]
     pub auth_token: Option<String>,
+
+    /// Allowed Origin headers for WebTransport requests (repeatable). If set,
+    /// requests from other origins are rejected. If not set, all origins are allowed.
+    #[arg(long)]
+    pub allowed_origins: Vec<String>,
 
     /// Maximum concurrent viewers per stream.
     #[arg(long, default_value_t = 16)]
@@ -425,6 +434,7 @@ pub(crate) async fn run_gateway(
         .bind_addr(format!("{}:{}", cli.bind, cli.wt_port).parse::<std::net::SocketAddr>()?)
         .identity(cert.identity.clone_identity())
         .max_viewers(cli.max_viewers)
+        .allowed_origins(cli.allowed_origins.clone())
         .max_bandwidth(if cli.max_bandwidth > 0 {
             Some(cli.max_bandwidth.saturating_mul(1000) / 8)
         } else {
@@ -508,18 +518,32 @@ pub(crate) async fn run_gateway(
             let source = gateway.source_handle();
             let srt_mode = cli.srt_mode;
             let srt_port = cli.srt_port;
+            let srt_bind = cli.srt_bind.clone();
             let call_addr = cli.srt_call.clone();
             let streamid = cli.srt_streamid.clone();
             let latency_ms = cli.latency;
             let srt_passphrase = cli.srt_passphrase.clone();
             let ts_stats = ts_stats.clone();
             let srt_shutdown = shutdown.clone();
+            if srt_mode == SrtMode::Listener {
+                let bind_ip: std::net::IpAddr = srt_bind
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("invalid --srt-bind {srt_bind}: {e}"))?;
+                if !bind_ip.is_loopback() && srt_passphrase.is_none() {
+                    anyhow::bail!(
+                        "--srt-bind {srt_bind} is a public (non-loopback) address; \
+                         --srt-passphrase is required for SRT ingest on a public bind \
+                         (unencrypted public ingest allows arbitrary stream creation). \
+                         Use --srt-bind 127.0.0.1 for local-only ingest"
+                    );
+                }
+            }
             tokio::spawn(async move {
                 match srt_mode {
                     SrtMode::Listener => {
-                        tracing::info!(port = srt_port, "binding SRT multi-publisher listener");
+                        tracing::info!(bind = %srt_bind, port = srt_port, "binding SRT multi-publisher listener");
                         let listener = match SrtListenerService::bind(
-                            format!("0.0.0.0:{srt_port}"),
+                            format!("{srt_bind}:{srt_port}"),
                             std::time::Duration::from_millis(latency_ms),
                             srt_passphrase,
                         )

@@ -685,6 +685,15 @@ impl GatewayBuilder {
                 anyhow::bail!("auth_token must not be empty string");
             }
         }
+        if !self.bind_addr.ip().is_loopback()
+            && (self.auth_token.is_none() || self.allowed_origins.is_empty())
+        {
+            tracing::warn!(
+                bind = %self.bind_addr,
+                "WebTransport bound to a public (non-loopback) address with open access \
+                 (no auth token or no origin allowlist); any origin can view and publish streams"
+            );
+        }
 
         let streams = Arc::new(StreamRegistry::new(
             self.max_viewers,
