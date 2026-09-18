@@ -68,7 +68,7 @@ cd web && npx tsc --noEmit
 1. Forked `srt-protocol` (`maxolgi/srt-rs`) changes → `cargo update -p srt-protocol -p srt-tokio` (pull new commit) then `./build.sh srt-protocol` (rebuilds BOTH the gateway binary AND srt-wasm + copies pkg to web/wasm/)
 2. Changing only `web/src/*.ts` / `*.tsx` → Vite hot-reloads, no rebuild needed
 3. Changing `crates/srt-wasm/src/lib.rs` → `./build.sh wasm srt` + browser reload
-4. Changing `crates/mpeg2ts-wasm/` or `crates/ts-muxer-wasm/` → `./build.sh wasm <crate>` + browser reload
+4. Changing `crates/mpeg2ts-wasm/` or `crates/ts-muxer-wasm/` → `./build.sh wasm <crate>` + browser reload. Changing native `crates/ts-muxer/` → `./build.sh wasm ts-muxer` (rebuilds the shim) + browser reload
 5. Changing `crates/websrt/` (library) → `./build.sh gateway` + `./build.sh restart` (production only)
 6. Changing `crates/websrt-gateway/src/gui.rs` or `log_buffer.rs` → `./build.sh gateway` (no WASM or web rebuild needed)
 
@@ -78,7 +78,8 @@ cd web && npx tsc --noEmit
 - `crates/websrt-gateway/` — **reference implementation**: CLI binary built on the library. Runs in production under supervisord.
 - `crates/srt-wasm/` — browser-side SRT receiver + sender (WASM). Used by both viewer and publisher pages.
 - `crates/mpeg2ts-wasm/` — browser-side TS demuxer (WASM). Viewer side.
-- `crates/ts-muxer-wasm/` — browser-side TS muxer (WASM). Publisher side (browser→gateway publishing).
+- `crates/ts-muxer/` — native MPEG-TS muxer (H.264/HEVC/AV1 video, Opus audio, raw PCM). Owns all muxing logic; compiled to wasm32 inside `ts-muxer-wasm` and usable natively (dev example: `cargo run -p ts-muxer-wasm --example dump_ts`).
+- `crates/ts-muxer-wasm/` — thin wasm-bindgen shim over `crates/ts-muxer/`. Publisher side (browser→gateway publishing).
 
 ## Architecture layers
 
@@ -87,8 +88,10 @@ cd web && npx tsc --noEmit
 - **`crates/websrt-gateway/` (reference implementation)** — the canonical binary.
   CLI parse, cert setup, ingester wiring, health endpoint. Runs under supervisord.
   Launches an eframe (egui) GUI by default; `--no-gui` for headless CLI mode.
-- **`web/` (demo UI)** — player page and stream page. Browser-side demos that
-  exercise the gateway end-to-end, plus the debug overlay.
+- **`web/` (demo UI)** — player page, stream page, and `call.tsx` 1:1 video call
+  page; framework-agnostic player SDK (`web/src/player/`, `mountPlayer()`,
+  documented in `docs/embedding.md`). Browser-side demos that exercise the
+  gateway end-to-end, plus the debug overlay.
 
 ## Forked crates (patched, not upstream)
 
@@ -168,7 +171,9 @@ Browser runs the **same** `srt-protocol` + `mpeg2ts` Rust crates compiled to WAS
 ## Key files
 
 - `crates/websrt/src/gateway.rs` — high-level `Gateway` builder: WT accept loop, session spawn, viewer cap, graceful drain.
-- `crates/websrt/src/session.rs` — per-browser session: dual-task split (recv_pump + sender_pump) sharing `SrtInitiator` via `Arc<Mutex<_>>`. LossInjector (sim-loss feature) lives here.
+- `crates/websrt/src/session.rs` — per-browser session: `recv_pump` task drains WT datagrams into the SRT initiator; sender drive comes from the centralized ticker in `registry.rs`. The two halves share `SrtInitiator`, `LossInjector`, the WT `Connection`, and the shutdown signal via `Arc<SessionEntry>`. LossInjector (sim-loss feature) lives here.
+- `crates/websrt/src/registry.rs` — central session registry + single ticker task driving all sessions' SRT state machines (~2ms cadence, eliminating N per-session timers); per-session `recv_pump` tasks remain. Lock strategy (parking_lot vs tokio mutex, initiator→loss lock ordering) documented in the module doc.
+- `crates/websrt/src/nocc.rs` — no-op QUIC congestion controller: unlimited window so quinn never throttles or paces datagram sends — SRT owns all congestion control and reliability.
 - `crates/websrt/src/srt_sender.rs` — wraps `srt_protocol::Connect` → `DuplexConnection`. `drain()` captures `Action::UpdateStatistics` into `last_stats`.
 - `crates/websrt-gateway/src/main.rs` — reference binary: CLI parse, `--no-gui` branching, `run_gateway()` (cert, cert-hash.js, ingester, axum health server, gateway run task).
 - `crates/websrt-gateway/src/gui.rs` — eframe (egui) GUI app: config form mirroring all CLI options, Start/Stop buttons, live stats from `GatewayStatsHandle`, scrolling log panel. Falls back to CLI if no display. Secrets (`srt_passphrase`, `auth_token`) are deliberately `#[serde(skip)]` — never persisted to the config file.
