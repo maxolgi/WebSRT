@@ -7,6 +7,7 @@ import { signal } from '@preact/signals-core';
 import type {
   GpuInfo,
   MediaCapResult,
+  SnapshotData,
   TimeSeriesBucket,
   TestActions,
 } from './types';
@@ -41,6 +42,8 @@ export class DebugStore {
   readonly status = signal('idle');
   readonly logEntries = signal<LogEntry[]>([]);
   readonly driftMs = signal<number | null>(null);
+  readonly snapA = signal<SnapshotData | null>(null);
+  readonly snapB = signal<SnapshotData | null>(null);
 
   pushHistory(bucket: TimeSeriesBucket) {
     const h = this.history.value;

@@ -67,6 +67,12 @@ export interface DebugDiagnostics {
   consoleErrors: string[];
 }
 
+export interface SnapshotData {
+  ts: string;
+  label: string;
+  data: DebugDiagnostics;
+}
+
 export interface TestActions {
   resetDecoder: () => void;
   reconnect: () => void;
