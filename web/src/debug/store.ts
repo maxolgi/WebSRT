@@ -54,7 +54,7 @@ export class DebugStore {
 
   pushLog(msg: string, cls = '') {
     const entries = this.logEntries.value;
-    this.logEntries.value = [...entries.slice(-49), { msg, cls }];
+    this.logEntries.value = [...entries.slice(-499), { msg, cls }];
   }
 
   reset() {

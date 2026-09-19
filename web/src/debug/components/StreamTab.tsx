@@ -9,6 +9,8 @@ interface Props {
 
 export function StreamTab({ store }: Props): JSX.Element {
   const [, forceRender] = useState(0)
+  const [filterText, setFilterText] = useState('')
+  const [levelFilter, setLevelFilter] = useState('all')
   useEffect(() => {
     const id = setInterval(() => forceRender((n) => n + 1), 250)
     return () => clearInterval(id)
@@ -20,6 +22,13 @@ export function StreamTab({ store }: Props): JSX.Element {
   const entries = store.logEntries.value
   const latency = store.latencyMs.value
   const certMode = store.certMode.value
+
+  const query = filterText.trim().toLowerCase()
+  const visible = entries.filter((e) => {
+    const level = e.cls === 'err' ? 'error' : e.cls === 'info' ? 'info' : 'other'
+    if (levelFilter !== 'all' && level !== levelFilter) return false
+    return !query || e.msg.toLowerCase().includes(query)
+  })
 
   return (
     <>
@@ -39,12 +48,31 @@ export function StreamTab({ store }: Props): JSX.Element {
       <CcErrorCounter store={store} />
 
       <div class="debug-section">
-        <h3>Event Log ({entries.length})</h3>
+        <h3>Event Log ({visible.length} / {entries.length})</h3>
+        <div style={{ display: 'flex', gap: '4px', marginBottom: '4px' }}>
+          <input
+            type="text"
+            placeholder="filter…"
+            value={filterText}
+            onInput={(e) => setFilterText(e.currentTarget.value)}
+            style={{ flex: 1, fontSize: '11px', padding: '2px 4px' }}
+          />
+          <select
+            value={levelFilter}
+            onChange={(e) => setLevelFilter(e.currentTarget.value)}
+            style={{ fontSize: '11px', padding: '2px 4px' }}
+          >
+            <option value="all">All</option>
+            <option value="error">Error</option>
+            <option value="info">Info</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
         <div style={{ maxHeight: '300px', overflowY: 'auto', fontSize: '11px', lineHeight: '1.4' }}>
-          {entries.length === 0 ? (
-            <div style={{ color: '#999' }}>No events yet</div>
+          {visible.length === 0 ? (
+            <div style={{ color: '#999' }}>{entries.length === 0 ? 'No events yet' : 'No matching events'}</div>
           ) : (
-            entries.map((e, i) => (
+            visible.map((e, i) => (
               <div class={e.cls} style={{ padding: '1px 0', wordBreak: 'break-word' }}>
                 {e.msg}
               </div>
