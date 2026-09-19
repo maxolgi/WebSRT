@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { Chart } from 'chart.js'
 import type { DebugStore } from '../../store'
+import { useSignals } from '../../useSignals'
 import { drawFocusLine } from '../../timeline'
 
 interface Props {
@@ -17,6 +18,7 @@ const PCR_TARGET_MS = 100
 // PCR interval over time for the first PCR PID, with a 100 ms reference line.
 // Jitter is shown in the DemuxTab table; here we focus on interval stability.
 export function PcrChart({ store, height = 120 }: Props): JSX.Element {
+  useSignals(store.demuxStats, store.timeWindowSec, store.focusTime)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const histRef = useRef<{ x: number; y: number }[]>([])
 

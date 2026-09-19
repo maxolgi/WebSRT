@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { Chart } from 'chart.js'
 import type { DebugStore } from '../../store'
+import { useSignals } from '../../useSignals'
 
 interface Props {
   store: DebugStore
@@ -14,6 +15,7 @@ const UPDATE_MS = 500
 // order [I, P, B, IDR, SPS, PPS, SEI, AUD, NonIDR]. Shown as a current-state
 // bar chart that refreshes each tick.
 export function NalStackedBar({ store, height = 140 }: Props): JSX.Element {
+  useSignals(store.demuxStats)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   useEffect(() => {

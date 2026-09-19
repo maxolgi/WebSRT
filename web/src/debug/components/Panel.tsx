@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect } from 'preact/hooks'
 import type { DebugStore } from '../store'
+import { useSignals } from '../useSignals'
 import { readHash, writeHash } from '../hash'
 import { StreamTab } from './StreamTab'
 import { CodecTab } from './CodecTab'
@@ -27,11 +28,7 @@ const TABS = [
 ] as const
 
 export function DebugPanel({ store }: Props) {
-  const [, forceRender] = useState(0)
-  useEffect(() => {
-    const id = setInterval(() => forceRender((n) => n + 1), 200)
-    return () => clearInterval(id)
-  }, [])
+  useSignals(store.activeTab, store.demuxSubTab)
 
   useEffect(() => {
     const applyHash = () => {

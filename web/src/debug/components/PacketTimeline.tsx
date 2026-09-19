@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import type { DebugStore } from '../store';
+import { useSignals } from '../useSignals';
 import type { DemuxStats } from '../../shared/types';
 import {
   formatBytes,
@@ -44,7 +45,8 @@ const KIND_OPTIONS: { value: string; label: string }[] = [
 ];
 
 export function PacketTimeline({ store }: Props): JSX.Element {
-  const [, forceRender] = useState(0);
+  useSignals(store.demuxStats);
+
   const [scrollTop, setScrollTop] = useState(0);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [pidFilterText, setPidFilterText] = useState('');
@@ -54,11 +56,6 @@ export function PacketTimeline({ store }: Props): JSX.Element {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const wasAtTopRef = useRef(true);
   const prevRingLenRef = useRef(0);
-
-  useEffect(() => {
-    const id = setInterval(() => forceRender((n) => n + 1), 250);
-    return () => clearInterval(id);
-  }, []);
 
   const d = store.demuxStats.value;
   const ringLen = d ? d.ringT.length : 0;

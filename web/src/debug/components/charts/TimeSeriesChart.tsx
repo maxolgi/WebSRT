@@ -3,6 +3,7 @@ import type { JSX } from 'preact'
 import type { Chart } from 'chart.js'
 import type { DebugStore } from '../../store'
 import type { TimeSeriesBucket } from '../../types'
+import { useSignals } from '../../useSignals'
 import { windowed, drawFocusLine } from '../../timeline'
 
 interface Props {
@@ -27,6 +28,7 @@ export function TimeSeriesChart({
   transform,
   height = 120,
 }: Props): JSX.Element {
+  useSignals(store.history, store.timeWindowSec, store.focusTime)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   // Keep latest function props without re-subscribing the effect.

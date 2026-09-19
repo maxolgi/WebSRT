@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { DebugStore } from '../../store'
+import { useSignals } from '../../useSignals'
 import { windowed, xForTime, drawFocusLine } from '../../timeline'
 
 interface Props {
@@ -9,7 +10,6 @@ interface Props {
 }
 
 const MAX_POINTS = 120
-const UPDATE_MS = 500
 const BANDS = 3
 
 // Stacked-band correlation chart. Three horizontal bands share one timeline so
@@ -17,13 +17,8 @@ const BANDS = 3
 // stripe through only the top band means CC errors with no SRT loss (TS bytes
 // dropped between receiver and demuxer).
 export function LossCorrelationChart({ store, height = 80 }: Props): JSX.Element {
+  useSignals(store.history, store.timeWindowSec, store.focusTime)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const [, forceRender] = useState(0)
-
-  useEffect(() => {
-    const id = setInterval(() => forceRender((n) => n + 1), UPDATE_MS)
-    return () => clearInterval(id)
-  }, [])
 
   useEffect(() => {
     const canvas = canvasRef.current

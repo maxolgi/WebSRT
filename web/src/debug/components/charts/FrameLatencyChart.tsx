@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { DebugStore } from '../../store'
+import { useSignals } from '../../useSignals'
 
 interface Props {
   store: DebugStore
@@ -12,6 +13,7 @@ const SPARK_H = 60
 // mean worker-side release jitter (|actual release − TSBPD deadline|, from the
 // worker's rolling per-frame ring), with a sparkline of recent per-frame jitter.
 export function FrameLatencyChart({ store }: Props): JSX.Element {
+  useSignals(store.srtStats, store.latencyMs)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const vl = store.srtStats.value?.videoLatency
   const tlb = store.latencyMs.value

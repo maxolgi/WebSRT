@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { DebugStore } from '../../store'
+import { useSignals } from '../../useSignals'
 import { xForTime, drawFocusLine } from '../../timeline'
 
 interface Props {
@@ -14,6 +15,7 @@ const UPDATE_MS = 500
 // Total PTS-jump count (across all PIDs) over time. Cumulative, so this is a
 // monotone step; jumps in the line mark PTS-discontinuity events.
 export function PtsJumpSparkline({ store, height = 50 }: Props): JSX.Element {
+  useSignals(store.demuxStats, store.timeWindowSec, store.focusTime)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const historyRef = useRef<{ t: number; n: number }[]>([])
   const [, forceRender] = useState(0)

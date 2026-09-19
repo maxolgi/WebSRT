@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'preact/hooks'
+import { useState } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { DebugStore } from '../store'
+import { useSignals } from '../useSignals'
 import { IssuesStrip } from './IssuesStrip'
 import type { StatsMsg } from '../../worker'
 
@@ -9,13 +10,10 @@ interface Props {
 }
 
 export function StreamTab({ store }: Props): JSX.Element {
-  const [, forceRender] = useState(0)
+  useSignals(store.status, store.srtStats, store.driftMs, store.logEntries, store.latencyMs, store.certMode)
+
   const [filterText, setFilterText] = useState('')
   const [levelFilter, setLevelFilter] = useState('all')
-  useEffect(() => {
-    const id = setInterval(() => forceRender((n) => n + 1), 250)
-    return () => clearInterval(id)
-  }, [])
 
   const status = store.status.value
   const srt = store.srtStats.value
@@ -87,12 +85,9 @@ export function StreamTab({ store }: Props): JSX.Element {
 }
 
 function CcErrorCounter({ store }: { store: DebugStore }): JSX.Element {
+  useSignals(store.demuxStats)
+
   const [baseline, setBaseline] = useState(0)
-  const [, forceRender] = useState(0)
-  useEffect(() => {
-    const id = setInterval(() => forceRender((n) => n + 1), 250)
-    return () => clearInterval(id)
-  }, [])
 
   const demux = store.demuxStats.value
   let total = 0

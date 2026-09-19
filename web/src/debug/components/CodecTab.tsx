@@ -1,21 +1,16 @@
-import { useState, useEffect, useCallback } from 'preact/hooks'
+import { useCallback } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { DebugStore } from '../store'
 import type { MediaCapResult } from '../types'
+import { useSignals } from '../useSignals'
 import { QueueSparkline } from './charts/QueueSparkline'
 
 interface Props {
   store: DebugStore
 }
 
-const RENDER_TICK_MS = 100
-
 export function CodecTab({ store }: Props): JSX.Element {
-  const [, forceRender] = useState(0)
-  useEffect(() => {
-    const id = setInterval(() => forceRender((n) => n + 1), RENDER_TICK_MS)
-    return () => clearInterval(id)
-  }, [])
+  useSignals(store.videoStats, store.audioStats, store.renderStats, store.mediaCaps, store.mediaCapsLoading, store.testActions)
 
   const runProbe = useCallback(async () => {
     if (store.mediaCapsLoading.value) return

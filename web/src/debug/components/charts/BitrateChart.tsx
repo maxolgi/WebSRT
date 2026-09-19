@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { Chart } from 'chart.js'
 import type { DebugStore } from '../../store'
+import { useSignals } from '../../useSignals'
 import { windowed, drawFocusLine } from '../../timeline'
 
 interface Props {
@@ -15,6 +16,7 @@ const UPDATE_MS = 500
 // Per-PID bitrate from the WASM snapshot, pushed into the shared history as
 // video/audio Mbps by sampler.ts. Two-line time-series, ~30 s window.
 export function BitrateChart({ store, height = 120 }: Props): JSX.Element {
+  useSignals(store.history, store.timeWindowSec, store.focusTime)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   useEffect(() => {

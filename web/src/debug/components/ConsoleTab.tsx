@@ -3,12 +3,15 @@
 
 import { useEffect, useState } from 'preact/hooks'
 import type { DebugStore } from '../store'
+import { useSignals } from '../useSignals'
 
 interface Props {
   store: DebugStore
 }
 
 export function ConsoleTab({ store }: Props) {
+  useSignals(store.consoleErrors)
+
   const [loaded, setLoaded] = useState(false)
   const [erudaContainer, setErudaContainer] = useState<HTMLElement | null>(null)
 

@@ -1,5 +1,6 @@
 import type { JSX } from 'preact';
 import type { DebugStore } from '../store';
+import { useSignals } from '../useSignals';
 import { writeHash } from '../hash';
 import { computeIssues, type Issue } from '../issues';
 
@@ -8,6 +9,8 @@ interface Props {
 }
 
 export function IssuesStrip({ store }: Props): JSX.Element | null {
+  useSignals(store.srtStats, store.videoStats, store.audioStats, store.renderStats, store.demuxStats);
+
   const issues = computeIssues(store);
 
   if (issues.length === 0) {

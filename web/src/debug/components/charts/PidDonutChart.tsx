@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { Chart } from 'chart.js'
 import type { DebugStore } from '../../store'
+import { useSignals } from '../../useSignals'
 import { streamTypeName } from '../streamTypes'
 
 interface Props {
@@ -14,6 +15,7 @@ const UPDATE_MS = 500
 // Instantaneous byte-share donut per PID. Reads the live snapshot; each slice
 // is labelled with PID + resolved codec name.
 export function PidDonutChart({ store, height = 160 }: Props): JSX.Element {
+  useSignals(store.demuxStats)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   useEffect(() => {

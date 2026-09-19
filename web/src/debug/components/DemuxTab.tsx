@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'preact/hooks';
+import { useEffect } from 'preact/hooks';
 import type { JSX } from 'preact';
 import type { DebugStore } from '../store';
+import { useSignals } from '../useSignals';
 import { readHash, writeHash } from '../hash';
 import type { DemuxStats } from '../../shared/types';
 import { streamTypeName } from './streamTypes';
@@ -31,11 +32,7 @@ interface Props {
 }
 
 export function DemuxTab({ store }: Props): JSX.Element {
-  const [, forceRender] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => forceRender((n) => n + 1), 250);
-    return () => clearInterval(id);
-  }, []);
+  useSignals(store.demuxStats, store.demuxSubTab);
 
   const subTab = store.demuxSubTab.value;
   useEffect(() => {

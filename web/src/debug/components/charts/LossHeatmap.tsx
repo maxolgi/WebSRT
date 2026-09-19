@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { DebugStore } from '../../store'
+import { useSignals } from '../../useSignals'
 import { windowed, xForTime, drawFocusLine } from '../../timeline'
 
 interface Props {
@@ -9,16 +10,10 @@ interface Props {
 }
 
 const MAX_POINTS = 120
-const UPDATE_MS = 500
 
 export function LossHeatmap({ store, height = 60 }: Props): JSX.Element {
+  useSignals(store.history, store.timeWindowSec, store.focusTime)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const [, forceRender] = useState(0)
-
-  useEffect(() => {
-    const id = setInterval(() => forceRender((n) => n + 1), UPDATE_MS)
-    return () => clearInterval(id)
-  }, [])
 
   useEffect(() => {
     const canvas = canvasRef.current

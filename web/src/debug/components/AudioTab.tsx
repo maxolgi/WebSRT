@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import type { DebugStore } from '../store';
+import { useSignals } from '../useSignals';
 
 interface Props {
   store: DebugStore;
 }
 
-const RENDER_TICK_MS = 50;
 const SCOPE_SIZE = 200;
 const SPEC_HEIGHT = 100;
 const SPEC_BINS = 64;
@@ -32,7 +32,8 @@ const lufsClass = (l: number): string => {
 type SubTab = 'overview' | 'peak' | 'lufs' | 'phase' | 'scope' | 'spectrum' | 'pacing';
 
 export function AudioTab({ store }: Props): JSX.Element {
-  const [, forceRender] = useState(0);
+  useSignals(store.audioMeter, store.srtStats);
+
   const [selectedCh, setSelectedCh] = useState(0);
   const [subTab, setSubTab] = useState<SubTab>('overview');
 
@@ -48,11 +49,6 @@ export function AudioTab({ store }: Props): JSX.Element {
   // amplitude and normalize it to ~85% of the canvas radius (clamped 1..60x,
   // EMA-smoothed so transients don't pump the display).
   const scopeGainRef = useRef(1);
-
-  useEffect(() => {
-    const id = setInterval(() => forceRender((n) => n + 1), RENDER_TICK_MS);
-    return () => clearInterval(id);
-  }, []);
 
   useEffect(() => {
     if (subTab !== 'scope') return;

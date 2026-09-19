@@ -1,6 +1,7 @@
-import { useState, useEffect, useMemo } from 'preact/hooks'
+import { useState, useMemo } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { DebugStore } from '../store'
+import { useSignals } from '../useSignals'
 import { downloadDiagnostics, buildDiagnostics } from '../diagnostics'
 import { diffSnapshots } from '../diff'
 
@@ -8,14 +9,8 @@ interface Props {
   store: DebugStore
 }
 
-const RENDER_TICK_MS = 1000
-
 export function TestTab({ store }: Props): JSX.Element {
-  const [, forceRender] = useState(0)
-  useEffect(() => {
-    const id = setInterval(() => forceRender((n) => n + 1), RENDER_TICK_MS)
-    return () => clearInterval(id)
-  }, [])
+  useSignals(store.testActions, store.latencyMs, store.snapA, store.snapB)
 
   const [decodePacing, setDecodePacingState] = useState(
     () => localStorage.getItem('websrt-pacing-decode') === '1',

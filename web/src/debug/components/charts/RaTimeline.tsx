@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { DebugStore } from '../../store'
+import { useSignals } from '../../useSignals'
 import { xForTime, drawFocusLine } from '../../timeline'
 
 interface Props {
@@ -15,6 +16,7 @@ const UPDATE_MS = 500
 // cumulative, so a marker is drawn wherever consecutive samples rise.
 // FrameTimeline-style 2D canvas.
 export function RaTimeline({ store, height = 60 }: Props): JSX.Element {
+  useSignals(store.demuxStats, store.timeWindowSec, store.focusTime)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const historyRef = useRef<{ t: number; ra: number }[]>([])
   const [, forceRender] = useState(0)

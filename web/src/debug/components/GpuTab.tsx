@@ -2,14 +2,15 @@ import { useState, useEffect } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { DebugStore } from '../store'
 import type { GpuInfo } from '../types'
+import { useSignals } from '../useSignals'
 
 interface Props {
   store: DebugStore
 }
 
-const RENDER_TICK_MS = 100
-
 export function GpuTab({ store }: Props): JSX.Element {
+  useSignals(store.renderStats)
+
   const [gpu, setGpu] = useState<GpuInfo | null>(null)
   const [gpuError, setGpuError] = useState<string | null>(null)
 
@@ -29,12 +30,6 @@ export function GpuTab({ store }: Props): JSX.Element {
     })()
     return () => { cancelled = true }
   }, [store])
-
-  const [, forceRender] = useState(0)
-  useEffect(() => {
-    const id = setInterval(() => forceRender((n) => n + 1), RENDER_TICK_MS)
-    return () => clearInterval(id)
-  }, [])
 
   const render = store.renderStats.value
 

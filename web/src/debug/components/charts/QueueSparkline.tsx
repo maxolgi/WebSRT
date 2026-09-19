@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { DebugStore } from '../../store'
+import { useSignals } from '../../useSignals'
 import { windowed, xForTime, drawFocusLine } from '../../timeline'
 
 interface Props {
@@ -9,20 +10,14 @@ interface Props {
 }
 
 const MAX_POINTS = 120
-const RENDER_TICK_MS = 200
 
 // Decode-queue depth over time, pulled from the sampler's history ring (100ms
 // cadence, 300 samples = 30s window). A flat ~0 line is healthy; oscillation
 // 0↔8 means the decoder is stalling and emitAu() is dropping non-keyframes.
 // Also plots audio queue depth on the same axis for comparison.
 export function QueueSparkline({ store, height = 60 }: Props): JSX.Element {
+  useSignals(store.history, store.timeWindowSec, store.focusTime)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const [, forceRender] = useState(0)
-
-  useEffect(() => {
-    const id = setInterval(() => forceRender((n) => n + 1), RENDER_TICK_MS)
-    return () => clearInterval(id)
-  }, [])
 
   useEffect(() => {
     const canvas = canvasRef.current

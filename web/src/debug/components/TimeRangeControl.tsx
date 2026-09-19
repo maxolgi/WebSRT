@@ -1,5 +1,6 @@
 import type { JSX } from 'preact'
 import type { DebugStore } from '../store'
+import { useSignals } from '../useSignals'
 
 const PRESETS = [10, 20, 30]
 
@@ -7,6 +8,8 @@ const PRESETS = [10, 20, 30]
 // in Panel.tsx. Every time-based chart reads `timeWindowSec` and `focusTime`
 // from the store, so the window and the playhead persist across tab switches.
 export function TimeRangeControl({ store }: { store: DebugStore }): JSX.Element {
+  useSignals(store.history, store.timeWindowSec, store.focusTime)
+
   const windowSec = store.timeWindowSec.value
   const focusTime = store.focusTime.value
   const history = store.history.value

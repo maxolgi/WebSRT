@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'preact/hooks';
 import type { JSX } from 'preact';
 import type { DebugStore } from '../store';
+import { useSignals } from '../useSignals';
 import { TimeSeriesChart } from './charts/TimeSeriesChart';
 import { FrameTimeline } from './charts/FrameTimeline';
 import { LossHeatmap } from './charts/LossHeatmap';
@@ -12,11 +12,7 @@ interface Props {
 }
 
 export function SrtTab({ store }: Props): JSX.Element {
-  const [, forceRender] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => forceRender((n) => n + 1), 250);
-    return () => clearInterval(id);
-  }, []);
+  useSignals(store.srtStats, store.history, store.latencyMs);
 
   const srt = store.srtStats.value;
 
