@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'preact/hooks';
 import type { JSX } from 'preact';
 import type { DebugStore } from '../store';
+import { readHash, writeHash } from '../hash';
 import type { DemuxStats } from '../../shared/types';
 import { streamTypeName } from './streamTypes';
 import { BitrateChart } from './charts/BitrateChart';
@@ -17,6 +18,16 @@ const ST_HEVC = 0x24;
 const ST_AAC = 0x0f;
 const ST_PRIVATE = 0x06;
 
+const SUB_TABS = [
+  { id: 'streams', label: 'Streams' },
+  { id: 'errors', label: 'Errors' },
+  { id: 'video', label: 'Video' },
+  { id: 'packets', label: 'Packets' },
+  { id: 'charts', label: 'Charts' },
+] as const;
+
+type DemuxSub = (typeof SUB_TABS)[number]['id'];
+
 interface Props {
   store: DebugStore;
 }
@@ -28,7 +39,20 @@ export function DemuxTab({ store }: Props): JSX.Element {
     return () => clearInterval(id);
   }, []);
 
-  const [subTab, setSubTab] = useState<'streams' | 'errors' | 'video' | 'packets' | 'charts'>('streams');
+  const [subTab, setSubTab] = useState<DemuxSub>(() => {
+    const { tab, demuxSub } = readHash();
+    const hit = tab === 'demux' ? SUB_TABS.find((t) => t.id === demuxSub) : undefined;
+    return hit ? hit.id : 'streams';
+  });
+  useEffect(() => {
+    const onHash = () => {
+      const { tab, demuxSub } = readHash();
+      const hit = tab === 'demux' ? SUB_TABS.find((t) => t.id === demuxSub) : undefined;
+      if (hit) setSubTab(hit.id);
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
 
   const d = store.demuxStats.value;
   if (!d) return <div>No demux stats yet — awaiting stream.</div>;
@@ -57,14 +81,6 @@ export function DemuxTab({ store }: Props): JSX.Element {
 
   const totalCcErrors = d.ccErrors.reduce((a, b) => a + b, 0);
 
-  const SUB_TABS: Array<{ id: 'streams' | 'errors' | 'video' | 'packets' | 'charts'; label: string }> = [
-    { id: 'streams', label: 'Streams' },
-    { id: 'errors', label: 'Errors' },
-    { id: 'video', label: 'Video' },
-    { id: 'packets', label: 'Packets' },
-    { id: 'charts', label: 'Charts' },
-  ];
-
   return (
     <>
       <div
@@ -75,7 +91,7 @@ export function DemuxTab({ store }: Props): JSX.Element {
           <button
             key={t.id}
             class={`debug-tab ${subTab === t.id ? 'active' : ''}`}
-            onClick={() => setSubTab(t.id)}
+            onClick={() => { setSubTab(t.id); writeHash('demux', t.id); }}
           >
             {t.label}
           </button>

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'preact/hooks'
 import type { DebugStore } from '../store'
+import { readHash, writeHash } from '../hash'
 import { StreamTab } from './StreamTab'
 import { CodecTab } from './CodecTab'
 import { GpuTab } from './GpuTab'
@@ -31,6 +32,16 @@ export function DebugPanel({ store }: Props) {
     return () => clearInterval(id)
   }, [])
 
+  useEffect(() => {
+    const applyHash = () => {
+      const { tab } = readHash()
+      if (TABS.some((t) => t.id === tab)) store.activeTab.value = tab
+    }
+    applyHash()
+    window.addEventListener('hashchange', applyHash)
+    return () => window.removeEventListener('hashchange', applyHash)
+  }, [])
+
   const activeTab = store.activeTab.value
 
   return (
@@ -40,7 +51,7 @@ export function DebugPanel({ store }: Props) {
           <button
             key={t.id}
             class={`debug-tab ${activeTab === t.id ? 'active' : ''}`}
-            onClick={() => { store.activeTab.value = t.id }}
+            onClick={() => { store.activeTab.value = t.id; writeHash(t.id) }}
           >
             {t.label}
           </button>
