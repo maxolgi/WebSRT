@@ -5,6 +5,7 @@ import { TimeSeriesChart } from './charts/TimeSeriesChart';
 import { FrameTimeline } from './charts/FrameTimeline';
 import { LossHeatmap } from './charts/LossHeatmap';
 import { LossCorrelationChart } from './charts/LossCorrelationChart';
+import { FrameLatencyChart } from './charts/FrameLatencyChart';
 
 interface Props {
   store: DebugStore;
@@ -100,6 +101,11 @@ export function SrtTab({ store }: Props): JSX.Element {
         ) : (
           <div id="srt-charts-area">No chart data yet</div>
         )}
+      </div>
+
+      <div class="debug-section">
+        <h3>Frame Latency (video)</h3>
+        <FrameLatencyChart store={store} />
       </div>
 
       <div class="debug-section">

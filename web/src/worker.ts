@@ -16,6 +16,13 @@ export interface PcmReleaseStats {
   maxGapUs: number;
 }
 
+export interface VideoLatencyStats {
+  count: number;
+  meanJitterUs: number;
+  maxJitterUs: number;
+  samples: { t: number; jitterUs: number }[];
+}
+
 export interface StatsMsg {
   elapsedMs: number;
   rttMs: number;
@@ -42,6 +49,8 @@ export interface StatsMsg {
   audioStats?: AudioStats;
   /** PCM release pacing summary per audio PID over the stats window. */
   pcmRelease?: PcmReleaseStats[];
+  /** Per-frame video release-jitter window (rolling, not drained). */
+  videoLatency?: VideoLatencyStats;
 }
 
 export type DemuxStatsMsg = DemuxStats;
@@ -105,6 +114,14 @@ function nowRelUs(): number {
 
 let feedSchedUs: number | null = null;
 let feedRelUs: number | null = null;
+
+// --- Video frame release jitter (rolling window) ----------------------------
+// Per video PES (fires synchronously inside demux.feed(), so the feed context
+// above is still valid): jitterUs = |relUs - schedUs|, i.e. how long after
+// the frame's TSBPD deadline the worker actually released it. Rolling (not
+// drained) so the debug waterfall shows a continuous recent window.
+const VIDEO_LAT_RING_CAP = 120;
+const videoLatRing: { t: number; jitterUs: number }[] = [];
 
 // --- Adaptive tick source ---------------------------------------------------
 // The protocol reports (kind-3 WaitForData actions) how long until the next
@@ -415,6 +432,18 @@ async function doInit(url: string, certHash: Uint8Array | null, latencyMs: numbe
         }
       },
       onPes: (pid, pts, dts, bytes, ra, nalOffsets, nalTypes) => {
+        if (pid === videoPid && videoPid !== null) {
+          const schedUs = feedSchedUs;
+          const relUs = feedRelUs ?? nowRelUs();
+          if (schedUs !== null && schedUs > 0) {
+            const errUs = Math.abs(relUs - schedUs);
+            const validErr = errUs >= 0 && errUs < 10_000_000; // guard stale-clock artifacts
+            if (validErr) {
+              videoLatRing.push({ t: relUs, jitterUs: errUs });
+              while (videoLatRing.length > VIDEO_LAT_RING_CAP) videoLatRing.shift();
+            }
+          }
+        }
         // 1. Content-probe descriptor-less 0x06 PIDs first (may resolve codec)
         if (probePids.has(pid)) {
           probePids.delete(pid);
@@ -551,6 +580,7 @@ function doStop() {
   hsRelUs = null;
   feedSchedUs = null;
   feedRelUs = null;
+  videoLatRing.length = 0;
   pcmReleaseWindows.clear();
   pcmLogs.clear();
   pcmLogLastRel.clear();
@@ -796,6 +826,20 @@ function serializeStats(s: SrtStats): StatsMsg {
     loopIterAvgMs: loopIterCount > 0 ? loopIterTotalMs / loopIterCount : 0,
     pcmRelease: drainPcmRelease(),
   };
+  if (videoLatRing.length > 0) {
+    let sumUs = 0;
+    let maxUs = 0;
+    for (const s of videoLatRing) {
+      sumUs += s.jitterUs;
+      if (s.jitterUs > maxUs) maxUs = s.jitterUs;
+    }
+    msg.videoLatency = {
+      count: videoLatRing.length,
+      meanJitterUs: sumUs / videoLatRing.length,
+      maxJitterUs: maxUs,
+      samples: videoLatRing.slice(-60),
+    };
+  }
   if (VERBOSE) maybeDumpPcmLog();
   pollMaxMs = 0;
   wasmHandleTotalUs = 0;
