@@ -106,6 +106,7 @@ export interface DemuxStats {
   ringPusi: Uint8Array;
   ringNal: Uint8Array;
   ringNalOffsets: Uint32Array;
+  ringHex: string[];
 }
 
 // Plain-JSON form of DemuxStats (typed arrays → number[]) for the

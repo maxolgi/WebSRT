@@ -320,6 +320,8 @@ function PacketInspector({ d, idx, pidCodec, isVideoPid }: InspectorProps): JSX.
   }
 
   const nalDesc = nalDescription(d, idx, codec);
+  const hex = d.ringHex ? d.ringHex[idx] : '';
+  const hexLines = hex ? formatHexDump(hex) : null;
 
   return (
     <div class="pkt-inspector">
@@ -378,7 +380,25 @@ function PacketInspector({ d, idx, pidCodec, isVideoPid }: InspectorProps): JSX.
       )}
 
       <h4>Hex Dump</h4>
-      <div class="pkt-muted">Hex dump requires WASM update (pending)</div>
+      {hexLines ? (
+        <>
+          <pre
+            class="pkt-hex"
+            style={{
+              margin: 0, padding: '4px 6px', background: '#111', color: '#9c9',
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+              fontSize: '10px', lineHeight: '14px', whiteSpace: 'pre',
+              overflow: 'auto', maxHeight: '200px',
+              border: '1px solid #2a2a2a', borderRadius: '2px',
+            }}
+          >
+            {hexLines.join('\n')}
+          </pre>
+          <div class="pkt-muted">first {hex.length / 2} bytes of the PES payload (hex capped at 512)</div>
+        </>
+      ) : (
+        <div class="pkt-muted">no payload bytes (PSI/RA/control, or beyond the 512-byte hex cap)</div>
+      )}
     </div>
   );
 }
@@ -476,6 +496,25 @@ function prevSamePid(d: DemuxStats, idx: number): number {
     if (d.ringPid[j] === pid) return j;
   }
   return -1;
+}
+
+// 16 bytes per row: 4-hex-digit offset, hex bytes, ASCII column (0x20-0x7e else '.').
+function formatHexDump(hex: string): string[] {
+  const n = hex.length >> 1;
+  const lines: string[] = [];
+  for (let off = 0; off < n; off += 16) {
+    const count = Math.min(16, n - off);
+    let bytes = '';
+    let ascii = '';
+    for (let i = 0; i < count; i++) {
+      const p = (off + i) * 2;
+      bytes += (i ? ' ' : '') + hex.slice(p, p + 2);
+      const v = parseInt(hex.slice(p, p + 2), 16);
+      ascii += v >= 0x20 && v <= 0x7e ? String.fromCharCode(v) : '.';
+    }
+    lines.push(off.toString(16).padStart(4, '0') + '  ' + bytes.padEnd(47, ' ') + '  ' + ascii);
+  }
+  return lines;
 }
 
 function copyPacket(d: DemuxStats, idx: number, codec: VideoCodec): void {

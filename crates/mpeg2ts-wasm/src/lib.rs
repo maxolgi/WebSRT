@@ -42,6 +42,19 @@ const KIND_RA: u8 = 3;
 const KIND_ERROR: u8 = 4;
 const KIND_OTHER: u8 = 255;
 
+// Hex-encode the first ≤512 bytes of a slice (≤1024 hex chars) to bound
+// per-ring-entry memory.
+const HEX_CAP_BYTES: usize = 512;
+
+fn hex_prefix(bytes: &[u8]) -> String {
+    let n = bytes.len().min(HEX_CAP_BYTES);
+    let mut s = String::with_capacity(n * 2);
+    for b in &bytes[..n] {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
 // One PMT entry snapshot (pid + stream_type + descriptor format id).
 #[derive(Default, Clone)]
 struct PmtEntry {
@@ -117,6 +130,7 @@ struct PacketEntry {
     nal_summary: Vec<u8>,
     tei: bool,
     pusi: bool,
+    hex: String,
 }
 
 /// Shared append-only buffer with read cursor, so the long-lived
@@ -601,6 +615,7 @@ impl TsDemuxer {
             nal_summary: Vec::new(),
             tei: false,
             pusi: false,
+            hex: String::new(),
         });
     }
 
@@ -748,6 +763,7 @@ impl TsDemuxer {
             nal_summary: nal_types,
             tei,
             pusi,
+            hex: hex_prefix(payload),
         });
     }
 
@@ -839,6 +855,7 @@ impl TsDemuxer {
                     nal_summary: Vec::new(),
                     tei,
                     pusi,
+                    hex: String::new(),
                 });
             }
         }
@@ -878,6 +895,7 @@ impl TsDemuxer {
                         nal_summary: Vec::new(),
                         tei,
                         pusi,
+                        hex: String::new(),
                     });
                 }
             }
@@ -944,6 +962,7 @@ impl TsDemuxer {
                     nal_summary: Vec::new(),
                     tei,
                     pusi,
+                    hex: String::new(),
                 });
             }
             TsPayload::Null(_) | TsPayload::Section(_) => {
@@ -959,6 +978,7 @@ impl TsDemuxer {
                     nal_summary: Vec::new(),
                     tei,
                     pusi,
+                    hex: String::new(),
                 });
             }
         }
@@ -1000,6 +1020,7 @@ impl TsDemuxer {
             nal_summary: Vec::new(),
             tei,
             pusi,
+            hex: String::new(),
         });
     }
 
@@ -1103,6 +1124,7 @@ pub struct DebugSnapshot {
     ring_pusi: Vec<u8>,
     ring_nal: Vec<u8>,
     ring_nal_offsets: Vec<u32>,
+    ring_hex: Vec<String>,
 }
 
 #[wasm_bindgen]
@@ -1255,6 +1277,10 @@ impl DebugSnapshot {
     #[wasm_bindgen(getter, js_name = ringNalOffsets)]
     pub fn ring_nal_offsets(&self) -> Vec<u32> {
         self.ring_nal_offsets.clone()
+    }
+    #[wasm_bindgen(getter, js_name = ringHex)]
+    pub fn ring_hex(&self) -> Vec<String> {
+        self.ring_hex.clone()
     }
 }
 
@@ -1445,6 +1471,7 @@ impl TsDemuxer {
         let mut ring_pusi = Vec::with_capacity(ring_len);
         let mut ring_nal = Vec::new();
         let mut ring_nal_offsets = Vec::with_capacity(ring_len + 1);
+        let mut ring_hex = Vec::with_capacity(ring_len);
         ring_nal_offsets.push(0);
         for e in &self.packet_ring {
             ring_t.push(e.t_ms);
@@ -1458,6 +1485,7 @@ impl TsDemuxer {
             ring_pusi.push(e.pusi as u8);
             ring_nal.extend_from_slice(&e.nal_summary);
             ring_nal_offsets.push(ring_nal.len() as u32);
+            ring_hex.push(e.hex.clone());
         }
 
         DebugSnapshot {
@@ -1497,6 +1525,7 @@ impl TsDemuxer {
             ring_pusi,
             ring_nal,
             ring_nal_offsets,
+            ring_hex,
         }
     }
 

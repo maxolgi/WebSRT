@@ -896,6 +896,7 @@ function getDemuxStats(): DemuxStatsMsg | undefined {
       ringPusi: snap.ringPusi,
       ringNal: snap.ringNal,
       ringNalOffsets: snap.ringNalOffsets,
+      ringHex: snap.ringHex,
     };
   } finally {
     snap.free();
