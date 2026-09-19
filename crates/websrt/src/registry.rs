@@ -18,7 +18,7 @@
 //!   `.await`. Both lockers always acquire them in the same order
 //!   (initiator → loss) so there is no deadlock cycle.
 
-use crate::broadcaster::{ViewerRx, ViewerRxError, RATE_DEFAULT_CAP};
+use crate::broadcaster::{ViewerRx, ViewerRxError, RATE_DEFAULT_CAP, RATE_OVERHEAD};
 use crate::ingest::TsMessage;
 use crate::session::{route_release_data, send_action, LossInjector};
 use crate::srt_sender::SrtInitiator;
@@ -43,11 +43,6 @@ const TICKS_PER_SEC: u32 = 500;
 /// RATE_DEFAULT_CAP per tick at the nominal `TICKS_PER_SEC`. Lets new
 /// streams still drain while the broadcaster's EWMA warms up.
 const DRAIN_DEFAULT_RATE: f64 = RATE_DEFAULT_CAP as f64 * TICKS_PER_SEC as f64;
-/// Drain headroom above the EWMA rate (messages/sec): 2 extra messages per
-/// tick at the nominal tick rate, mirroring the pre-credit `+ RATE_OVERHEAD`
-/// catch-up margin. Keeps drain capacity above the (lagging) EWMA estimate
-/// so a ring backlog shrinks instead of persisting.
-const DRAIN_OVERHEAD_RATE: f64 = 2.0 * TICKS_PER_SEC as f64;
 /// Max sessions ticked in parallel inside one `tick_all`. Bounds the parallel
 /// phase so 500 sessions don't become 500 concurrent SRT ticks.
 const TICK_CONCURRENCY: usize = 16;
@@ -331,23 +326,30 @@ async fn tick_one(
                     v.drop_backlog();
                 }
             }
-            // Credit-based budget: rate × actual inter-tick elapsed, carried
-            // as a per-session fractional credit so the drain tracks the
-            // stream's production even when the ticker overshoots 2ms. The
-            // overhead term (+RATE_OVERHEAD per tick) keeps drain capacity
-            // above the EWMA so a backlog shrinks instead of persisting —
-            // the EWMA lags bursty streams and would otherwise under-drain.
+            // Paced credit drain. The per-tick budget is the stream's rate
+            // share for the ACTUAL inter-tick elapsed (fraction carried as
+            // credit so ticker overshoot can't under-drain) PLUS a small
+            // overhead for slow catch-up — mirroring the original
+            // ceil(ewma/500)+2 pacer. The budget must stay small: it is a
+            // pacing cap that re-smooths bursty source (I-frame clumps) into
+            // ~2ms increments, because push_message re-stamps each packet
+            // with `now` — a burst pushed in one tick gets near-identical
+            // SRT timestamps and the browser releases it as a clump
+            // (judder, no errors). Credits are banked only up to one
+            // nominal tick's budget so an idle period can't bank a burst.
             let rate = if ewma_rate > 0.0 {
                 ewma_rate
             } else {
                 DRAIN_DEFAULT_RATE
             };
+            let nominal_tick = (rate / TICKS_PER_SEC as f64).ceil() as usize + RATE_OVERHEAD;
             let to_drain = {
                 let mut c = entry.drain_credits.lock();
-                *c += (rate + DRAIN_OVERHEAD_RATE) * elapsed.as_secs_f64();
-                *c = (*c).min(MAX_MSGS_PER_TICK as f64);
-                c.floor().min(MAX_MSGS_PER_TICK as f64) as usize
-            };
+                *c += rate * elapsed.as_secs_f64();
+                *c = (*c).min(nominal_tick as f64);
+                c.floor() as usize + RATE_OVERHEAD
+            }
+            .min(MAX_MSGS_PER_TICK);
             let mut drained = 0usize;
             let mut viewer = entry.viewer.lock();
             if let Some(v) = viewer.as_mut() {
@@ -389,10 +391,13 @@ async fn tick_one(
                     }
                 }
             }
-            // Debit credits only for messages actually drained — the budget
-            // may exceed what the ring held, and losing the difference would
-            // under-drain every time the ring ran dry.
-            *entry.drain_credits.lock() -= drained as f64;
+            // Debit credits only for messages actually drained; clamp at 0 —
+            // the RATE_OVERHEAD headroom is free each tick, not debt, and the
+            // bank cap already bounds what can be carried.
+            {
+                let mut c = entry.drain_credits.lock();
+                *c = (*c - drained as f64).max(0.0);
+            }
         }
         if let Some(s) = init.stats() {
             *entry.last_srt_stats.lock() = Some(s.clone());

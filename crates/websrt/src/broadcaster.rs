@@ -18,6 +18,8 @@ const RATE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 /// Per-tick drain for unmeasured streams; the ticker multiplies it by the
 /// nominal tick rate to derive a messages/sec fallback drain rate.
 pub(crate) const RATE_DEFAULT_CAP: usize = 32;
+/// Extra messages per tick beyond the measured rate, for slow catch-up.
+pub(crate) const RATE_OVERHEAD: usize = 2;
 
 /// Lazy-sampled EWMA of a stream's message rate (messages/sec). Sampled
 /// on read from the atomic `messages_sent` counter every
