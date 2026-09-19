@@ -104,7 +104,7 @@ export function QueueSparkline({ store, height = 60 }: Props): JSX.Element {
         <span style={{ color: '#fc6' }}>■</span> video queue
         &nbsp;&nbsp;
         <span style={{ color: '#6cf' }}>■</span> audio queue
-        &nbsp;&nbsp;last 30s (max y = 16)
+        &nbsp;&nbsp;last {store.timeWindowSec.value}s (max y = 16)
       </div>
     </div>
   )
