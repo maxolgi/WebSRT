@@ -15,10 +15,9 @@ use tokio::sync::Notify;
 
 /// How often the EWMA message-rate sampler refreshes from `messages_sent`.
 const RATE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
-/// Per-tick cap returned when the stream hasn't been measured yet.
-const RATE_DEFAULT_CAP: usize = 32;
-/// Extra messages per tick beyond the measured rate, for slow catch-up.
-const RATE_OVERHEAD: usize = 2;
+/// Per-tick drain for unmeasured streams; the ticker multiplies it by the
+/// nominal tick rate to derive a messages/sec fallback drain rate.
+pub(crate) const RATE_DEFAULT_CAP: usize = 32;
 
 /// Lazy-sampled EWMA of a stream's message rate (messages/sec). Sampled
 /// on read from the atomic `messages_sent` counter every
@@ -221,11 +220,10 @@ impl Broadcaster {
         self.send_failures.load(Ordering::Relaxed)
     }
 
-    /// Estimated per-tick message cap for smooth drain. Samples
+    /// Estimated message rate of this stream in messages/sec. Samples
     /// [`messages_sent`](Self::messages_sent) every [`RATE_SAMPLE_INTERVAL`]
-    /// and maintains a 90/10 EWMA. Returns `ceil(ewma / ticks_per_sec) + 2`,
-    /// or [`RATE_DEFAULT_CAP`] when no measurement exists yet.
-    pub fn msg_rate_per_tick(&self, ticks_per_sec: u32) -> usize {
+    /// and maintains a 90/10 EWMA. Returns 0.0 before the first 1s sample.
+    pub fn ewma_rate(&self) -> f64 {
         let mut sampler = self.rate_sampler.lock();
         let now = Instant::now();
         if now.duration_since(sampler.last_sample) >= RATE_SAMPLE_INTERVAL {
@@ -243,11 +241,7 @@ impl Broadcaster {
             sampler.last_sample = now;
             sampler.last_count = current;
         }
-        if sampler.ewma_msg_per_sec <= 0.0 || ticks_per_sec == 0 {
-            return RATE_DEFAULT_CAP;
-        }
-        let per_tick = (sampler.ewma_msg_per_sec / ticks_per_sec as f64).ceil() as usize;
-        per_tick.saturating_add(RATE_OVERHEAD).max(1)
+        sampler.ewma_msg_per_sec
     }
 }
 
@@ -262,6 +256,12 @@ impl ViewerRx {
             Err(broadcast::error::TryRecvError::Lagged(n)) => Err(ViewerRxError::Lagged(n)),
             Err(broadcast::error::TryRecvError::Closed) => Err(ViewerRxError::Closed),
         }
+    }
+
+    /// Messages currently buffered in this viewer's broadcast ring, i.e. how
+    /// far behind the live edge this viewer is.
+    pub fn buffer_lag(&self) -> usize {
+        self.rx.len()
     }
 
     /// Drain and discard all immediately-available messages. Called once

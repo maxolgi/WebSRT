@@ -662,6 +662,7 @@ async fn health_handler(
                 "rtt_ms": srt.and_then(|v| v.tx_rtt).map(|d| d.as_millis() as u64).unwrap_or(0),
                 "messages_pushed": s.messages_pushed,
                 "viewer_lag": s.viewer_lag_count,
+                "buffer_lag": s.buffer_lag,
             })
         })
         .collect();

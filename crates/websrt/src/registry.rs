@@ -18,7 +18,7 @@
 //!   `.await`. Both lockers always acquire them in the same order
 //!   (initiator → loss) so there is no deadlock cycle.
 
-use crate::broadcaster::{ViewerRx, ViewerRxError};
+use crate::broadcaster::{ViewerRx, ViewerRxError, RATE_DEFAULT_CAP};
 use crate::ingest::TsMessage;
 use crate::session::{route_release_data, send_action, LossInjector};
 use crate::srt_sender::SrtInitiator;
@@ -36,9 +36,13 @@ use wtransport::Connection;
 /// Hard ceiling on viewer messages drained per tick, regardless of the
 /// stream's measured rate. Prevents runaway bursts.
 const MAX_MSGS_PER_TICK: usize = 256;
-/// Ticker cadence: one tick every 2ms → 500 ticks/sec. Used to convert the
-/// broadcaster's EWMA messages/sec estimate into a per-tick cap.
+/// Ticker cadence: one tick every 2ms → 500 ticks/sec. Used to derive the
+/// fallback drain rate for unmeasured streams.
 const TICKS_PER_SEC: u32 = 500;
+/// Fallback drain rate (messages/sec) for unmeasured/unknown streams:
+/// RATE_DEFAULT_CAP per tick at the nominal `TICKS_PER_SEC`. Lets new
+/// streams still drain while the broadcaster's EWMA warms up.
+const DRAIN_DEFAULT_RATE: f64 = RATE_DEFAULT_CAP as f64 * TICKS_PER_SEC as f64;
 /// Max sessions ticked in parallel inside one `tick_all`. Bounds the parallel
 /// phase so 500 sessions don't become 500 concurrent SRT ticks.
 const TICK_CONCURRENCY: usize = 16;
@@ -53,6 +57,10 @@ pub(crate) struct SessionEntry {
     /// held across an `.await` (locked only for `try_recv`). `None` for
     /// publish-only sessions that have no downstream to drain.
     pub viewer: StdMutex<Option<ViewerRx>>,
+    /// Fractional viewer-drain budget (messages) carried between ticks so the
+    /// per-tick drain tracks the stream's rate over the actual elapsed time.
+    /// Ticker-exclusive and uncontended: one ticker task mutates it.
+    pub drain_credits: StdMutex<f64>,
     pub session_id: u64,
     pub shutdown: Arc<Notify>,
     pub finished: AtomicBool,
@@ -87,6 +95,10 @@ pub(crate) struct SessionEntry {
 /// ticker task spawned in [`crate::gateway::Gateway::run`].
 pub(crate) struct SessionRegistry {
     entries: RwLock<HashMap<u64, Arc<SessionEntry>>>,
+    /// Timestamp of the previous `tick_all`, for measuring the actual
+    /// inter-tick elapsed time (the ticker's `MissedTickBehavior::Delay`
+    /// means overshoots make real intervals longer than the nominal 2ms).
+    last_tick: StdMutex<Option<Instant>>,
     last_stats_log: StdMutex<Option<Instant>>,
     tick_count: AtomicU64,
     tick_total_us: AtomicU64,
@@ -97,6 +109,7 @@ impl SessionRegistry {
     pub fn new() -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
+            last_tick: StdMutex::new(None),
             last_stats_log: StdMutex::new(None),
             tick_count: AtomicU64::new(0),
             tick_total_us: AtomicU64::new(0),
@@ -150,6 +163,12 @@ impl SessionRegistry {
                 stream_name: e.stream_name.clone(),
                 messages_pushed: e.messages_pushed.load(Ordering::Relaxed),
                 viewer_lag_count: e.viewer_lag_count.load(Ordering::Relaxed),
+                buffer_lag: e
+                    .viewer
+                    .lock()
+                    .as_ref()
+                    .map(|v| v.buffer_lag())
+                    .unwrap_or(0),
                 publish_dropped: e.publish_dropped.load(Ordering::Relaxed),
                 srt: e
                     .last_srt_stats
@@ -183,6 +202,16 @@ impl SessionRegistry {
         let entries = self.snapshot();
         let mut to_remove: Vec<u64> = Vec::new();
 
+        let elapsed = {
+            let mut lt = self.last_tick.lock();
+            let e = match *lt {
+                Some(prev) => now.saturating_duration_since(prev),
+                None => Duration::from_millis(2), // nominal tick interval on the first tick
+            };
+            *lt = Some(now);
+            e
+        };
+
         let should_log_stats = {
             let mut last = self.last_stats_log.lock();
             let should = last
@@ -194,16 +223,16 @@ impl SessionRegistry {
             should
         };
 
-        // Per-stream drain cap, computed once per distinct stream per tick so
-        // N sessions on one stream don't take the stream map + rate-sampler
-        // locks N times.
-        let mut caps: HashMap<String, usize> = HashMap::new();
+        // Per-stream drain rate (messages/sec), computed once per distinct
+        // stream per tick so N sessions on one stream don't take the stream
+        // map + rate-sampler locks N times.
+        let mut rates: HashMap<String, f64> = HashMap::new();
         for entry in &entries {
-            if !caps.contains_key(&entry.stream_name) {
-                let cap = streams
-                    .msg_rate_per_tick(&entry.stream_name, TICKS_PER_SEC)
-                    .min(MAX_MSGS_PER_TICK);
-                caps.insert(entry.stream_name.clone(), cap);
+            if !rates.contains_key(&entry.stream_name) {
+                rates.insert(
+                    entry.stream_name.clone(),
+                    streams.ewma_rate(&entry.stream_name),
+                );
             }
         }
 
@@ -213,11 +242,11 @@ impl SessionRegistry {
         // and remove() (below), never during the parallel phase.
         let results: Vec<(u64, bool)> = futures::stream::iter(entries.iter().cloned())
             .map(|entry| {
-                // Mirror msg_rate_per_tick's unknown-stream fallback; the name
-                // is always present (caps was built from this same snapshot).
-                let cap = caps.get(&entry.stream_name).copied().unwrap_or(32);
+                // 0.0 for unknown streams; tick_one falls back to the
+                // default drain rate in that case.
+                let rate = rates.get(&entry.stream_name).copied().unwrap_or(0.0);
                 async move {
-                    let finished = tick_one(&entry, now, cap).await;
+                    let finished = tick_one(&entry, now, elapsed, rate).await;
                     (entry.session_id, finished)
                 }
             })
@@ -277,7 +306,12 @@ impl SessionRegistry {
 /// from the registry. Runs concurrently with other sessions' `tick_one`
 /// calls (bounded by `TICK_CONCURRENCY`); per-session locks (initiator,
 /// loss) are never shared across sessions.
-async fn tick_one(entry: &Arc<SessionEntry>, now: Instant, cap: usize) -> bool {
+async fn tick_one(
+    entry: &Arc<SessionEntry>,
+    now: Instant,
+    elapsed: Duration,
+    ewma_rate: f64,
+) -> bool {
     if entry.finished.load(Ordering::Relaxed) {
         return true;
     }
@@ -292,9 +326,24 @@ async fn tick_one(entry: &Arc<SessionEntry>, now: Instant, cap: usize) -> bool {
                     v.drop_backlog();
                 }
             }
+            // Credit-based budget: rate × actual inter-tick elapsed, carried
+            // as a per-session fractional credit so the drain tracks the
+            // stream's production even when the ticker overshoots 2ms.
+            let rate = if ewma_rate > 0.0 {
+                ewma_rate
+            } else {
+                DRAIN_DEFAULT_RATE
+            };
+            let to_drain = {
+                let mut c = entry.drain_credits.lock();
+                *c += rate * elapsed.as_secs_f64();
+                let t = c.floor() as usize;
+                *c -= t as f64;
+                t.min(MAX_MSGS_PER_TICK)
+            };
             let mut viewer = entry.viewer.lock();
             if let Some(v) = viewer.as_mut() {
-                for _ in 0..cap {
+                for _ in 0..to_drain {
                     match v.try_recv() {
                         Ok(Some(m)) => {
                             let now = Instant::now();
@@ -397,7 +446,10 @@ mod tests {
             .with_server_certificate_hashes([Sha256Digest::new(hash)])
             .build();
         let client_endpoint = Endpoint::client(client_config).unwrap();
-        let url = format!("https://localhost:{port}/wt");
+        // Dial 127.0.0.1, not localhost: `localhost` can resolve to ::1 first
+        // and the server binds IPv4-only 127.0.0.1, so a ::1 dial never
+        // connects and the handshake hangs (see e2e.rs for the same note).
+        let url = format!("https://127.0.0.1:{port}/wt");
         let connect_task = tokio::spawn(async move {
             let _ = client_endpoint.connect(url).await;
         });
@@ -425,6 +477,7 @@ mod tests {
             ))),
             loss: Arc::new(Mutex::new(LossInjector::new(0, 0))),
             viewer: StdMutex::new(None),
+            drain_credits: StdMutex::new(0.0),
             session_id,
             shutdown: Arc::new(Notify::new()),
             finished: AtomicBool::new(false),
@@ -499,6 +552,7 @@ mod tests {
             initiator: Arc::new(Mutex::new(initiator)),
             loss: Arc::new(Mutex::new(LossInjector::new(0, 0))),
             viewer: StdMutex::new(viewer),
+            drain_credits: StdMutex::new(0.0),
             session_id,
             shutdown: Arc::new(Notify::new()),
             finished: AtomicBool::new(false),

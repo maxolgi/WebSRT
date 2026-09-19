@@ -113,6 +113,9 @@ pub struct SessionStats {
     pub stream_name: String,
     pub messages_pushed: u64,
     pub viewer_lag_count: u64,
+    /// Messages buffered in the viewer's broadcast ring (how far behind the
+    /// live edge this session is); 0 for publish-only sessions.
+    pub buffer_lag: usize,
     pub publish_dropped: u64,
     pub srt: Option<SrtStatsSnapshot>,
 }

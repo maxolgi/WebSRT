@@ -158,6 +158,7 @@ impl BrowserSession {
             initiator: initiator.clone(),
             loss: loss.clone(),
             viewer: StdMutex::new(viewer),
+            drain_credits: StdMutex::new(0.0),
             session_id,
             shutdown: shutdown.clone(),
             finished: AtomicBool::new(false),
