@@ -32,6 +32,8 @@ export class DebugStore {
   readonly mediaCaps = signal<MediaCapResult[]>([]);
   readonly mediaCapsLoading = signal(false);
   readonly history = signal<TimeSeriesBucket[]>([]);
+  readonly timeWindowSec = signal<number>(30);
+  readonly focusTime = signal<number | null>(null);
   readonly panelVisible = signal(false);
   readonly latencyMs = signal(300);
   readonly certMode = signal('unknown');

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { DebugStore } from '../../store'
+import { xForTime, drawFocusLine } from '../../timeline'
 
 interface Props {
   store: DebugStore
@@ -59,7 +60,11 @@ export function RaTimeline({ store, height = 60 }: Props): JSX.Element {
     ctx.fillStyle = '#1a1a1a'
     ctx.fillRect(0, 0, w, h)
 
-    const pts = historyRef.current
+    const all = historyRef.current
+    const refT = all[all.length - 1]?.t
+    const wSec = store.timeWindowSec.value
+    const pts =
+      wSec > 0 && refT !== undefined ? all.filter((p) => p.t >= refT - wSec * 1000) : all
     if (pts.length < 2) return
 
     const t0 = pts[0].t
@@ -80,6 +85,11 @@ export function RaTimeline({ store, height = 60 }: Props): JSX.Element {
     ctx.moveTo(0, h - 2)
     ctx.lineTo(w, h - 2)
     ctx.stroke()
+
+    const ft = store.focusTime.value
+    if (ft !== null && ft >= t0 && ft <= t1) {
+      drawFocusLine(ctx, xForTime(0, w, t0, t1, ft), 0, h)
+    }
   })
 
   return (

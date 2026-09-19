@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { Chart } from 'chart.js'
 import type { DebugStore } from '../../store'
+import { drawFocusLine } from '../../timeline'
 
 interface Props {
   store: DebugStore
@@ -80,6 +81,20 @@ export function PcrChart({ store, height = 120 }: Props): JSX.Element {
             y: { beginAtZero: true, ticks: { color: '#999', font: { size: 10 } } },
           },
         },
+        plugins: [
+          {
+            id: 'focusLine',
+            afterDraw(chart) {
+              const ft = store.focusTime.value
+              if (ft === null) return
+              const s = chart.scales.x
+              if (!s) return
+              const px = s.getPixelForValue(ft)
+              if (px < s.left || px > s.right) return
+              drawFocusLine(chart.ctx, px, s.top, s.bottom)
+            },
+          },
+        ],
       })
 
       intervalId = setInterval(() => {
@@ -90,9 +105,16 @@ export function PcrChart({ store, height = 120 }: Props): JSX.Element {
           const next = [...histRef.current, { x: performance.now(), y: interval }]
           histRef.current = next.length > MAX_POINTS ? next.slice(-MAX_POINTS) : next
         }
+        const all = histRef.current
+        const refT = all[all.length - 1]?.x
+        const wSec = store.timeWindowSec.value
+        const view =
+          wSec > 0 && refT !== undefined
+            ? all.filter((p) => p.x >= refT - wSec * 1000)
+            : all
         const ds = chart.data.datasets
-        ds[0].data = histRef.current.slice()
-        ds[1].data = histRef.current.map((p) => ({ x: p.x, y: PCR_TARGET_MS }))
+        ds[0].data = view.slice()
+        ds[1].data = view.map((p) => ({ x: p.x, y: PCR_TARGET_MS }))
         chart.update('none')
       }, UPDATE_MS)
     })()

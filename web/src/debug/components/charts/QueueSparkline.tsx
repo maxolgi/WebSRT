@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { DebugStore } from '../../store'
+import { windowed, xForTime, drawFocusLine } from '../../timeline'
 
 interface Props {
   store: DebugStore
   height?: number
 }
 
+const MAX_POINTS = 120
 const RENDER_TICK_MS = 200
 
 // Decode-queue depth over time, pulled from the sampler's history ring (100ms
@@ -38,7 +40,7 @@ export function QueueSparkline({ store, height = 60 }: Props): JSX.Element {
     ctx.fillStyle = '#1a1a1a'
     ctx.fillRect(0, 0, w, h)
 
-    const history = store.history.value
+    const history = windowed(store.history.value, store.timeWindowSec.value).slice(-MAX_POINTS)
     if (history.length < 2) return
 
     const t0 = history[0].t
@@ -77,12 +79,25 @@ export function QueueSparkline({ store, height = 60 }: Props): JSX.Element {
 
     drawLine('videoQueueDepth', '#fc6')
     drawLine('audioQueueDepth', '#6cf')
+
+    const ft = store.focusTime.value
+    if (ft !== null && ft >= t0 && ft <= t1) {
+      drawFocusLine(ctx, xForTime(0, w, t0, t1, ft), 0, h)
+    }
   })
 
   return (
     <div>
       <canvas
         ref={canvasRef}
+        onClick={(e) => {
+          const pts = windowed(store.history.value, store.timeWindowSec.value).slice(-MAX_POINTS)
+          if (pts.length < 2) return
+          const t0 = pts[0].t
+          const t1 = pts[pts.length - 1].t
+          const right = e.currentTarget.clientWidth
+          store.focusTime.value = t0 + ((e.offsetX / right) * (t1 - t0))
+        }}
         style={{ width: '100%', height: `${height}px`, display: 'block' }}
       />
       <div style={{ fontSize: '10px', color: '#888', marginTop: '2px' }}>

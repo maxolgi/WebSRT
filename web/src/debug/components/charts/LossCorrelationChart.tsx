@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { DebugStore } from '../../store'
+import { windowed, xForTime, drawFocusLine } from '../../timeline'
 
 interface Props {
   store: DebugStore
@@ -41,8 +42,10 @@ export function LossCorrelationChart({ store, height = 80 }: Props): JSX.Element
     ctx.fillStyle = '#1a1a1a'
     ctx.fillRect(0, 0, w, height)
 
-    const points = store.history.value.slice(-MAX_POINTS)
+    const points = windowed(store.history.value, store.timeWindowSec.value).slice(-MAX_POINTS)
     if (points.length === 0) return
+    const tMin = points[0].t
+    const tMax = points[points.length - 1].t
 
     const cellW = w / Math.max(points.length, 1)
     const series = [
@@ -68,12 +71,25 @@ export function LossCorrelationChart({ store, height = 80 }: Props): JSX.Element
       ctx.fillStyle = '#000'
       ctx.fillRect(0, yOff, w, 1)
     }
+
+    const ft = store.focusTime.value
+    if (ft !== null && ft >= tMin && ft <= tMax) {
+      drawFocusLine(ctx, xForTime(0, w, tMin, tMax, ft), 0, height)
+    }
   })
 
   return (
     <div>
       <canvas
         ref={canvasRef}
+        onClick={(e) => {
+          const pts = windowed(store.history.value, store.timeWindowSec.value).slice(-MAX_POINTS)
+          if (pts.length === 0) return
+          const tMin = pts[0].t
+          const tMax = pts[pts.length - 1].t
+          const right = e.currentTarget.clientWidth
+          store.focusTime.value = tMin + ((e.offsetX / right) * (tMax - tMin))
+        }}
         style={{ width: '100%', height: `${height}px`, display: 'block' }}
       />
       <div style={{ display: 'flex', gap: '12px', fontSize: '11px', marginTop: '4px' }}>

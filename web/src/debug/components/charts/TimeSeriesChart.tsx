@@ -3,6 +3,7 @@ import type { JSX } from 'preact'
 import type { Chart } from 'chart.js'
 import type { DebugStore } from '../../store'
 import type { TimeSeriesBucket } from '../../types'
+import { windowed, drawFocusLine } from '../../timeline'
 
 interface Props {
   store: DebugStore
@@ -60,7 +61,11 @@ export function TimeSeriesChart({
           datasets: [
             {
               label,
-              data: extractPoints(store.history.value, field, transformRef.current),
+              data: extractPoints(
+                windowed(store.history.value, store.timeWindowSec.value),
+                field,
+                transformRef.current,
+              ),
               borderColor: color,
               borderWidth: 1.5,
               pointRadius: 0,
@@ -73,6 +78,11 @@ export function TimeSeriesChart({
           animation: false,
           responsive: true,
           maintainAspectRatio: false,
+          onClick: (evt, _els, chart) => {
+            if (evt.x == null) return
+            const v = chart.scales.x.getValueForPixel(evt.x)
+            store.focusTime.value = typeof v === 'number' && isFinite(v) ? v : null
+          },
           plugins: {
             legend: { display: false },
             tooltip: {
@@ -94,13 +104,31 @@ export function TimeSeriesChart({
             },
           },
         },
+        plugins: [
+          {
+            id: 'focusLine',
+            afterDraw(chart) {
+              const ft = store.focusTime.value
+              if (ft === null) return
+              const s = chart.scales.x
+              if (!s) return
+              const px = s.getPixelForValue(ft)
+              if (px < s.left || px > s.right) return
+              drawFocusLine(chart.ctx, px, s.top, s.bottom)
+            },
+          },
+        ],
       })
 
       intervalId = setInterval(() => {
         if (!chart) return
         const ds = chart.data.datasets
         if (ds.length > 0) {
-          ds[0].data = extractPoints(store.history.value, field, transformRef.current)
+          ds[0].data = extractPoints(
+            windowed(store.history.value, store.timeWindowSec.value),
+            field,
+            transformRef.current,
+          )
         }
         chart.update('none')
       }, UPDATE_MS)

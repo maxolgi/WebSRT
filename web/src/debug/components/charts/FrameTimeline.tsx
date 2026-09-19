@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { DebugStore } from '../../store'
+import { windowed, xForTime, drawFocusLine } from '../../timeline'
 
 interface Props {
   store: DebugStore
@@ -52,8 +53,10 @@ export function FrameTimeline({ store, height = 80 }: Props): JSX.Element {
       if (f > 0) ctx.fillText(`${f}`, 2, y - 1)
     }
 
-    const points = store.history.value.slice(-MAX_POINTS)
+    const points = windowed(store.history.value, store.timeWindowSec.value).slice(-MAX_POINTS)
     if (points.length === 0) return
+    const tMin = points[0].t
+    const tMax = points[points.length - 1].t
 
     const stepX = w / Math.max(points.length - 1, 1)
 
@@ -78,11 +81,24 @@ export function FrameTimeline({ store, height = 80 }: Props): JSX.Element {
     ctx.strokeStyle = avgFps >= 25 ? '#6f6' : avgFps >= 15 ? '#fc6' : '#f66'
     ctx.lineWidth = 1
     ctx.stroke()
+
+    const ft = store.focusTime.value
+    if (ft !== null && ft >= tMin && ft <= tMax) {
+      drawFocusLine(ctx, xForTime(0, w, tMin, tMax, ft), 0, h)
+    }
   })
 
   return (
     <canvas
       ref={canvasRef}
+      onClick={(e) => {
+        const pts = windowed(store.history.value, store.timeWindowSec.value).slice(-MAX_POINTS)
+        if (pts.length === 0) return
+        const tMin = pts[0].t
+        const tMax = pts[pts.length - 1].t
+        const right = e.currentTarget.clientWidth
+        store.focusTime.value = tMin + ((e.offsetX / right) * (tMax - tMin))
+      }}
       style={{ width: '100%', height: `${height}px`, display: 'block' }}
     />
   )
