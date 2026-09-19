@@ -30,7 +30,7 @@ use wtransport::{ClientConfig, Connection, Endpoint};
 
 use websrt::cert::{Cert, CertSource};
 use websrt::ingest::TsMessage;
-use websrt::Gateway;
+use websrt::{Gateway, GatewayLimits};
 
 const LOCAL: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 /// Dummy peer address passed to the client-side SRT state machine. srt-protocol
@@ -327,5 +327,100 @@ async fn gateway_rejects_publish_to_live_stream() {
     drop(conn);
 
     drop(publish_tx);
+    shutdown_gateway(shutdown_tx, gateway_handle).await;
+}
+
+/// Ticker scalability: 50 real loopback viewer sessions on one stream must
+/// keep each `tick_all` under the 5ms budget (2ms tick interval) and must not
+/// lag the viewer fanout. Guards against head-of-line blocking in the
+/// centralized ticker at viewer counts far beyond the default cap.
+#[tokio::test]
+#[ignore = "real QUIC loopback — run locally: cargo test -p websrt --features e2e --test e2e -- --ignored"]
+async fn ticker_stays_fast_with_many_viewers() {
+    const N: usize = 50;
+    init_tracing();
+    let port = ephemeral_port();
+    let (identity, hash) = make_cert().await;
+    let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let gateway = Gateway::builder()
+        .bind_addr(bind)
+        .identity(identity)
+        .max_viewers(N)
+        .max_idle_timeout(Duration::from_secs(10))
+        .handshake_timeout(Duration::from_secs(5))
+        .limits(
+            GatewayLimits::builder()
+                .max_sessions_per_ip(None)
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .expect("gateway build");
+
+    let source = gateway.source_handle();
+    let publish_tx = source.publish("test");
+    let stats_handle = gateway.stats_handle();
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let gateway_handle = tokio::spawn(async move {
+        gateway
+            .run(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // All 50 viewers connect + complete the SRT handshake concurrently.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let conns: Vec<Connection> = futures::future::join_all(
+        (0..N)
+            .map(|_| async move {
+                let conn = connect_client(port, hash, "/wt?stream=test").await;
+                drive_handshake(&conn, deadline).await;
+                conn
+            })
+            .collect::<Vec<_>>(),
+    )
+    .await;
+
+    // Let the ticker prime the first-connect backlog drop so the messages we
+    // feed are what the viewers drain.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Feed 188-byte TS packets at ~1000 msg/s — modest by streaming standards,
+    // but 50× fanned out through the ticker.
+    let mut ts = vec![0x47u8];
+    ts.resize(188, 0);
+    let ts = Bytes::from(ts);
+    let feed = tokio::spawn(async move {
+        let mut tx = publish_tx;
+        for _ in 0..700 {
+            if tx.send((Instant::now(), ts.clone())).await.is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_micros(1000)).await;
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    feed.await.expect("feed task");
+
+    let stats = stats_handle.stats();
+    assert_eq!(
+        stats.per_session.len(),
+        N,
+        "all viewer sessions must still be active"
+    );
+    let lag: u64 = stats.per_session.iter().map(|s| s.viewer_lag_count).sum();
+    assert_eq!(lag, 0, "no viewer may lag behind the broadcast ring");
+    let pushed: u64 = stats.per_session.iter().map(|s| s.messages_pushed).sum();
+    assert!(pushed > 0, "data must have flowed to viewers");
+    assert!(
+        stats.ticker_max_us < 5000,
+        "ticker max {}us exceeded the 5ms budget",
+        stats.ticker_max_us
+    );
+
+    drop(conns);
     shutdown_gateway(shutdown_tx, gateway_handle).await;
 }

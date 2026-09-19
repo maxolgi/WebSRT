@@ -2,8 +2,10 @@
 //!
 //! One ticker task drives all sessions' SRT state machines, eliminating
 //! N separate 2ms interval timers (at 500 viewers that's ~250k timer wakeups/s
-//! avoided). Per-session `recv_pump` tasks remain — they're cheap, blocking
-//! on WT datagram receive.
+//! avoided). Sessions are ticked with bounded concurrency
+//! (`TICK_CONCURRENCY`) so one slow session cannot hold up the rest of the
+//! tick. Per-session `recv_pump` tasks remain — they're cheap, blocking on
+//! WT datagram receive.
 //!
 //! Lock strategy:
 //! - `entries` lives behind a `parking_lot::RwLock` — insert/remove from the
@@ -21,6 +23,7 @@ use crate::ingest::TsMessage;
 use crate::session::{route_release_data, send_action, LossInjector};
 use crate::srt_sender::SrtInitiator;
 use crate::stream_registry::StreamRegistry;
+use futures::StreamExt;
 use parking_lot::{Mutex as StdMutex, RwLock};
 use srt_protocol::statistics::SocketStatistics;
 use std::collections::HashMap;
@@ -36,6 +39,9 @@ const MAX_MSGS_PER_TICK: usize = 256;
 /// Ticker cadence: one tick every 2ms → 500 ticks/sec. Used to convert the
 /// broadcaster's EWMA messages/sec estimate into a per-tick cap.
 const TICKS_PER_SEC: u32 = 500;
+/// Max sessions ticked in parallel inside one `tick_all`. Bounds the parallel
+/// phase so 500 sessions don't become 500 concurrent SRT ticks.
+const TICK_CONCURRENCY: usize = 16;
 
 /// All per-session state shared between the recv_pump task and the centralized
 /// ticker. Held inside `Arc` so both can reference it concurrently.
@@ -188,93 +194,39 @@ impl SessionRegistry {
             should
         };
 
-        for (idx, entry) in entries.iter().enumerate() {
-            if idx > 0 && idx % 32 == 0 {
-                tokio::task::yield_now().await;
+        // Per-stream drain cap, computed once per distinct stream per tick so
+        // N sessions on one stream don't take the stream map + rate-sampler
+        // locks N times.
+        let mut caps: HashMap<String, usize> = HashMap::new();
+        for entry in &entries {
+            if !caps.contains_key(&entry.stream_name) {
+                let cap = streams
+                    .msg_rate_per_tick(&entry.stream_name, TICKS_PER_SEC)
+                    .min(MAX_MSGS_PER_TICK);
+                caps.insert(entry.stream_name.clone(), cap);
             }
-            if entry.finished.load(Ordering::Relaxed) {
-                to_remove.push(entry.session_id);
-                continue;
-            }
+        }
 
-            let (actions, data) = {
-                let mut init = entry.initiator.lock().await;
-                let (mut actions, mut data) = init.tick(now);
-                if init.is_connected() {
-                    if !entry.viewer_primed.swap(true, Ordering::Relaxed) {
-                        let mut viewer = entry.viewer.lock();
-                        if let Some(v) = viewer.as_mut() {
-                            v.drop_backlog();
-                        }
-                    }
-                    let cap = streams
-                        .msg_rate_per_tick(&entry.stream_name, TICKS_PER_SEC)
-                        .min(MAX_MSGS_PER_TICK);
-                    for _ in 0..cap {
-                        let maybe_msg = {
-                            let mut viewer = entry.viewer.lock();
-                            viewer.as_mut().map(|v| v.try_recv())
-                        };
-                        match maybe_msg {
-                            Some(Ok(Some(m))) => {
-                                let now = Instant::now();
-                                let (a, d) = init.push_message(m, now);
-                                actions.extend(a);
-                                data.extend(d);
-                                entry.messages_pushed.fetch_add(1, Ordering::Relaxed);
-                            }
-                            Some(Ok(None)) => break,
-                            Some(Err(ViewerRxError::Lagged(lag))) => {
-                                tracing::warn!(
-                                    session_id = entry.session_id,
-                                    lag,
-                                    "viewer lagged; messages dropped"
-                                );
-                                entry.viewer_lag_count.fetch_add(1, Ordering::Relaxed);
-                                break;
-                            }
-                            Some(Err(ViewerRxError::Closed)) => {
-                                // Stream source ended. Tear down the viewer
-                                // session (same path as the SRT Close action
-                                // below): recv_pump closes the WT connection,
-                                // which the browser surfaces as `wtClosed` so
-                                // its auto-reconnect can resubscribe.
-                                tracing::info!(
-                                    session_id = entry.session_id,
-                                    stream = %entry.stream_name,
-                                    "stream ended; closing viewer session"
-                                );
-                                entry.finished.store(true, Ordering::Relaxed);
-                                entry.shutdown.notify_waiters();
-                                break;
-                            }
-                            None => break,
-                        }
-                    }
+        // Bounded-concurrency tick: independent sessions run in parallel
+        // (at most TICK_CONCURRENCY at a time) so one slow session can't hold
+        // up the rest. The registry lock is only held for snapshot() (above)
+        // and remove() (below), never during the parallel phase.
+        let results: Vec<(u64, bool)> = futures::stream::iter(entries.iter().cloned())
+            .map(|entry| {
+                // Mirror msg_rate_per_tick's unknown-stream fallback; the name
+                // is always present (caps was built from this same snapshot).
+                let cap = caps.get(&entry.stream_name).copied().unwrap_or(32);
+                async move {
+                    let finished = tick_one(&entry, now, cap).await;
+                    (entry.session_id, finished)
                 }
-                if let Some(s) = init.stats() {
-                    *entry.last_srt_stats.lock() = Some(s.clone());
-                }
-                (actions, data)
-            };
-
-            for (ts, bytes) in data {
-                route_release_data(entry, ts, &bytes);
-            }
-
-            {
-                let mut loss = entry.loss.lock().await;
-                for action in actions {
-                    if matches!(action, crate::srt_sender::SenderAction::Close) {
-                        entry.finished.store(true, Ordering::Relaxed);
-                        entry.shutdown.notify_waiters();
-                    }
-                    let _ = send_action(&entry.conn, action, &mut loss);
-                }
-            }
-
-            if entry.finished.load(Ordering::Relaxed) {
-                to_remove.push(entry.session_id);
+            })
+            .buffer_unordered(TICK_CONCURRENCY)
+            .collect()
+            .await;
+        for (id, finished) in results {
+            if finished {
+                to_remove.push(id);
             }
         }
 
@@ -318,6 +270,90 @@ impl SessionRegistry {
             );
         }
     }
+}
+
+/// Drive one session's SRT state machine once and dispatch the resulting
+/// actions. Returns true if the session is finished and should be pruned
+/// from the registry. Runs concurrently with other sessions' `tick_one`
+/// calls (bounded by `TICK_CONCURRENCY`); per-session locks (initiator,
+/// loss) are never shared across sessions.
+async fn tick_one(entry: &Arc<SessionEntry>, now: Instant, cap: usize) -> bool {
+    if entry.finished.load(Ordering::Relaxed) {
+        return true;
+    }
+
+    let (actions, data) = {
+        let mut init = entry.initiator.lock().await;
+        let (mut actions, mut data) = init.tick(now);
+        if init.is_connected() {
+            if !entry.viewer_primed.swap(true, Ordering::Relaxed) {
+                let mut viewer = entry.viewer.lock();
+                if let Some(v) = viewer.as_mut() {
+                    v.drop_backlog();
+                }
+            }
+            let mut viewer = entry.viewer.lock();
+            if let Some(v) = viewer.as_mut() {
+                for _ in 0..cap {
+                    match v.try_recv() {
+                        Ok(Some(m)) => {
+                            let now = Instant::now();
+                            let (a, d) = init.push_message(m, now);
+                            actions.extend(a);
+                            data.extend(d);
+                            entry.messages_pushed.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(None) => break,
+                        Err(ViewerRxError::Lagged(lag)) => {
+                            tracing::warn!(
+                                session_id = entry.session_id,
+                                lag,
+                                "viewer lagged; messages dropped"
+                            );
+                            entry.viewer_lag_count.fetch_add(1, Ordering::Relaxed);
+                            break;
+                        }
+                        Err(ViewerRxError::Closed) => {
+                            // Stream source ended. Tear down the viewer
+                            // session (same path as the SRT Close action
+                            // below): recv_pump closes the WT connection,
+                            // which the browser surfaces as `wtClosed` so
+                            // its auto-reconnect can resubscribe.
+                            tracing::info!(
+                                session_id = entry.session_id,
+                                stream = %entry.stream_name,
+                                "stream ended; closing viewer session"
+                            );
+                            entry.finished.store(true, Ordering::Relaxed);
+                            entry.shutdown.notify_waiters();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(s) = init.stats() {
+            *entry.last_srt_stats.lock() = Some(s.clone());
+        }
+        (actions, data)
+    };
+
+    for (ts, bytes) in data {
+        route_release_data(entry, ts, &bytes);
+    }
+
+    {
+        let mut loss = entry.loss.lock().await;
+        for action in actions {
+            if matches!(action, crate::srt_sender::SenderAction::Close) {
+                entry.finished.store(true, Ordering::Relaxed);
+                entry.shutdown.notify_waiters();
+            }
+            let _ = send_action(&entry.conn, action, &mut loss);
+        }
+    }
+
+    entry.finished.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]
