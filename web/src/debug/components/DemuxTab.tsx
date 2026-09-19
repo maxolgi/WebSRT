@@ -26,8 +26,6 @@ const SUB_TABS = [
   { id: 'charts', label: 'Charts' },
 ] as const;
 
-type DemuxSub = (typeof SUB_TABS)[number]['id'];
-
 interface Props {
   store: DebugStore;
 }
@@ -39,19 +37,16 @@ export function DemuxTab({ store }: Props): JSX.Element {
     return () => clearInterval(id);
   }, []);
 
-  const [subTab, setSubTab] = useState<DemuxSub>(() => {
-    const { tab, demuxSub } = readHash();
-    const hit = tab === 'demux' ? SUB_TABS.find((t) => t.id === demuxSub) : undefined;
-    return hit ? hit.id : 'streams';
-  });
+  const subTab = store.demuxSubTab.value;
   useEffect(() => {
-    const onHash = () => {
+    const applySub = () => {
       const { tab, demuxSub } = readHash();
       const hit = tab === 'demux' ? SUB_TABS.find((t) => t.id === demuxSub) : undefined;
-      if (hit) setSubTab(hit.id);
+      if (hit) store.demuxSubTab.value = hit.id;
     };
-    window.addEventListener('hashchange', onHash);
-    return () => window.removeEventListener('hashchange', onHash);
+    applySub();
+    window.addEventListener('hashchange', applySub);
+    return () => window.removeEventListener('hashchange', applySub);
   }, []);
 
   const d = store.demuxStats.value;
@@ -91,7 +86,7 @@ export function DemuxTab({ store }: Props): JSX.Element {
           <button
             key={t.id}
             class={`debug-tab ${subTab === t.id ? 'active' : ''}`}
-            onClick={() => { setSubTab(t.id); writeHash('demux', t.id); }}
+            onClick={() => { store.demuxSubTab.value = t.id; writeHash('demux', t.id); }}
           >
             {t.label}
           </button>

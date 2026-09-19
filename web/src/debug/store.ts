@@ -36,6 +36,7 @@ export class DebugStore {
   readonly certMode = signal('unknown');
   readonly consoleErrors = signal<string[]>([]);
   readonly activeTab = signal<string>('stream');
+  readonly demuxSubTab = signal<string>('streams');
   readonly testActions = signal<TestActions | null>(null);
   readonly status = signal('idle');
   readonly logEntries = signal<LogEntry[]>([]);
