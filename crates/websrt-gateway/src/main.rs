@@ -104,7 +104,7 @@ pub struct Cli {
     #[arg(long, default_value_t = 9000u16)]
     pub srt_port: u16,
 
-    /// Bind address for the SRT listen port. Must be loopback unless --srt-passphrase is set.
+    /// Bind address for the SRT listen port.
     #[arg(long, default_value = "127.0.0.1")]
     pub srt_bind: String,
 
@@ -530,11 +530,10 @@ pub(crate) async fn run_gateway(
                     .parse()
                     .map_err(|e| anyhow::anyhow!("invalid --srt-bind {srt_bind}: {e}"))?;
                 if !bind_ip.is_loopback() && srt_passphrase.is_none() {
-                    anyhow::bail!(
-                        "--srt-bind {srt_bind} is a public (non-loopback) address; \
-                         --srt-passphrase is required for SRT ingest on a public bind \
-                         (unencrypted public ingest allows arbitrary stream creation). \
-                         Use --srt-bind 127.0.0.1 for local-only ingest"
+                    tracing::warn!(
+                        bind = %srt_bind,
+                        "SRT ingest on a public (non-loopback) bind without --srt-passphrase: \
+                         ingest is unencrypted and any client may claim a new stream name"
                     );
                 }
             }
