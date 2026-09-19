@@ -26,6 +26,8 @@ Options:
       --fixture-duration <DUR>   Duration of the fixture in seconds (for real-time pacing) [default: 10.0]
       --srt-mode <SRT_MODE>      SRT connection mode [default: listener] [possible values: listener, caller]
       --srt-port <SRT_PORT>      SRT listen port (when --input srt --srt-mode listener) [default: 9000]
+      --srt-bind <SRT_BIND>      Bind address for the SRT listen port. Must be loopback unless
+                                 --srt-passphrase is set [default: 127.0.0.1]
       --srt-call <SRT_CALL>      Address to dial when --srt-mode caller (e.g. 192.168.1.3:1234)
       --srt-streamid <STREAMID>  SRT stream id. Listener mode: only accept connections matching this id.
                                  Caller mode: sent to OBS during connection
@@ -43,6 +45,9 @@ Options:
       --health-bind <BIND>       Bind address for the HTTP health/metrics server [default: 127.0.0.1]
       --auth-token <TOKEN>       Auth token for viewer connections. If set, browsers must pass
                                  ?token=<value>
+      --allowed-origins <O>      Allowed Origin headers for WebTransport requests (repeatable).
+                                 If set, requests from other origins are rejected; if not set,
+                                 all origins are allowed
       --max-viewers <N>          Maximum concurrent viewers per stream [default: 16]
 
 Only with the `sim-loss` feature:
